@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adas_common</name>
+  <version>0.0.2</version>
+  <description>无 ROS 依赖的 header-only 基础库：几何/PID/限幅/滤波/查表 + 共享纯数据结构</description>
+  <maintainer email="dev@adas.local">adas</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

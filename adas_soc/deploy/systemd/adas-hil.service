@@ -1,0 +1,59 @@
+[Unit]
+Description=ADAS HIL control stack
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+# 允许持续拉起：60s 内最多 8 次；仍然崩环则保持 failed。进程重启
+# 只恢复软件；v3 session（2026-07 重构后自驱授权）在 CAN 流新鲜稳定后
+# 会自动从 ANNOUNCE 推进到 ACTIVE，无需人工 ARM/REARM 或物理按钮。
+StartLimitIntervalSec=60
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+EnvironmentFile=/etc/adas/adas-hil.env
+RuntimeDirectory=adas
+LogsDirectory=adas
+WorkingDirectory=/opt/adas/current
+ExecStartPre=/bin/bash -lc 'test -r /opt/ros/${ADAS_ROS_DISTRO}/setup.bash && test -r ${ADAS_INSTALL_PREFIX}/setup.bash && test -r ${ADAS_PARAMS_FILE}'
+ExecStartPre=/bin/bash -lc 'python3 ${ADAS_WORKSPACE}/tools/release_integrity.py verify ${ADAS_WORKSPACE} ${ADAS_RELEASE_MANIFEST} --protocol-version ${ADAS_PROTOCOL_VERSION}'
+ExecStart=/bin/bash -lc 'source /opt/ros/${ADAS_ROS_DISTRO}/setup.bash && source ${ADAS_INSTALL_PREFIX}/setup.bash && exec ros2 launch adas_launch can_hil.launch.py params_file:=${ADAS_PARAMS_FILE}'
+# always：无论被 SIGKILL、OOM、崩溃还是意外正常退出都自动拉起。
+# can_gateway 持久化 session id，重启后继续与 MCU 的既有会话自动握手；
+# 即使 systemctl stop 绕过 Restart，keeper timer 也会再次启动本服务。
+Restart=always
+RestartSec=2
+TimeoutStartSec=45
+TimeoutStopSec=20
+KillSignal=SIGINT
+KillMode=mixed
+OOMPolicy=continue
+
+# 实时性：控制栈整树 SCHED_FIFO 10，独占 CPU 2/3（GUI/日志等留 0/1）。
+# 优先级刻意低于内核关键线程；节点内部可用 LimitRTPRIO 自行提升到 ≤90。
+CPUAffinity=2 3
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=10
+CPUQuota=200%
+MemoryMax=2G
+TasksMax=512
+LimitRTPRIO=90
+LimitMEMLOCK=infinity
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/log/adas /run/adas
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_CAN
+CapabilityBoundingSet=CAP_NET_RAW CAP_SYS_NICE CAP_IPC_LOCK
+AmbientCapabilities=CAP_NET_RAW CAP_SYS_NICE CAP_IPC_LOCK
+
+StandardOutput=append:/var/log/adas/control-stack.log
+StandardError=append:/var/log/adas/control-stack.log
+
+[Install]
+WantedBy=multi-user.target

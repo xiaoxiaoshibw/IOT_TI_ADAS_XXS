@@ -1,0 +1,9 @@
+{
+  "desc": "ADAS IoT monitor pages",
+  "rules": [
+    {
+      "action": "allow",
+      "page": "*"
+    }
+  ]
+}

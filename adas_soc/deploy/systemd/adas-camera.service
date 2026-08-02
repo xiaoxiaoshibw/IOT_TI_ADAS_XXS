@@ -1,0 +1,25 @@
+# /etc/systemd/system/adas-camera.service
+# Orin USB 摄像头（icSpring UVC, /dev/video0）ROS2 发布服务。
+# 非安全关键传感器：刻意独立于 adas-hil.service，从常规开发 workspace 加载，
+# 不进入 /opt/adas/current 的完整性校验 release，不影响 HIL 安全栈。
+[Unit]
+Description=ADAS Orin USB camera (v4l2_camera -> /adas/sensors/camera/*)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+EnvironmentFile=/etc/adas/adas-camera.env
+# 设备就绪才启动；不在则 on-failure 重试
+ExecStartPre=/bin/bash -lc 'test -e /dev/video0'
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source /home/jetson/adas/adas_soc_ws/install/setup.bash && exec ros2 launch adas_launch camera.launch.py'
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGINT
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

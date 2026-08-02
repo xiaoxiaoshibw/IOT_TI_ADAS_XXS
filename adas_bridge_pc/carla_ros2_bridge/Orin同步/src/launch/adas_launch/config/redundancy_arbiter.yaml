@@ -1,0 +1,12 @@
+# 冗余仲裁器
+/**:
+  ros__parameters:
+    rate_hz: 100.0
+    cmd_timeout_s: 0.08   # kill 瞬间 DDS 参与者移除有 ~15ms 全局抖动，留裕量（仍 <100ms 验收）
+    recover_stable_s: 1.0
+    takeover_guard_s: 1.0
+    guard_steer_rate_rps: 0.25
+    guard_accel_rate_mps3: 4.0
+    aeb_brake_rate_mps3: 12.0
+    normal_steer_rate_rps: 0.8
+    normal_accel_rate_mps3: 10.0

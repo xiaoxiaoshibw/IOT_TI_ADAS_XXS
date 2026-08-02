@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ADAS 物联网远程监控平台</title>
+<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+<script src="https://cdn.bootcdn.net/ajax/libs/socket.io/4.8.1/socket.io.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.7/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg-primary: #0a0e17;
+  --bg-card: #111827;
+  --bg-card-hover: #1a2332;
+  --border-color: #1e3a5f;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --accent-blue: #3b82f6;
+  --accent-cyan: #06b6d4;
+  --accent-green: #22c55e;
+  --accent-yellow: #eab308;
+  --accent-red: #ef4444;
+  --accent-orange: #f97316;
+  --speed-color: #3b82f6;
+  --brake-color: #ef4444;
+  --throttle-color: #22c55e;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+/* 顶部导航 */
+.top-bar {
+  background: linear-gradient(135deg, #0f1729 0%, #1a2332 100%);
+  border-bottom: 1px solid var(--border-color);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  backdrop-filter: blur(10px);
+}
+.top-bar .brand {
+  font-size: 1.3rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.top-bar .brand i { -webkit-text-fill-color: var(--accent-cyan); }
+.connection-badge {
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.connection-badge.connected {
+  background: rgba(34,197,94,0.15);
+  color: var(--accent-green);
+  border: 1px solid rgba(34,197,94,0.3);
+}
+.connection-badge.disconnected {
+  background: rgba(239,68,68,0.15);
+  color: var(--accent-red);
+  border: 1px solid rgba(239,68,68,0.3);
+}
+.connection-badge .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block;
+}
+.connection-badge.connected .dot { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+.connection-badge.disconnected .dot { background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); }
+
+/* 卡片 */
+.card-dash {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 20px;
+  height: 100%;
+  transition: all 0.3s ease;
+}
+.card-dash:hover { border-color: rgba(59,130,246,0.3); }
+.card-dash .card-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-dash .card-title i { color: var(--accent-cyan); }
+
+/* 速度仪表盘 */
+.speed-gauge {
+  position: relative;
+  text-align: center;
+  padding: 10px 0;
+}
+.speed-gauge .speed-value {
+  font-size: 4rem;
+  font-weight: 800;
+  color: var(--speed-color);
+  line-height: 1;
+  text-shadow: 0 0 30px rgba(59,130,246,0.2);
+}
+.speed-gauge .speed-unit {
+  font-size: 1.2rem;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+.speed-gauge .speed-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+.speed-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(59,130,246,0.1);
+  border-radius: 3px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+.speed-bar .speed-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* 方向盘指示器 */
+.steering-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 8px 0;
+}
+.steering-wheel {
+  width: 80px;
+  height: 80px;
+  border: 3px solid var(--border-color);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.3s ease;
+  background: radial-gradient(circle, var(--bg-card) 40%, transparent 60%);
+}
+.steering-wheel i {
+  font-size: 2rem;
+  color: var(--text-secondary);
+}
+.steering-value {
+  text-align: center;
+  margin-top: 8px;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.steering-value .positive { color: var(--accent-cyan); }
+.steering-value .negative { color: var(--accent-orange); }
+
+/* 制动/油门条 */
+.bar-gauge {
+  margin: 12px 0;
+}
+.bar-gauge .bar-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.bar-gauge .bar-track {
+  width: 100%;
+  height: 20px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+}
+.bar-gauge .bar-fill {
+  height: 100%;
+  border-radius: 10px;
+  transition: width 0.3s ease;
+  position: relative;
+}
+.bar-gauge .bar-fill.brake-fill { background: linear-gradient(90deg, #ef4444, #dc2626); }
+.bar-gauge .bar-fill.throttle-fill { background: linear-gradient(90deg, #22c55e, #16a34a); }
+.bar-gauge .bar-fill .bar-label {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+}
+
+/* 安全状态机 */
+.safety-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+.safety-state {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  transition: all 0.3s ease;
+}
+.safety-state.active {
+  background: rgba(34,197,94,0.15);
+  color: var(--accent-green);
+  border-color: rgba(34,197,94,0.3);
+  box-shadow: 0 0 12px rgba(34,197,94,0.1);
+}
+.safety-state.danger {
+  background: rgba(239,68,68,0.15);
+  color: var(--accent-red);
+  border-color: rgba(239,68,68,0.3);
+  box-shadow: 0 0 12px rgba(239,68,68,0.1);
+}
+.safety-state.warning {
+  background: rgba(234,179,8,0.15);
+  color: var(--accent-yellow);
+  border-color: rgba(234,179,8,0.3);
+}
+
+/* CAN 诊断指标 */
+.diag-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.diag-item {
+  background: rgba(255,255,255,0.03);
+  border-radius: 10px;
+  padding: 12px;
+  text-align: center;
+}
+.diag-item .diag-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+}
+.diag-item .diag-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 告警列表 */
+.alert-list {
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alert-list::-webkit-scrollbar { width: 4px; }
+.alert-list::-webkit-scrollbar-track { background: transparent; }
+.alert-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+.alert-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  animation: slideIn 0.3s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.alert-item.alert-info { background: rgba(59,130,246,0.1); border-left: 3px solid var(--accent-blue); }
+.alert-item.alert-warning { background: rgba(234,179,8,0.1); border-left: 3px solid var(--accent-yellow); }
+.alert-item.alert-danger { background: rgba(239,68,68,0.1); border-left: 3px solid var(--accent-red); }
+.alert-item .alert-time {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  min-width: 60px;
+}
+.alert-item .alert-icon { min-width: 20px; }
+.alert-item.alert-info .alert-icon { color: var(--accent-blue); }
+.alert-item.alert-warning .alert-icon { color: var(--accent-yellow); }
+.alert-item.alert-danger .alert-icon { color: var(--accent-red); }
+
+/* 图表容器 */
+.chart-container {
+  position: relative;
+  height: 160px;
+  width: 100%;
+}
+
+/* 系统信息 */
+.sysinfo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.sysinfo .info-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.sysinfo .info-item .info-label { color: var(--text-secondary); }
+.sysinfo .info-item .info-value { font-weight: 600; }
+
+/* 响应式 */
+@media (max-width: 992px) {
+  .speed-gauge .speed-value { font-size: 3rem; }
+  .diag-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 768px) {
+  .top-bar .brand span { display: none; }
+  .card-dash { padding: 14px; }
+}
+
+/* 模式切换 */
+.mode-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.mode-indicator.simulation {
+  background: rgba(234,179,8,0.1);
+  color: var(--accent-yellow);
+  border: 1px solid rgba(234,179,8,0.2);
+}
+.mode-indicator.live {
+  background: rgba(34,197,94,0.1);
+  color: var(--accent-green);
+  border: 1px solid rgba(34,197,94,0.2);
+}
+</style>
+</head>
+<body>
+
+<!-- 顶部导航栏 -->
+<div class="top-bar">
+  <div class="brand">
+    <i class="fas fa-car"></i>
+    <span>ADAS 物联网远程监控平台</span>
+    <small class="d-none d-md-inline" style="font-size:0.6rem;color:var(--text-secondary);-webkit-text-fill-color:var(--text-secondary);font-weight:400;margin-left:8px;">
+      v1.0 | IoT Competition
+    </small>
+  </div>
+  <div class="d-flex align-items-center gap-3">
+    <span id="modeBadge" class="mode-indicator simulation">
+      <i class="fas fa-microchip"></i> 模拟模式
+    </span>
+    <span id="connBadge" class="connection-badge disconnected">
+      <span class="dot"></span>
+      <span id="connText">未连接</span>
+    </span>
+  </div>
+</div>
+
+<!-- 主内容 -->
+<div class="container-fluid p-3">
+
+  <!-- 第一行：车速 + 转向 + 制动/油门 -->
+  <div class="row g-3 mb-3">
+    <!-- 车速 -->
+    <div class="col-lg-3 col-md-6">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-tachometer-alt"></i> 车速</div>
+        <div class="speed-gauge">
+          <div>
+            <span class="speed-value" id="speedValue">0.0</span>
+            <span class="speed-unit">m/s</span>
+          </div>
+          <div class="speed-label" id="speedKph">0 km/h</div>
+          <div class="speed-bar">
+            <div class="speed-fill" id="speedFill" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 转向 -->
+    <div class="col-lg-3 col-md-6">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-steering-wheel"></i> 转向角</div>
+        <div class="steering-container">
+          <div class="steering-wheel" id="steeringWheel">
+            <i class="fas fa-circle"></i>
+          </div>
+        </div>
+        <div class="steering-value">
+          <span id="steeringValue">0.0</span>
+          <small style="color:var(--text-secondary)">°</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- 制动 + 油门 -->
+    <div class="col-lg-3 col-md-6">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-brake-warning"></i> 制动 &amp; 油门</div>
+        <div class="bar-gauge">
+          <div class="bar-header">
+            <span><i class="fas fa-circle" style="color:var(--brake-color);font-size:0.5rem;"></i> 制动</span>
+            <span id="brakeLabel">0%</span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill brake-fill" id="brakeFill" style="width:0%">
+              <span class="bar-label" id="brakeFillLabel"></span>
+            </div>
+          </div>
+        </div>
+        <div class="bar-gauge">
+          <div class="bar-header">
+            <span><i class="fas fa-circle" style="color:var(--throttle-color);font-size:0.5rem;"></i> 油门</span>
+            <span id="throttleLabel">0%</span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill throttle-fill" id="throttleFill" style="width:0%">
+              <span class="bar-label" id="throttleFillLabel"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 控制源 -->
+    <div class="col-lg-3 col-md-6">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-code-branch"></i> 控制源</div>
+        <div class="d-flex justify-content-around align-items-center" style="height:80px;">
+          <div class="text-center">
+            <div id="sourcePrimary" class="safety-state active" style="font-size:0.85rem;">主源</div>
+            <small style="color:var(--text-secondary);font-size:0.65rem;">Primary</small>
+          </div>
+          <div class="text-center">
+            <div id="sourceBackup" class="safety-state" style="font-size:0.85rem;">备源</div>
+            <small style="color:var(--text-secondary);font-size:0.65rem;">Backup</small>
+          </div>
+        </div>
+        <div class="text-center" style="font-size:0.75rem;color:var(--text-secondary);">
+          <span id="activeSource">等待数据...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 第二行：安全状态 + 图表 + 诊断 -->
+  <div class="row g-3 mb-3">
+    <!-- 安全状态机 -->
+    <div class="col-lg-3">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-shield-alt"></i> 安全状态机</div>
+        <div class="safety-states" id="safetyStates">
+          <span class="safety-state" data-state="INIT">INIT</span>
+          <span class="safety-state" data-state="STANDBY">STANDBY</span>
+          <span class="safety-state" data-state="ACTIVE">ACTIVE</span>
+          <span class="safety-state" data-state="DEGRADED">DEGRADED</span>
+          <span class="safety-state" data-state="MRM">MRM</span>
+          <span class="safety-state" data-state="FAILSAFE">FAILSAFE</span>
+          <span class="safety-state" data-state="EMERGENCY">EMERGENCY</span>
+          <span class="safety-state" data-state="FAULT_LOCK">LOCK</span>
+        </div>
+        <div class="text-center mt-2">
+          <span id="currentState" style="font-size:1.2rem;font-weight:700;color:var(--accent-green);">ACTIVE</span>
+        </div>
+        <div class="mt-2 sysinfo">
+          <div class="info-item"><span class="info-label">故障等级</span><span class="info-value" id="faultLevel">0</span></div>
+          <div class="info-item"><span class="info-label">控制授权</span><span class="info-value" id="controlAuth">是</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 实时速度图 -->
+    <div class="col-lg-5">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-chart-line"></i> 实时速度曲线</div>
+        <div class="chart-container">
+          <canvas id="speedChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- CAN 诊断 -->
+    <div class="col-lg-4">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-network-wired"></i> CAN 总线诊断</div>
+        <div class="diag-grid">
+          <div class="diag-item">
+            <div class="diag-value" id="canFrameRate">0</div>
+            <div class="diag-label">帧接收率 (Hz)</div>
+          </div>
+          <div class="diag-item">
+            <div class="diag-value" id="canPeriod">0</div>
+            <div class="diag-label">周期均值 (ms)</div>
+          </div>
+          <div class="diag-item">
+            <div class="diag-value" id="canCrcErrors">0</div>
+            <div class="diag-label">CRC 错误</div>
+          </div>
+          <div class="diag-item">
+            <div class="diag-value" id="canTimeout">0</div>
+            <div class="diag-label">超时计数</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 第三行：制动/油门图 + 系统信息 + 告警 -->
+  <div class="row g-3">
+    <!-- 制动/油门时序 -->
+    <div class="col-lg-5">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-chart-bar"></i> 制动/油门时序</div>
+        <div class="chart-container">
+          <canvas id="brakeChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- 系统信息 -->
+    <div class="col-lg-3">
+      <div class="card-dash">
+        <div class="card-title"><i class="fas fa-info-circle"></i> 系统信息</div>
+        <div class="sysinfo">
+          <div class="info-item"><span class="info-label">运行模式</span><span class="info-value" id="sysMode">模拟</span></div>
+          <div class="info-item"><span class="info-label">MQTT Broker</span><span class="info-value" id="sysBroker">-</span></div>
+          <div class="info-item"><span class="info-label">数据频率</span><span class="info-value" id="sysRate">10 Hz</span></div>
+          <div class="info-item"><span class="info-label">接收帧数</span><span class="info-value" id="sysFrames">0</span></div>
+          <div class="info-item"><span class="info-label">CPU 负载</span><span class="info-value" id="sysCpu">6.2%</span></div>
+          <div class="info-item"><span class="info-label">运行时间</span><span class="info-value" id="sysUptime">0s</span></div>
+          <div class="info-item"><span class="info-label">ROS2 状态</span><span class="info-value" id="sysRos2">未对接</span></div>
+          <div class="info-item"><span class="info-label">MCU 状态</span><span class="info-value" id="sysMcu">模拟</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 告警日志 -->
+    <div class="col-lg-4">
+      <div class="card-dash">
+        <div class="card-title">
+          <i class="fas fa-bell"></i> 实时告警
+          <button class="btn btn-sm btn-outline-secondary ms-auto" style="padding:2px 8px;font-size:0.7rem;" onclick="clearAlerts()">清空</button>
+        </div>
+        <div class="alert-list" id="alertList">
+          <div class="alert-item alert-info">
+            <span class="alert-time">--:--</span>
+            <span class="alert-icon"><i class="fas fa-info-circle"></i></span>
+            <span>系统启动，等待数据...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 页脚 -->
+  <div class="text-center mt-4 py-3" style="border-top:1px solid var(--border-color);font-size:0.75rem;color:var(--text-secondary);">
+    <i class="fas fa-microchip"></i> ADAS 异构双控故障验证平台 &nbsp;|&nbsp; 
+    <i class="fas fa-cloud"></i> MQTT IoT 遥测 v1.0 &nbsp;|&nbsp; 
+    <span id="footerTime">--</span>
+  </div>
+</div>
+
+<script>
+// ===================== Dashboard 主逻辑 =====================
+const socket = io();
+
+// DOM 引用
+const $ = (id) => document.getElementById(id);
+const speedValue = $('speedValue');
+const speedKph = $('speedKph');
+const speedFill = $('speedFill');
+const steeringWheel = $('steeringWheel');
+const steeringValue = $('steeringValue');
+const brakeFill = $('brakeFill');
+const brakeLabel = $('brakeLabel');
+const throttleFill = $('throttleFill');
+const throttleLabel = $('throttleLabel');
+const connBadge = $('connBadge');
+const connText = $('connText');
+const modeBadge = $('modeBadge');
+const alertList = $('alertList');
+const footerTime = $('footerTime');
+const sysFrames = $('sysFrames');
+
+// 状态
+let frameCount = 0;
+let alerts = [];
+
+// --- 图表初始化 ---
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = 'rgba(30,58,95,0.5)';
+
+// 速度图
+const speedCtx = document.getElementById('speedChart').getContext('2d');
+const speedChart = new Chart(speedCtx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: '车速 (m/s)',
+      data: [],
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,0.1)',
+      borderWidth: 2,
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0,
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 200 },
+    scales: {
+      x: { display: true, grid: { color: 'rgba(30,58,95,0.3)' }, ticks: { maxTicksLimit: 8, font: { size: 9 } } },
+      y: { beginAtZero: true, grid: { color: 'rgba(30,58,95,0.3)' }, ticks: { font: { size: 9 } } }
+    },
+    plugins: { legend: { display: false } }
+  }
+});
+
+// 制动/油门图
+const brakeCtx = document.getElementById('brakeChart').getContext('2d');
+const brakeChart = new Chart(brakeCtx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label: '制动 %', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0 },
+      { label: '油门 %', data: [], borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0 }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 200 },
+    scales: {
+      x: { display: true, grid: { color: 'rgba(30,58,95,0.3)' }, ticks: { maxTicksLimit: 8, font: { size: 9 } } },
+      y: { beginAtZero: true, max: 100, grid: { color: 'rgba(30,58,95,0.3)' }, ticks: { font: { size: 9 } } }
+    },
+    plugins: { legend: { labels: { boxWidth: 10, font: { size: 9 } } } }
+  }
+});
+
+// 图表数据缓冲 (最多 80 点)
+const MAX_POINTS = 80;
+
+// --- Socket.IO 事件 ---
+socket.on('connect', () => {
+  connBadge.className = 'connection-badge connected';
+  connText.textContent = '已连接';
+  addAlert('info', 'Dashboard 已连接到服务器');
+});
+
+socket.on('disconnect', () => {
+  connBadge.className = 'connection-badge disconnected';
+  connText.textContent = '已断开';
+  addAlert('danger', 'Dashboard 与服务器断开');
+});
+
+// 车辆状态更新
+socket.on('vehicle_state', (data) => {
+  frameCount++;
+  sysFrames.textContent = frameCount;
+
+  // 速度
+  const speed = parseFloat(data.speed) || 0;
+  speedValue.textContent = speed.toFixed(1);
+  speedKph.textContent = (speed * 3.6).toFixed(1) + ' km/h';
+  const speedPct = Math.min((speed / 30) * 100, 100);
+  speedFill.style.width = speedPct + '%';
+
+  // 转向
+  const steer = parseFloat(data.steering) || 0;
+  steeringWheel.style.transform = `rotate(${steer}deg)`;
+  steeringValue.textContent = steer.toFixed(1);
+  steeringValue.className = steer >= 0 ? 'positive' : 'negative';
+
+  // 制动
+  const brake = parseFloat(data.brake) || 0;
+  brakeFill.style.width = brake + '%';
+  brakeLabel.textContent = brake.toFixed(1) + '%';
+  if (brake > 0) {
+    brakeFill.querySelector('.bar-label').textContent = brake.toFixed(0) + '%';
+  }
+
+  // 油门
+  const throttle = parseFloat(data.throttle) || 0;
+  throttleFill.style.width = throttle + '%';
+  throttleLabel.textContent = throttle.toFixed(1) + '%';
+  if (throttle > 0) {
+    throttleFill.querySelector('.bar-label').textContent = throttle.toFixed(0) + '%';
+  }
+
+  // 控制源
+  if (data.source) {
+    $('sourcePrimary').className = data.source === 'primary' || data.source === 'ros2' ? 'safety-state active' : 'safety-state';
+    $('sourceBackup').className = data.source === 'backup' ? 'safety-state active' : 'safety-state';
+    $('activeSource').textContent = '当前源: ' + (data.source === 'primary' || data.source === 'ros2' ? '主源 (Primary)' : '备源 (Backup)');
+  }
+
+  // 安全状态
+  if (data.safety_state) {
+    updateSafetyState(data.safety_state);
+  }
+
+  // 图表更新
+  const now = new Date();
+  const label = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
+
+  // 速度图
+  if (speedChart.data.labels.length >= MAX_POINTS) {
+    speedChart.data.labels.shift();
+    speedChart.data.datasets[0].data.shift();
+  }
+  speedChart.data.labels.push(label);
+  speedChart.data.datasets[0].data.push(speed);
+  speedChart.update('none');
+
+  // 制动/油门图
+  if (brakeChart.data.labels.length >= MAX_POINTS) {
+    brakeChart.data.labels.shift();
+    brakeChart.data.datasets[0].data.shift();
+    brakeChart.data.datasets[1].data.shift();
+  }
+  brakeChart.data.labels.push(label);
+  brakeChart.data.datasets[0].data.push(brake);
+  brakeChart.data.datasets[1].data.push(throttle);
+  brakeChart.update('none');
+});
+
+// CAN 诊断更新
+socket.on('can_diagnostics', (data) => {
+  if (data.frame_rate !== undefined) $('canFrameRate').textContent = data.frame_rate.toFixed(1);
+  if (data.period_mean !== undefined) $('canPeriod').textContent = data.period_mean.toFixed(2);
+  if (data.crc_errors !== undefined) $('canCrcErrors').textContent = data.crc_errors;
+  if (data.timeout_count !== undefined) $('canTimeout').textContent = data.timeout_count;
+});
+
+// 安全状态更新
+socket.on('safety_update', (data) => {
+  if (data.state) updateSafetyState(data.state);
+  if (data.fault_level !== undefined) $('faultLevel').textContent = data.fault_level;
+  if (data.control_auth !== undefined) $('controlAuth').textContent = data.control_auth ? '是' : '否';
+});
+
+// 告警
+socket.on('alert', (data) => {
+  const level = data.level || 'info';
+  const msg = data.message || '未知告警';
+  addAlert(level, msg);
+});
+
+// 系统状态
+socket.on('system_status', (data) => {
+  if (data.mode) {
+    const isSim = data.mode === 'simulation';
+    modeBadge.className = 'mode-indicator ' + (isSim ? 'simulation' : 'live');
+    modeBadge.innerHTML = `<i class="fas fa-${isSim ? 'microchip' : 'satellite-dish'}"></i> ${isSim ? '模拟模式' : '实车模式'}`;
+    $('sysMode').textContent = isSim ? '模拟' : '实车';
+  }
+  if (data.broker) $('sysBroker').textContent = data.broker;
+  if (data.publish_rate) $('sysRate').textContent = data.publish_rate + ' Hz';
+  if (data.cpu_load !== undefined) $('sysCpu').textContent = data.cpu_load.toFixed(1) + '%';
+  if (data.uptime_s !== undefined) $('sysUptime').textContent = formatUptime(data.uptime_s);
+  if (data.ros2_connected !== undefined) $('sysRos2').textContent = data.ros2_connected ? '已对接' : '未对接';
+  if (data.mcu_status) $('sysMcu').textContent = data.mcu_status;
+});
+
+// MCU CAN 帧数据
+socket.on('can_feedback', (data) => {
+  if (data.frame_rate !== undefined) $('canFrameRate').textContent = data.frame_rate.toFixed(1);
+  if (data.period_mean !== undefined) $('canPeriod').textContent = data.period_mean.toFixed(2);
+  if (data.crc_errors !== undefined) $('canCrcErrors').textContent = data.crc_errors;
+  if (data.active_source) {
+    $('sourcePrimary').className = data.active_source === 'primary' ? 'safety-state active' : 'safety-state';
+    $('sourceBackup').className = data.active_source === 'backup' ? 'safety-state active' : 'safety-state';
+    $('activeSource').textContent = '当前源: ' + (data.active_source === 'primary' ? '主源 (Primary)' : '备源 (Backup)');
+  }
+  if (data.mcu_state) {
+    updateSafetyState(data.mcu_state);
+  }
+  if (data.loop_load !== undefined) $('sysCpu').textContent = data.loop_load.toFixed(1) + '%';
+  if (data.mcu_status) $('sysMcu').textContent = data.mcu_status;
+});
+
+// --- 辅助函数 ---
+
+function updateSafetyState(state) {
+  // 清除所有 active/danger/warning
+  document.querySelectorAll('.safety-state').forEach(el => {
+    el.className = 'safety-state';
+  });
+  // 高亮当前状态
+  const activeEl = document.querySelector(`.safety-state[data-state="${state}"]`);
+  if (activeEl) {
+    const dangerStates = ['EMERGENCY', 'FAILSAFE', 'FAULT_LOCK'];
+    const warningStates = ['MRM', 'DEGRADED'];
+    if (dangerStates.includes(state)) {
+      activeEl.className = 'safety-state danger';
+    } else if (warningStates.includes(state)) {
+      activeEl.className = 'safety-state warning';
+    } else {
+      activeEl.className = 'safety-state active';
+    }
+  }
+  // 更新显示
+  const stateNames = {
+    'INIT': 'INIT', 'STANDBY': 'STANDBY', 'ACTIVE': 'ACTIVE', 'DEGRADED': 'DEGRADED',
+    'MRM': 'MRM', 'FAILSAFE': 'FAILSAFE', 'EMERGENCY_BRAKE': 'EMERGENCY', 'FAULT_LOCK': 'FAULT LOCK'
+  };
+  $('currentState').textContent = stateNames[state] || state;
+  $('currentState').style.color = activeEl?.classList.contains('danger') ? 'var(--accent-red)' :
+    activeEl?.classList.contains('warning') ? 'var(--accent-yellow)' : 'var(--accent-green)';
+}
+
+function addAlert(level, message) {
+  const now = new Date();
+  const time = now.getHours().toString().padStart(2,'0') + ':' +
+               now.getMinutes().toString().padStart(2,'0') + ':' +
+               now.getSeconds().toString().padStart(2,'0');
+  const iconMap = { info: 'fa-info-circle', warning: 'fa-exclamation-triangle', danger: 'fa-times-circle' };
+
+  const div = document.createElement('div');
+  div.className = `alert-item alert-${level}`;
+  div.innerHTML = `<span class="alert-time">${time}</span><span class="alert-icon"><i class="fas ${iconMap[level] || 'fa-info-circle'}"></i></span><span>${message}</span>`;
+
+  alertList.insertBefore(div, alertList.firstChild);
+
+  // 限制告警数量
+  while (alertList.children.length > 50) {
+    alertList.removeChild(alertList.lastChild);
+  }
+}
+
+function clearAlerts() {
+  alertList.innerHTML = '';
+  addAlert('info', '告警已清空');
+}
+
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+// 定时更新时间
+function updateTime() {
+  const now = new Date();
+  footerTime.textContent = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+}
+setInterval(updateTime, 1000);
+updateTime();
+
+// 模拟断线重连视觉效果
+console.log('ADAS IoT Dashboard v1.0 — 物联网竞赛远程监控平台');
+</script>
+</body>
+</html>

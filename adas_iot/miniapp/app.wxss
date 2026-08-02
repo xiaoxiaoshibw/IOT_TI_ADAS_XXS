@@ -1,0 +1,83 @@
+page {
+  min-height: 100%;
+  background: #f4f7f8;
+  color: #152425;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 28rpx;
+}
+
+view,
+text,
+button,
+input {
+  box-sizing: border-box;
+}
+
+button {
+  border-radius: 8rpx;
+  font-weight: 600;
+}
+
+button::after {
+  border: none;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 28rpx;
+}
+
+.section {
+  margin-top: 24rpx;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1rpx solid #dbe4e6;
+  border-radius: 12rpx;
+  padding: 24rpx;
+  box-shadow: 0 8rpx 22rpx rgba(16, 42, 45, 0.06);
+}
+
+.panel-title {
+  color: #334b4e;
+  font-size: 26rpx;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.muted {
+  color: #718184;
+}
+
+.primary-button {
+  height: 84rpx;
+  line-height: 84rpx;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 28rpx;
+}
+
+.secondary-button {
+  height: 84rpx;
+  line-height: 84rpx;
+  background: #e8f3f1;
+  color: #0f5f59;
+  font-size: 28rpx;
+}
+
+.ghost-button {
+  height: 76rpx;
+  line-height: 76rpx;
+  background: #f1f5f6;
+  color: #32484b;
+  font-size: 26rpx;
+}
+
+.danger-text {
+  color: #c2410c;
+}
+
+.success-text {
+  color: #15803d;
+}

@@ -1,0 +1,54 @@
+<view class="page settings-page">
+  <view class="panel">
+    <view class="panel-title">后端连接</view>
+    <view class="field">
+      <view class="field-label">Dashboard 地址</view>
+      <input class="text-input" value="{{serverUrl}}" bindinput="onServerInput" placeholder="http://127.0.0.1:5000" />
+    </view>
+    <view wx:if="{{insecure}}" class="warn-banner">
+      ⚠️ HTTP 仅供本地调试。微信小程序要求 request 合法域名为 HTTPS，公网部署前请改为 https://。
+    </view>
+    <button class="ghost-button test-button" loading="{{testing}}" bindtap="testConnection">测试连接</button>
+  </view>
+
+  <view class="section panel">
+    <view class="panel-title">真机调试</view>
+    <view class="hint">
+      1. 确认手机和运行 Dashboard 的电脑连 <text class="kbd">同一 WiFi</text>（用 4G 不行）。<br />
+      2. 在电脑浏览器打开 <text class="kbd">http://本机IP:端口/debug</text>（默认 <text class="kbd">http://localhost:5000/debug</text>），把里面的二维码给手机扫。<br />
+      3. 也可以直接点下面的按钮调起微信扫码。
+    </view>
+    <button class="primary-button test-button" bindtap="scanQrCode">扫码配置</button>
+    <button class="ghost-button test-button" loading="{{debugLoading}}" bindtap="fetchDebugInfo">刷新 Dashboard 诊断</button>
+    <view wx:if="{{debugInfo}}" class="debug-info">
+      <view class="debug-row">主机名：<text class="kbd">{{debugInfo.hostname || '未知'}}</text></view>
+      <view class="debug-row">端口：<text class="kbd">{{debugInfo.port || '5000'}}</text></view>
+      <view class="debug-row debug-row-list">
+        <view>候选局域网 IP（按家用常见程度排序）：</view>
+        <view wx:if="{{debugInfo.items.length === 0}}" class="debug-empty">未检测到（可能只连了 VPN 或没接 WiFi）</view>
+        <view wx:for="{{debugInfo.items}}" wx:key="ip" class="debug-item">
+          <text class="kbd">{{item.url}}</text>
+          <text class="debug-copy" data-url="{{item.url}}" bindtap="copyDebugUrl">复制</text>
+        </view>
+      </view>
+    </view>
+    <view wx:elif="{{debugError}}" class="debug-error">⚠️ {{debugError}}</view>
+  </view>
+
+  <view class="section panel">
+    <view class="panel-title">微信告警</view>
+    <view class="field">
+      <view class="field-label">订阅消息模板 ID</view>
+      <input class="text-input" value="{{templateId}}" bindinput="onTemplateInput" placeholder="template_id" />
+    </view>
+    <view class="field">
+      <view class="field-label">后端绑定接口</view>
+      <view class="readonly">{{bindUrl}}</view>
+    </view>
+  </view>
+
+  <view class="action-row">
+    <button class="secondary-button action-button" bindtap="resetDefault">恢复默认</button>
+    <button class="primary-button action-button" bindtap="save">保存</button>
+  </view>
+</view>

@@ -1,0 +1,7 @@
+global_planner:
+  ros__parameters:
+    lane_change_penalty_m: 8.0
+    junction_penalty_m: 2.0
+    turn_penalty_m: 1.0
+    snap_max_distance_m: 8.0
+    arrival_tolerance_m: 1.5

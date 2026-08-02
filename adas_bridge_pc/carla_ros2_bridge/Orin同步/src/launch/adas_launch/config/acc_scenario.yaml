@@ -1,0 +1,24 @@
+# M2 ACC 跟车场景 overlay（作用于所有节点，各取所需 section）
+# ACC 验收语义：纯跟车/刹停/重起步——关闭超车，否则前车刹停低于慢车阈值会触发绕行
+behavior_planner:
+  ros__parameters:
+    overtake:
+      enabled: false
+
+sim_vehicle:
+  ros__parameters:
+    track:
+      segment_lengths_m: [1000.0]
+      segment_curvatures: [0.0]
+      lane_width_m: 3.5
+    initial:
+      station_m: 0.0
+      lateral_offset_m: 0.0
+      speed_mps: 0.0
+    lead:
+      enabled: true
+      initial_station_m: 60.0
+      initial_speed_mps: 10.0
+      accel_mps2: 3.0
+      event_times_s: [35.0, 55.0]
+      event_speeds_mps: [0.0, 10.0]

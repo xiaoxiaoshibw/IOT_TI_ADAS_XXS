@@ -1,0 +1,4 @@
+# M7 实验：横向控制器切换为 LQR（仅基准缓弯场景使用——适用边界见 lqr_lateral.hpp）
+trajectory_follower:
+  ros__parameters:
+    lateral_controller_mode: lqr

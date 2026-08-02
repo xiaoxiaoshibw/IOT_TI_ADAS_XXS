@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "faults": [
+    {"code":"DTC-SOC-1001","name":"object_tracker_diagnostic","source":"object_tracker","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1002","name":"behavior_planner_diagnostic","source":"behavior_planner","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1003","name":"trajectory_planner_diagnostic","source":"trajectory_planner","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1004","name":"trajectory_follower_diagnostic","source":"trajectory_follower","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1005","name":"command_gate_diagnostic","source":"command_gate","severity":"EMERGENCY","safety_action":"EMERGENCY_BRAKE","latched":true},
+    {"code":"DTC-SOC-1006","name":"aeb_diagnostic","source":"aeb","severity":"EMERGENCY","safety_action":"EMERGENCY_BRAKE","latched":true},
+    {"code":"DTC-SOC-1007","name":"vehicle_interface_diagnostic","source":"vehicle_interface","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1008","name":"can_gateway_diagnostic","source":"can_gateway","severity":"LOCKED","safety_action":"FAULT_LOCK","latched":true},
+    {"code":"DTC-SOC-1009","name":"safety_monitor_diagnostic","source":"safety_monitor","severity":"CRITICAL","safety_action":"MRM","latched":true},
+    {"code":"DTC-SOC-1010","name":"redundancy_diagnostic","source":"redundancy","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-SOC-1011","name":"dtc_persistence_diagnostic","source":"dtc_recorder","severity":"WARNING","safety_action":"SERVICE_REQUIRED","latched":false},
+    {"code":"DTC-SOC-1012","name":"resource_health_diagnostic","source":"resource_monitor","severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-MCU-2001","name":"mcu_primary_timeout","source":"mcu_fc_bit0","mcu_fault_bit":0,"severity":"WARNING","safety_action":"DEGRADED","latched":false},
+    {"code":"DTC-MCU-2002","name":"mcu_backup_timeout","source":"mcu_fc_bit1","mcu_fault_bit":1,"severity":"WARNING","safety_action":"DEGRADED","latched":false},
+    {"code":"DTC-MCU-2003","name":"mcu_primary_seq_stall","source":"mcu_fc_bit2","mcu_fault_bit":2,"severity":"WARNING","safety_action":"DEGRADED","latched":false},
+    {"code":"DTC-MCU-2004","name":"mcu_backup_seq_stall","source":"mcu_fc_bit3","mcu_fault_bit":3,"severity":"WARNING","safety_action":"DEGRADED","latched":false},
+    {"code":"DTC-MCU-2005","name":"mcu_all_sources_lost","source":"mcu_fc_bit4","mcu_fault_bit":4,"severity":"CRITICAL","safety_action":"FAILSAFE","latched":false},
+    {"code":"DTC-MCU-2006","name":"mcu_crc_errors","source":"mcu_fc_bit5","mcu_fault_bit":5,"severity":"WARNING","safety_action":"REJECT_FRAMES","latched":false},
+    {"code":"DTC-MCU-2007","name":"mcu_soc_fatal_report","source":"mcu_fc_bit6","mcu_fault_bit":6,"severity":"CRITICAL","safety_action":"MRM","latched":false},
+    {"code":"DTC-MCU-2008","name":"mcu_loop_overrun","source":"mcu_fc_bit7","mcu_fault_bit":7,"severity":"WARNING","safety_action":"MONITOR","latched":false},
+    {"code":"DTC-MCU-2009","name":"mcu_estop_active","source":"mcu_fc_bit8","mcu_fault_bit":8,"severity":"EMERGENCY","safety_action":"EMERGENCY_BRAKE","latched":false},
+    {"code":"DTC-MCU-2010","name":"mcu_protocol_mismatch","source":"mcu_fc_bit9","mcu_fault_bit":9,"severity":"CRITICAL","safety_action":"REJECT_SOURCE","latched":false},
+    {"code":"DTC-MCU-2011","name":"mcu_fault_lock","source":"mcu_fc_bit10","mcu_fault_bit":10,"severity":"LOCKED","safety_action":"FAULT_LOCK","latched":true},
+    {"code":"DTC-MCU-2012","name":"mcu_can_bus_off","source":"mcu_fc_bit11","mcu_fault_bit":11,"severity":"CRITICAL","safety_action":"SAFE_HOLD_THEN_LOCK","latched":false},
+    {"code":"DTC-MCU-2013","name":"mcu_watchdog_reset","source":"mcu_fc_bit12","mcu_fault_bit":12,"severity":"LOCKED","safety_action":"FAULT_LOCK","latched":true},
+    {"code":"DTC-MCU-2014","name":"mcu_self_test_failed","source":"mcu_fc_bit13","mcu_fault_bit":13,"severity":"LOCKED","safety_action":"FAULT_LOCK","latched":true}
+  ]
+}

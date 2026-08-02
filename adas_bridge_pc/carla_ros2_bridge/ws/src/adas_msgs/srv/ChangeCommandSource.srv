@@ -1,0 +1,5 @@
+# 调试期手动切换 gate 命令源（对标 Autoware 同名服务）
+uint8 source                    # 取值见 GateStatus SOURCE_*
+---
+bool success
+string message

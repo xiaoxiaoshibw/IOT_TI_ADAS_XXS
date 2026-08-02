@@ -1,0 +1,16 @@
+[Unit]
+Description=ADAS HIL SocketCAN setup (only for the optional SocketCAN backend)
+After=network-pre.target
+Before=adas-hil.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/adas/adas-hil.env
+# HIL uses Jetson Orin Nano PIN8/PIN10 board CAN transceiver exposed as
+# SocketCAN can1. The unconnected board mttcan can0 must stay out of the
+# control path, so this setup unit is intentionally inert.
+ExecStart=/usr/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

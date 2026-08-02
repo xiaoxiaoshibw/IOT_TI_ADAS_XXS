@@ -1,0 +1,43 @@
+# ADAS IoT 遥测配置
+# =================
+
+mqtt:
+  broker: "broker.emqx.io"       # 公共测试 Broker（竞赛部署可换私有）
+  port: 1883
+  # WebSocket 端口（Dashboard 使用）
+  ws_port: 8083
+  # QoS 等级
+  qos: 1
+  # 客户端 ID 前缀
+  client_id_prefix: "adas_orin_"
+  # 主题前缀
+  topic_prefix: "adas/v1"
+
+# 话题映射（ROS2 Topic → MQTT Topic 后缀）
+topics:
+  vehicle_state: "vehicle/state"         # 车速、转角、制动等
+  can_feedback: "can/feedback"           # MCU CAN 0x201/0x202 数据
+  diagnostics: "system/diagnostics"      # 诊断数据
+  safety_status: "system/safety"         # 安全状态机状态
+  alerts: "system/alerts"                # 告警/事件
+  camera_thumbnail: "sensors/camera_thumb"  # 摄像头缩略图
+  gps_position: "vehicle/gps"            # GPS 位置
+
+# 发布频率（Hz）
+publish_rate:
+  vehicle_state: 10
+  can_feedback: 10
+  diagnostics: 2
+  safety_status: 5
+  alerts: 1
+
+# 模拟数据（无硬件时的演示模式）
+simulation:
+  enabled: true
+  vehicle:
+    initial_speed: 15.0        # m/s
+    max_speed: 30.0
+    steering_range_deg: 30.0
+  faults:
+    random_injection: false    # 随机注入故障（演示用）
+    inject_interval_s: 30

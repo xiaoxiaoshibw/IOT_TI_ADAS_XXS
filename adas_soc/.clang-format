@@ -1,0 +1,13 @@
+# ADAS 0.0.2 统一代码格式（Google 基础 + ROS2 惯例微调）
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++17
+ColumnLimit: 100
+IndentWidth: 2
+AccessModifierOffset: -2
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
+SortIncludes: true
+AllowShortFunctionsOnASingleLine: Inline
+BreakBeforeBraces: Attach

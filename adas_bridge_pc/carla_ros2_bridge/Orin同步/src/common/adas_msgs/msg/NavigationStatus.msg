@@ -1,0 +1,14 @@
+std_msgs/Header header
+uint8 IDLE=0
+uint8 WAITING_FOR_MAP=1
+uint8 PLANNING=2
+uint8 DRIVING=3
+uint8 ARRIVED=4
+uint8 FAILED=5
+uint8 CANCELED=6
+uint8 state
+string map_id
+string goal_id
+string route_id
+string detail
+float32 remaining_distance_m

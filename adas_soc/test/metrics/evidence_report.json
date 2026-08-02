@@ -1,0 +1,41 @@
+{
+  "report_time": "2026-07-21T13:22:26.565616",
+  "evidence_dir": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence",
+  "measurements": {
+    "frame_period": {
+      "file": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence/evidence_frame_period_raw.csv",
+      "status": "analyzed",
+      "result_type": "defaultdict"
+    },
+    "cpu_load": {
+      "file": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence/evidence_cpu_load_raw.csv",
+      "status": "analyzed",
+      "result_type": "list"
+    },
+    "cold_boot": {
+      "file": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence/evidence_hil_session_coldboot_raw.csv",
+      "status": "analyzed",
+      "result_type": "tuple"
+    },
+    "hil_session": {
+      "file": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence/evidence_hil_session_raw.csv",
+      "status": "analyzed",
+      "result_type": "tuple"
+    },
+    "long_watch": {
+      "file": "/home/xxs/ADAS_ORIN_TI/文档/ADAS报告修订包/evidence/evidence_hil_session_longwatch_raw.csv",
+      "status": "analyzed",
+      "result_type": "tuple"
+    }
+  },
+  "gaps": [
+    "MCU ISR 执行时间（需 GPIO 翻转 + 逻辑分析仪）",
+    "CCS Profiler 独立 CPU 占用率",
+    "CAN RTT（Orin↔MCU 链路）",
+    "主源超时端到端接管时延",
+    "Seq 停滞端到端接管时延",
+    "双源失效制动响应",
+    "ESP32 vs F280025C 对比基准",
+    "MCU→PC→CARLA 完整闭环录像"
+  ]
+}

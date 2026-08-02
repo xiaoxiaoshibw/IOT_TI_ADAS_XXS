@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adas_launch</name>
+  <version>0.0.2</version>
+  <description>系统级 launch 编排 + 全套节点参数 yaml</description>
+  <maintainer email="dev@adas.local">adas</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>adas_sim_vehicle</exec_depend>
+  <exec_depend>adas_trajectory_planner</exec_depend>
+  <exec_depend>adas_behavior_planner</exec_depend>
+  <exec_depend>adas_object_tracker</exec_depend>
+  <exec_depend>adas_global_planner</exec_depend>
+  <exec_depend>adas_trajectory_follower</exec_depend>
+  <exec_depend>adas_command_gate</exec_depend>
+  <exec_depend>adas_aeb</exec_depend>
+  <exec_depend>adas_safety_monitor</exec_depend>
+  <exec_depend>adas_redundancy</exec_depend>
+  <exec_depend>adas_vehicle_interface</exec_depend>
+  <exec_depend>adas_can_gateway</exec_depend>
+  <exec_depend>adas_dtc_recorder</exec_depend>
+  <exec_depend>adas_resource_monitor</exec_depend>
+  <exec_depend>adas_lidar_perception</exec_depend>
+
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>diagnostic_msgs</test_depend>
+  <test_depend>lifecycle_msgs</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>adas_msgs</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

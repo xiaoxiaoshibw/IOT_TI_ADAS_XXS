@@ -1,0 +1,15 @@
+# USB 摄像头（icSpring UVC，/dev/video0）参数
+# 采集档位：640x480 YUYV @30，节点内软件转 rgb8 发布 raw
+# 通配顶层 key，避免受 namespace 影响
+/**:
+  ros__parameters:
+    video_device: /dev/video0
+    pixel_format: YUYV
+    image_size: [640, 480]
+    output_encoding: rgb8
+    camera_frame_id: camera_link
+    # 只发 raw。compressed/theora 插件的 discovery 信息在 Humble<->Jazzy
+    # 跨版本 CycloneDDS 间序列化不兼容（serdata.cpp: invalid data size），
+    # 会破坏 PC 端对本节点的整体发现。有线直连 raw 已足够。
+    image_raw:
+      enable_pub_plugins: ["image_transport/raw"]

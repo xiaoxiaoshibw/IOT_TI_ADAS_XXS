@@ -1,0 +1,9 @@
+# 行为规划
+/**:
+  ros__parameters:
+    rate_hz: 10.0
+    cruise_speed_mps: 15.0
+    follow_enter_range_m: 80.0
+    follow_exit_range_m: 95.0
+    exit_hysteresis_frames: 5
+    input_timeout_s: 0.6

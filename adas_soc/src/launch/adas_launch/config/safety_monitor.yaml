@@ -1,0 +1,17 @@
+# 整机安全监控
+# 超时值按 SIL/WSL 环境校准：虚拟机级调度停顿 + DDS discovery 风暴可达 ~0.5s，
+# 过紧会造成 MRM 瞬态 flap（M5 双栈实测）；实机部署时可收紧
+/**:
+  ros__parameters:
+    rate_hz: 10.0
+    startup_grace_s: 5.0
+    odom_timeout_s: 0.6
+    objects_timeout_s: 1.0
+    trajectory_timeout_s: 1.0
+    follower_cmd_timeout_s: 0.8
+    gate_cmd_timeout_s: 0.8
+    diagnostics_timeout_s: 3.0
+    diagnostics_startup_grace_s: 5.0
+    required_diagnostic_components:
+      [vehicle_interface, command_gate, trajectory_follower, trajectory_planner,
+       behavior_planner, object_tracker, aeb]

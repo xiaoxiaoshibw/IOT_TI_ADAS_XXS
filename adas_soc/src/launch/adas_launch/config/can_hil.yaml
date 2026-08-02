@@ -1,0 +1,64 @@
+/**:
+  ros__parameters:
+    # 主控制链路：PEAK PCAN-USB（pcan 驱动）→ SocketCAN can1 @ 500k → MCU CAN2。
+    # 注意：板载 mttcan 占 can0 但其引脚（PAA.00/01）在 p3768 载板上未引出，
+    # 物理上不可用（40-pin 排针 PIN8/PIN10 是 UART，非 CAN）——2026-07-19 实测确认。
+    # canalyst_* 保留：仅 transport=canalystii 时读取（调试备源 USB CANalyst-II 路径）。
+    transport: socketcan
+    canalyst_device_index: 0
+    canalyst_channel: 1
+    canalyst_bitrate: 500000
+    can_interface: can1  # PEAK PCAN-USB（SocketCAN @ 500k）
+    command_timeout_s: 0.05
+    # AEB publishes at 20 Hz and safety_status at 10 Hz.  Keep enough margin
+    # above the measured ~101 ms safety interval so normal timer jitter does
+    # not repeatedly tear down the startup gate.
+    status_timeout_s: 0.25
+    feedback_timeout_s: 0.1
+    max_steer_deg: 30.0
+    # 执行器反馈闭环（P1）：偏差持续超阈锁存并请求 MRM；超时恢复需稳定保持
+    feedback_steer_tolerance_deg: 8.0
+    feedback_accel_tolerance_mps2: 2.5
+    # A full-brake to max-accel transition remains outside the 2.5 m/s²
+    # tolerance for about 1.06 s at the MCU's mandated 8 m/s³ jerk limit.
+    # Require a longer persistent mismatch so the legal recovery ramp is not
+    # latched as an actuator fault.
+    feedback_deviation_hold_s: 1.5
+    feedback_recovery_hold_s: 1.0
+    # 启动/恢复门控（HIL 2026-07-13 primary_timeout=129ms 整改）：
+    # 启动先发 STANDBY 安全帧，输入全新鲜稳定 startup_stable_s 后才宣告 ACTIVE；
+    # 任一类帧发送间隔超 deadline 立即降级重新门控。deadline 必须低于 MCU 侧
+    # 超时（CTRL 60ms / HB 100ms / STATUS 120ms）。
+    startup_stable_s: 0.5
+    # Jetson userspace/CAN scheduling has observed ~46 ms worst-case jitter.
+    # Keep the gate below the MCU's 60 ms watchdog while allowing that bounded
+    # jitter without repeatedly revoking control authority.
+    tx_deadline_control_s: 0.055
+    tx_deadline_status_s: 0.06
+    # 偏差监控布防：门控 ACTIVE 且 MCU ACTIVE/PRIMARY 满该窗口后才判偏差
+    # Full-brake (-8 m/s²) to max-accel (+3 m/s²) recovery is slew-limited at
+    # 8 m/s³ by the MCU and needs about 1.4 s.  Arm after that valid ramp so
+    # the feedback monitor does not latch a false deviation during recovery.
+    feedback_deviation_arm_s: 2.0
+    # 四组 TX 序号持久化，进程重启 +64 余量恢复；置空字符串禁用
+    sequence_persist_path: /var/tmp/adas_can_gateway_seq.bin
+    # v3 重构（2026-07）：会话授权改为 MCU 自驱——无需 TCP ARM/物理按钮。
+    # 上电后 CAN 流新鲜稳定，MCU 自动 READY→ARMED→ACTIVE；断链恢复与
+    # FAULT_LOCK 解闩同样自动。原 tcp_arm_* 参数已废止删除。
+
+safety_monitor:
+  ros__parameters:
+    required_diagnostic_components:
+      [vehicle_interface, command_gate, trajectory_follower, trajectory_planner,
+       behavior_planner, object_tracker, aeb, can_gateway, resource_monitor]
+
+# CARLA ACC/LKA/AEB scenarios intentionally start without a navigation goal.
+# Do not turn that absence into a permanent empty trajectory. Once a route has
+# actually been observed, the planners still fail closed if it becomes invalid.
+behavior_planner:
+  ros__parameters:
+    navigation.require_active_route: false
+
+trajectory_planner:
+  ros__parameters:
+    global_route.require_active_route: false

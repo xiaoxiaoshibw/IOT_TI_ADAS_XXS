@@ -1,0 +1,8 @@
+adas_map_provider:
+  ros__parameters:
+    carla.host: 127.0.0.1
+    carla.port: 2000
+    carla.timeout_s: 5.0
+    sample_distance_m: 2.0
+    default_speed_limit_mps: 13.9
+    retry_period_s: 2.0

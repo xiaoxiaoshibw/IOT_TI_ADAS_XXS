@@ -1,0 +1,130 @@
+<view class="page dashboard-page">
+  <view class="topbar">
+    <view>
+      <view class="eyebrow">ADAS IoT</view>
+      <view class="title">车辆安全状态</view>
+    </view>
+    <button class="settings-button" bindtap="goSettings">设置</button>
+  </view>
+
+  <view wx:if="{{recentNewAlert}}" class="alert-banner {{recentNewAlert.levelClass}}" bindtap="dismissAlertBanner">
+    <text class="alert-banner-level">{{recentNewAlert.levelText}}</text>
+    <text class="alert-banner-message">{{recentNewAlert.message}}</text>
+  </view>
+
+  <view class="status-strip {{online ? 'online' : 'offline'}}">
+    <view class="status-dot"></view>
+    <view class="status-text">{{statusText}}</view>
+    <view class="status-time">{{lastUpdatedText}}</view>
+  </view>
+
+  <view class="hero panel">
+    <view class="hero-main">
+      <view class="speed-value">{{vehicle.speedText}}</view>
+      <view class="speed-unit">m/s</view>
+      <view class="sparkline-wrap">
+        <canvas type="2d" id="sparkline" class="sparkline"></canvas>
+      </view>
+    </view>
+    <view class="hero-side">
+      <view class="metric">
+        <text class="metric-label">km/h</text>
+        <text class="metric-value">{{vehicle.speedKmhText}}</text>
+      </view>
+      <view class="metric">
+        <text class="metric-label">转向</text>
+        <text class="metric-value">{{vehicle.steeringText}} deg</text>
+      </view>
+      <view class="metric">
+        <text class="metric-label">控制源</text>
+        <text class="metric-value">{{vehicle.sourceText}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="section grid-two">
+    <view class="panel compact-panel">
+      <view class="panel-title">制动</view>
+      <view class="bar-track">
+        <view class="bar-fill brake-fill" style="width: {{vehicle.brakePct}}%;"></view>
+      </view>
+      <view class="bar-value">{{vehicle.brakeText}}%</view>
+    </view>
+    <view class="panel compact-panel">
+      <view class="panel-title">油门</view>
+      <view class="bar-track">
+        <view class="bar-fill throttle-fill" style="width: {{vehicle.throttlePct}}%;"></view>
+      </view>
+      <view class="bar-value">{{vehicle.throttleText}}%</view>
+    </view>
+  </view>
+
+  <view class="section panel">
+    <view class="row-title">
+      <view class="panel-title">安全状态机</view>
+      <view class="state-pill {{safety.levelClass}}">{{safety.state}}</view>
+    </view>
+    <view class="safety-grid">
+      <view wx:for="{{safety.cells}}" wx:key="name" class="safety-cell {{item.cls}}">{{item.label}}</view>
+    </view>
+    <view class="info-list">
+      <view class="info-row">
+        <text>故障等级</text>
+        <text>{{safety.faultLevel}}</text>
+      </view>
+      <view class="info-row">
+        <text>AEB</text>
+        <text>{{safety.aebText}}</text>
+      </view>
+      <view class="info-row">
+        <text>当前源</text>
+        <text>{{safety.activeSource}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="section panel">
+    <view class="row-title">
+      <view class="panel-title">CAN 诊断</view>
+      <view class="muted">{{system.mqttText}}</view>
+    </view>
+    <view class="diagnostic-grid">
+      <view class="diagnostic-item">
+        <text class="diagnostic-value">{{can.framePeriodText}}</text>
+        <text class="diagnostic-label">周期 ms</text>
+      </view>
+      <view class="diagnostic-item">
+        <text class="diagnostic-value">{{can.crcErrors}}</text>
+        <text class="diagnostic-label">CRC</text>
+      </view>
+      <view class="diagnostic-item">
+        <text class="diagnostic-value">{{can.seqErrors}}</text>
+        <text class="diagnostic-label">Seq</text>
+      </view>
+      <view class="diagnostic-item">
+        <text class="diagnostic-value">{{can.loopLoadText}}%</text>
+        <text class="diagnostic-label">负载</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="section panel">
+    <view class="row-title">
+      <view class="panel-title">告警</view>
+      <button class="mini-button" bindtap="onAction" data-action="bind-wechat">订阅</button>
+    </view>
+    <view wx:if="{{alerts.length === 0}}" class="empty-alert">暂无告警</view>
+    <view wx:for="{{alerts}}" wx:key="id" class="alert-item {{item.levelClass}}">
+      <view class="alert-main">
+        <text class="alert-level">{{item.levelText}}</text>
+        <text class="alert-message">{{item.message}}</text>
+      </view>
+      <view class="alert-meta">{{item.time}} · {{item.source}}</view>
+    </view>
+  </view>
+
+  <view class="action-row">
+    <button class="secondary-button action-button" bindtap="fetchState">刷新</button>
+    <button class="primary-button action-button" bindtap="onAction" data-action="bind-wechat">绑定告警</button>
+  </view>
+</view>

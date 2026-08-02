@@ -1,0 +1,17 @@
+[Unit]
+Description=Continuously enforce ADAS HIL service availability
+
+[Timer]
+OnBootSec=5s
+# Also seed the first invocation whenever a deployment restarts this timer.
+OnActiveSec=1s
+# adas-hil-keeper.service is Type=oneshot and immediately becomes inactive.
+# Schedule from that completed state so restarting this timer after a deploy
+# cannot leave it in "elapsed / Trigger: n/a".
+OnUnitInactiveSec=3s
+AccuracySec=500ms
+Unit=adas-hil-keeper.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+# 目标跟踪
+/**:
+  ros__parameters:
+    lane_margin_factor: 0.9
+    max_lead_range_m: 120.0
+    v_filter_tau_s: 0.3
+    a_filter_tau_s: 0.5
+    track_stale_s: 0.5
+    expected_rate_hz: 20.0
+    input_timeout_s: 0.6

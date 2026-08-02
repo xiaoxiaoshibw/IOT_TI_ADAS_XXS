@@ -1,0 +1,37 @@
+[Unit]
+Description=ADAS Jetson LiDAR perception stack
+After=network-online.target adas-hil.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+EnvironmentFile=/etc/adas/adas-hil.env
+WorkingDirectory=/opt/adas/current
+ExecStartPre=/bin/bash -lc 'test -r /opt/ros/${ADAS_ROS_DISTRO}/setup.bash && test -r ${ADAS_INSTALL_PREFIX}/setup.bash'
+ExecStart=/bin/bash -lc 'source /opt/ros/${ADAS_ROS_DISTRO}/setup.bash && source ${ADAS_INSTALL_PREFIX}/setup.bash && exec ros2 launch adas_launch lidar_perception.launch.py'
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=30
+TimeoutStopSec=10
+KillSignal=SIGINT
+KillMode=mixed
+
+CPUAffinity=0 1 4 5
+Nice=5
+CPUQuota=350%
+MemoryMax=2G
+TasksMax=256
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/log/adas /run/adas
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+StandardOutput=append:/var/log/adas/perception.log
+StandardError=append:/var/log/adas/perception.log
+
+[Install]
+WantedBy=multi-user.target

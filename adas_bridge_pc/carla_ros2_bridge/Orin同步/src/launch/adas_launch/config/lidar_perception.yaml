@@ -1,0 +1,8 @@
+lidar_perception:
+  ros__parameters:
+    input_topic: /adas/sensors/front/points
+    expected_frame: lidar_front
+    expected_hz: 10.0
+    stale_timeout_s: 0.25
+    min_points: 500
+    max_points: 500000

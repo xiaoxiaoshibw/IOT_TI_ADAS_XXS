@@ -1,0 +1,25 @@
+# 轨迹跟踪（横向 PurePursuit + 纵向 PID）
+/**:
+  ros__parameters:
+    rate_hz: 50.0
+    trajectory_timeout_s: 0.3
+    odom_timeout_s: 0.15
+    lateral_controller_mode: pure_pursuit
+    longitudinal_controller_mode: pid
+    pure_pursuit:
+      wheelbase_m: 2.7
+      lookahead_gain_s: 0.8
+      min_lookahead_m: 3.0
+      max_lookahead_m: 20.0
+      max_steer_rad: 0.6
+    pid:
+      kp: 1.0
+      ki: 0.3
+      kd: 0.0
+      integral_limit: 2.0
+      max_accel_mps2: 3.0
+      max_decel_mps2: 4.0
+      stop_speed_mps: 0.5
+      start_speed_mps: 0.8
+      stop_hold_accel_mps2: -1.5
+      preview_time_s: 0.4

@@ -1,0 +1,17 @@
+# 轨迹规划
+/**:
+  ros__parameters:
+    rate_hz: 20.0
+    input_timeout_s: 0.3
+    global_route.enabled: true
+    global_route.goal_stop_distance_m: 1.5
+    horizon_s: 8.0
+    min_length_m: 30.0
+    max_length_m: 120.0
+    step_m: 1.0
+    cruise_speed_mps: 15.0
+    max_lat_accel_mps2: 2.5
+    max_accel_mps2: 1.5
+    max_decel_mps2: 2.0
+    follow_time_gap_s: 1.1
+    follow_standstill_m: 4.0

@@ -1,0 +1,12 @@
+*
+!adas_pc/
+adas_pc/*
+!adas_pc/carla_ros2_bridge/
+adas_pc/carla_ros2_bridge/*
+!adas_pc/carla_ros2_bridge/ws/
+adas_pc/carla_ros2_bridge/ws/*
+!adas_pc/carla_ros2_bridge/ws/src/
+adas_pc/carla_ros2_bridge/ws/src/*
+!adas_pc/carla_ros2_bridge/ws/src/adas_msgs/
+!adas_pc/carla_ros2_bridge/ws/src/adas_carla_bridge/
+!adas_pc/docker/

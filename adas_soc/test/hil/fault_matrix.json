@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "protocol_version": 3,
+  "cases": [
+    {
+      "id": "FI-MCU-001",
+      "name": "force_degraded",
+      "command": 1,
+      "expected_state": 3,
+      "require_full_brake": false
+    },
+    {
+      "id": "FI-MCU-002",
+      "name": "force_emergency_brake",
+      "command": 2,
+      "expected_state": 5,
+      "require_full_brake": true
+    },
+    {
+      "id": "FI-MCU-003",
+      "name": "drop_primary",
+      "command": 3,
+      "expected_state": 3,
+      "require_full_brake": false
+    },
+    {
+      "id": "FI-MCU-004",
+      "name": "drop_backup",
+      "command": 4,
+      "expected_state": 3,
+      "require_full_brake": false
+    },
+    {
+      "id": "FI-MCU-005",
+      "name": "force_fault_lock",
+      "command": 5,
+      "expected_state": 7,
+      "require_full_brake": true
+    },
+    {
+      "id": "FI-MCU-006",
+      "name": "drop_all_sources",
+      "command": 6,
+      "expected_state": 6,
+      "require_full_brake": false,
+      "require_zero_throttle": true,
+      "capture_s": 0.5
+    },
+    {
+      "id": "FI-MCU-007",
+      "name": "force_mrm",
+      "command": 7,
+      "expected_state": 4,
+      "require_full_brake": false,
+      "require_zero_throttle": true,
+      "capture_s": 0.5
+    },
+    {
+      "id": "FI-MCU-008",
+      "name": "can_recovery_exhausted",
+      "command": 8,
+      "expected_state": 7,
+      "require_full_brake": true
+    },
+    {
+      "id": "FI-MCU-009",
+      "name": "self_test_fail",
+      "command": 9,
+      "expected_state": 7,
+      "require_full_brake": true
+    }
+  ]
+}

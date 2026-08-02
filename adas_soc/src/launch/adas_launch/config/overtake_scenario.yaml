@@ -1,0 +1,23 @@
+# M4 慢车超越场景 overlay（超车保持默认开启）
+# 1200m 直道 + 慢车（6m/s < 0.6×15）：FOLLOW→WAIT→ACTIVE(左道)→超越→RETURN
+sim_vehicle:
+  ros__parameters:
+    track:
+      segment_lengths_m: [1200.0]
+      segment_curvatures: [0.0]
+      lane_width_m: 3.5
+    initial:
+      station_m: 0.0
+      lateral_offset_m: 0.0
+      speed_mps: 10.0
+    lead:
+      enabled: true
+      initial_station_m: 60.0
+      initial_speed_mps: 6.0
+      accel_mps2: 2.0
+      # 注意：勿写 event_times_s: []——ROS2 yaml 空数组类型不定，
+      # 会与节点声明的 vector<double> 类型冲突导致节点构造失败；缺省即空
+    pedestrian:
+      enabled: false
+    adjacent:
+      enabled: false

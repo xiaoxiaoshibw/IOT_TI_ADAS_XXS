@@ -1,0 +1,62 @@
+# ─── Kun/Codex 工作区 ───
+.omo/
+run-continuation/
+.kun-canvas/
+
+# ─── ROS2 colcon 构建产物 ───
+**/build/
+**/install/
+**/log/
+**/logs/
+
+# ─── MCU 固件构建产物 ───
+*.hex
+*.out
+*.map
+*.hex.*
+
+# ─── MCU 构建/烧录过程产物（会被脚本重新生成） ───
+**/flash_logs/
+**/t7_runs/
+
+# ─── Python ───
+__pycache__/
+*.pyc
+*.pyo
+*$py.class
+.pytest_cache/
+*.egg-info/
+*.egg
+dist/
+*.whl
+
+# ─── IDE/编辑器 ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+
+# ─── CCS (Code Composer Studio) 项目配置（保留 .project/.cproject 等） ───
+# 保留 CCS 项目文件因为它们定义了 MCU 构建配置
+
+# ─── 竞赛文档中生成的文件（避免提交重复生成的产物） ───
+# 图表由绘图工具生成，tools 目录下的 .py 已纳入版本控制
+# 生成的 PNG/PDF 可保留用于竞赛文档提交
+
+# ─── IoT Dashboard 日志 ───
+*.log
+
+# ─── CAN 抓包原始文件 ───
+*.asc
+*.blf
+*.pcap
+
+# ─── 实验数据归档件（原始 CSV 已纳入证据目录） ───
+# .out 和 .hex 是 MCU 构建产物
+*.pkl
+*.npy

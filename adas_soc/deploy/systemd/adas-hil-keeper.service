@@ -1,0 +1,8 @@
+[Unit]
+Description=Ensure ADAS HIL control stack is always running
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reset-failed adas-hil.service
+ExecStart=/bin/systemctl start adas-hil.service

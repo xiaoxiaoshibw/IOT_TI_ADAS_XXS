@@ -1,0 +1,26 @@
+# M3 AEB 横穿行人场景 overlay（作用于所有节点）
+# AEB 验收语义：直行遇险制动——关闭超车，避免行为层绕行干扰判定
+behavior_planner:
+  ros__parameters:
+    overtake:
+      enabled: false
+
+sim_vehicle:
+  ros__parameters:
+    track:
+      segment_lengths_m: [500.0]
+      segment_curvatures: [0.0]
+      lane_width_m: 3.5
+    initial:
+      station_m: 0.0
+      lateral_offset_m: 0.0
+      speed_mps: 0.0
+    lead:
+      enabled: false
+    pedestrian:
+      enabled: true
+      station_m: 150.0
+      trigger_ego_gap_m: 35.0
+      start_lateral_m: -5.0
+      end_lateral_m: 5.0
+      speed_mps: 1.5

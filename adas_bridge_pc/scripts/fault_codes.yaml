@@ -1,0 +1,39 @@
+# PC 端 HIL Supervisor 专用故障码。
+#
+# 命名空间说明：SoC 端 adas_dtc_recorder 已经占用了 DTC-SOC-1xxx（按节点）
+# 和 DTC-MCU-2xxx（按 MCU fault_code 位）两个前缀（见
+# ADAS0.0.2/SoC/src/system/adas_dtc_recorder/config/fault_catalog.json）。
+# 这里的编号（100/200/300/400/500）是 PC 侧独立命名空间，只用于本机
+# HIL Supervisor 的日志/GUI 展示诊断，不写入、不参与 SafetyStatus/MRM
+# 的判定逻辑 —— MRM 该不该触发完全由 Orin 上的 safety_monitor 自己决定，
+# 这里只是"翻译"给操作员看，出问题时能一眼看出大致是哪一段链路。
+
+100:
+  name: CARLA_RPC_TIMEOUT
+  level: ERROR
+  category: SIMULATION_FAILURE
+  description: CARLA RPC 无响应（端口可能仍监听，但 get_world() 挂起或超时）
+
+200:
+  name: ROS2_TOPIC_TIMEOUT
+  level: ERROR
+  category: PERCEPTION_FAILURE
+  description: 感知/定位话题（objects_raw / kinematic_state / lane_state）超时未更新，具体分类由运行时证据细化
+
+300:
+  name: JETSON_HEARTBEAT_LOST
+  level: CRITICAL
+  category: COMMUNICATION_FAILURE
+  description: Jetson 侧关键节点在 ROS 图中消失，或 safety_status 心跳代理超过阈值未更新
+
+400:
+  name: CAN_TIMEOUT
+  level: CRITICAL
+  category: COMMUNICATION_FAILURE
+  description: PC 侧 CAN 调试适配器（USB CANalyst-II）不可用或无收发计数变化——仅观测，不是安全执行链路
+
+500:
+  name: MCU_WATCHDOG_TRIGGER
+  level: CRITICAL
+  category: COMMUNICATION_FAILURE
+  description: 从 /adas/mcu/status 观测到 MCU 侧看门狗/复位迹象——只读展示，MCU 自身的看门狗才是真正的安全执行者
