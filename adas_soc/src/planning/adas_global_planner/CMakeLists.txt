@@ -14,7 +14,10 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_library(${PROJECT_NAME}_core src/global_planner_core.cpp)
+add_library(${PROJECT_NAME}_core
+  src/global_planner_core.cpp
+  src/semantic_route.cpp
+  src/route_validator.cpp)
 set_target_properties(${PROJECT_NAME}_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"

@@ -7,6 +7,8 @@
 #include <string>
 
 #include "adas_global_planner/global_planner_core.hpp"
+#include "adas_global_planner/route_validator.hpp"
+#include "adas_global_planner/semantic_route.hpp"
 #include "adas_msgs/msg/lane_graph.hpp"
 #include "adas_msgs/msg/navigation_status.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -121,31 +123,48 @@ class GlobalPlannerNode : public rclcpp::Node {
 
   void on_odom(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
     odom_ = msg;
-    if (!goal_ || !active_route_.valid) return;
+    if (plan_when_localized_) {
+      plan_when_localized_ = false;
+      plan_route();
+    }
+    if (!goal_ || !active_route_.valid || !arrival_point_valid_ || arrived_) return;
     const double distance = std::hypot(
-        goal_->pose.position.x - msg->pose.pose.position.x,
-        goal_->pose.position.y - msg->pose.pose.position.y);
+        arrival_point_.x - msg->pose.pose.position.x,
+        arrival_point_.y - msg->pose.pose.position.y);
     remaining_distance_m_ = distance;
     if (distance <= arrival_tolerance_m_ && std::abs(msg->twist.twist.linear.x) < 0.2) {
-      publish_status(adas_msgs::msg::NavigationStatus::ARRIVED, "goal reached");
+      arrived_ = true;
+      remaining_distance_m_ = 0.0;
+      publish_status(adas_msgs::msg::NavigationStatus::ARRIVED,
+                     "route endpoint reached");
     }
   }
 
   void on_goal(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
     goal_ = msg;
     goal_id_ = std::to_string(now().nanoseconds());
-    active_route_ = GlobalRoute{};
+    clear_active_route();
     plan_route();
   }
 
   void on_cancel(const std_msgs::msg::Empty::ConstSharedPtr) {
     goal_.reset();
+    clear_active_route();
+    publish_status(adas_msgs::msg::NavigationStatus::CANCELED, "navigation canceled");
+  }
+
+  void clear_active_route() {
     active_route_ = GlobalRoute{};
+    arrival_point_ = MapPoint{};
+    arrival_point_valid_ = false;
+    arrived_ = false;
+    plan_when_localized_ = false;
+    active_route_id_.clear();
+    remaining_distance_m_ = 0.0;
     nav_msgs::msg::Path empty;
     empty.header.stamp = now();
     empty.header.frame_id = "map";
     pub_route_->publish(empty);
-    publish_status(adas_msgs::msg::NavigationStatus::CANCELED, "navigation canceled");
   }
 
   void plan_route() {
@@ -154,9 +173,11 @@ class GlobalPlannerNode : public rclcpp::Node {
       return;
     }
     if (!odom_) {
+      plan_when_localized_ = true;
       publish_status(adas_msgs::msg::NavigationStatus::PLANNING, "goal stored; waiting for localization");
       return;
     }
+    plan_when_localized_ = false;
     publish_status(adas_msgs::msg::NavigationStatus::PLANNING, "planning route");
     active_route_ = planner_->plan(
         *graph_, odom_->pose.pose.position.x, odom_->pose.pose.position.y,
@@ -166,23 +187,47 @@ class GlobalPlannerNode : public rclcpp::Node {
       return;
     }
 
+    // 不直接把各车道中心线首尾拼接。连接车道在路口/变道处通常有重叠或
+    // 横向偏移，直接拼接会给跟踪器制造几米的几何跳变，车辆会在真正进入
+    // 弯道前突然打满方向。先裁剪起终点、按前向投影连接 successor，再做
+    // 路线完整性校验；校验失败时保持安全停车，不发布一条可能撞墙的路线。
+    const auto semantic = build_semantic_route(
+        active_route_, odom_->pose.pose.position.x, odom_->pose.pose.position.y,
+        goal_->pose.position.x, goal_->pose.position.y);
+    if (!semantic.valid) {
+      publish_status(adas_msgs::msg::NavigationStatus::FAILED,
+                     "route geometry invalid: " + semantic.failure_reason);
+      return;
+    }
+    const auto validation = validate_route(semantic.points);
+    if (!validation.valid) {
+      publish_status(adas_msgs::msg::NavigationStatus::FAILED,
+                     "route validation failed: " + validation.reason);
+      return;
+    }
+
+    // The clicked goal may be off the lane centerline. The route endpoint is
+    // the safe projection onto the final lane, so stopping and ARRIVED must
+    // use this same canonical point instead of the raw click position.
+    arrival_point_ = semantic.points.back().pose;
+    arrival_point_valid_ = true;
+    arrived_ = false;
+
     nav_msgs::msg::Path path;
     path.header.stamp = now();
     path.header.frame_id = "map";
-    for (const auto& segment : active_route_.segments) {
-      for (std::size_t i = 0; i < segment.centerline.size(); ++i) {
-        if (!path.poses.empty() && i == 0U) continue;
-        geometry_msgs::msg::PoseStamped pose;
-        pose.header = path.header;
-        pose.pose.position.x = segment.centerline[i].x;
-        pose.pose.position.y = segment.centerline[i].y;
-        pose.pose.orientation.z = std::sin(segment.centerline[i].yaw * 0.5);
-        pose.pose.orientation.w = std::cos(segment.centerline[i].yaw * 0.5);
-        path.poses.push_back(std::move(pose));
-      }
+    path.poses.reserve(semantic.points.size());
+    for (const auto& point : semantic.points) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.position.x = point.pose.x;
+      pose.pose.position.y = point.pose.y;
+      pose.pose.orientation.z = std::sin(point.pose.yaw * 0.5);
+      pose.pose.orientation.w = std::cos(point.pose.yaw * 0.5);
+      path.poses.push_back(std::move(pose));
     }
     active_route_id_ = route_id(map_hash_, path.header.stamp);
-    remaining_distance_m_ = active_route_.total_cost_m;
+    remaining_distance_m_ = semantic.length_m;
     pub_route_->publish(path);
     publish_status(adas_msgs::msg::NavigationStatus::DRIVING, "route ready");
   }
@@ -202,6 +247,10 @@ class GlobalPlannerNode : public rclcpp::Node {
 
   double arrival_tolerance_m_{1.5};
   double remaining_distance_m_{0.0};
+  MapPoint arrival_point_{};
+  bool arrival_point_valid_{false};
+  bool arrived_{false};
+  bool plan_when_localized_{false};
   std::string map_id_;
   std::string map_hash_;
   std::string goal_id_;

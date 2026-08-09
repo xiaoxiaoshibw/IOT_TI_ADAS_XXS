@@ -29,11 +29,17 @@ class SmokeNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.map_pub = self.create_publisher(LaneGraph, '/adas/map/lane_graph', transient)
+        sensor_data = QoSProfile(
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.odom_pub = self.create_publisher(
-            Odometry, '/adas/localization/kinematic_state', 10)
+            Odometry, '/adas/localization/kinematic_state', sensor_data)
         self.goal_pub = self.create_publisher(PoseStamped, '/adas/navigation/goal', 1)
         self.path = None
         self.status = None
+        self.arrival_odom_published = False
         self.create_subscription(Path, '/adas/planning/global_route', self._path_cb, transient)
         self.create_subscription(
             NavigationStatus, '/adas/navigation/status', self._status_cb, transient)
@@ -71,8 +77,18 @@ class SmokeNode(Node):
 
         goal = PoseStamped()
         goal.header.frame_id = 'map'
-        goal.pose = pose(19, 0)
+        # Keep the click 2m off-center. The planner must stop at the safe lane
+        # projection (19, 0) and still report ARRIVED.
+        goal.pose = pose(19, 2)
         self.goal_pub.publish(goal)
+
+    def publish_arrival_odom(self):
+        odom = Odometry()
+        odom.header.frame_id = 'map'
+        odom.pose.pose = self.path.poses[-1].pose
+        odom.twist.twist.linear.x = 0.0
+        self.odom_pub.publish(odom)
+        self.arrival_odom_published = True
 
 
 def main():
@@ -83,12 +99,20 @@ def main():
     try:
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)
-            if not published and node.count_subscribers('/adas/navigation/goal'):
+            inputs_connected = (
+                node.count_subscribers('/adas/map/lane_graph') and
+                node.count_subscribers('/adas/localization/kinematic_state') and
+                node.count_subscribers('/adas/navigation/goal'))
+            if not published and inputs_connected:
                 node.publish_inputs()
                 published = True
             if (node.path and len(node.path.poses) >= 3 and node.status and
-                    node.status.state == NavigationStatus.DRIVING):
-                print('ROS2_LOOPBACK_PASS poses=%d route_id=%s' % (
+                    node.status.state == NavigationStatus.DRIVING and
+                    not node.arrival_odom_published):
+                node.publish_arrival_odom()
+            if (node.arrival_odom_published and node.status and
+                    node.status.state == NavigationStatus.ARRIVED):
+                print('ROS2_LOOPBACK_PASS poses=%d route_id=%s state=ARRIVED' % (
                     len(node.path.poses), node.status.route_id))
                 return 0
         print('ROS2_LOOPBACK_FAIL path=%r status=%r' % (node.path, node.status))

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "adas_global_planner/global_planner_core.hpp"
+#include "adas_global_planner/semantic_route.hpp"
 
 namespace ap = adas::planning;
 
@@ -88,4 +89,25 @@ TEST(GlobalPlanner, HandlesStartAlreadyOnGoalLane) {
   ASSERT_TRUE(route.valid);
   ASSERT_EQ(route.segments.size(), 1U);
   EXPECT_EQ(route.segments.front().lane_id, 2);
+}
+
+TEST(SemanticRoute, StopsAtProjectedGoalInsteadOfLaneEnd) {
+  ap::GlobalRoute route;
+  route.valid = true;
+  ap::RouteSegment segment;
+  segment.lane_id = 1;
+  segment.speed_limit_mps = 13.9;
+  segment.centerline = {{0.0, 0.0, 0.0}, {100.0, 0.0, 0.0}};
+  route.segments.push_back(segment);
+
+  // The click is 2m off-center. The safe arrival point must be its lane
+  // projection at x=80, not the raw click and not the lane end at x=100.
+  const auto semantic = ap::build_semantic_route(route, 10.0, 0.0, 80.0, 2.0);
+  ASSERT_TRUE(semantic.valid) << semantic.failure_reason;
+  ASSERT_GE(semantic.points.size(), 2U);
+  EXPECT_NEAR(semantic.points.front().pose.x, 10.0, 1e-9);
+  EXPECT_NEAR(semantic.points.back().pose.x, 80.0, 1e-9);
+  EXPECT_NEAR(semantic.points.back().pose.y, 0.0, 1e-9);
+  EXPECT_NEAR(semantic.length_m, 70.0, 1e-9);
+  EXPECT_TRUE(semantic.points.back().stop);
 }
