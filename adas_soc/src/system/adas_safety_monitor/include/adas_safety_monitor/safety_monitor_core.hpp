@@ -20,6 +20,13 @@ struct SafetyMonitorParams {
   double trajectory_timeout_s{0.6};
   double follower_cmd_timeout_s{0.4};
   double gate_cmd_timeout_s{0.4};
+  // Threshold multipliers relative to each channel's normal timeout.  The
+  // lower multiplier is the WARN boundary and the higher one is the MRM
+  // boundary, so a reversed deployment setting remains fail-safe.
+  double stale_warn_threshold_s{2.0};
+  double stale_mrm_threshold_s{1.0};
+  int confirm_frames_to_escalate{3};
+  int confirm_frames_to_recover{3};
 };
 
 // 各通道最近一次收到的时刻（秒；从未收到 = -1e18）
@@ -51,6 +58,11 @@ class SafetyMonitorCore {
  private:
   SafetyMonitorParams params_;
   double start_time_s_;
+  // evaluate() is const to keep the core's read-only call site API.  These
+  // counters represent temporal state, so they intentionally remain mutable.
+  mutable int stale_mrm_frames_{0};
+  mutable int fresh_recovery_frames_{0};
+  mutable SafetyLevel stable_level_{SafetyLevel::kOk};
 };
 
 }  // namespace adas::system

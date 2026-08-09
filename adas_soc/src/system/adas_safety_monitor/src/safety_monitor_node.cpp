@@ -40,6 +40,10 @@ class SafetyMonitorNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("trajectory_timeout_s", 0.6);
     declare_parameter<double>("follower_cmd_timeout_s", 0.4);
     declare_parameter<double>("gate_cmd_timeout_s", 0.4);
+    declare_parameter<double>("stale_warn_threshold_s", 2.0);
+    declare_parameter<double>("stale_mrm_threshold_s", 1.0);
+    declare_parameter<int>("confirm_frames_to_escalate", 3);
+    declare_parameter<int>("confirm_frames_to_recover", 3);
     declare_parameter<double>("rate_hz", 10.0);
     declare_parameter<double>("diagnostics_timeout_s", 2.0);
     declare_parameter<double>("diagnostics_startup_grace_s", 5.0);
@@ -58,6 +62,14 @@ class SafetyMonitorNode : public rclcpp_lifecycle::LifecycleNode {
       params_.follower_cmd_timeout_s =
           get_parameter("follower_cmd_timeout_s").as_double();
       params_.gate_cmd_timeout_s = get_parameter("gate_cmd_timeout_s").as_double();
+      params_.stale_warn_threshold_s =
+          get_parameter("stale_warn_threshold_s").as_double();
+      params_.stale_mrm_threshold_s =
+          get_parameter("stale_mrm_threshold_s").as_double();
+      params_.confirm_frames_to_escalate =
+          static_cast<int>(get_parameter("confirm_frames_to_escalate").as_int());
+      params_.confirm_frames_to_recover =
+          static_cast<int>(get_parameter("confirm_frames_to_recover").as_int());
       rate_hz_ = get_parameter("rate_hz").as_double();
       diagnostics_timeout_s_ = get_parameter("diagnostics_timeout_s").as_double();
       diagnostics_startup_grace_s_ =
@@ -169,6 +181,14 @@ class SafetyMonitorNode : public rclcpp_lifecycle::LifecycleNode {
                                            params_.follower_cmd_timeout_s, "rate_hz", rate_hz_);
     common::require_timeout_exceeds_period("gate_cmd_timeout_s", params_.gate_cmd_timeout_s,
                                            "rate_hz", rate_hz_);
+    common::require_positive("stale_warn_threshold_s", params_.stale_warn_threshold_s);
+    common::require_positive("stale_mrm_threshold_s", params_.stale_mrm_threshold_s);
+    if (params_.confirm_frames_to_escalate <= 0) {
+      throw std::invalid_argument("confirm_frames_to_escalate must be > 0");
+    }
+    if (params_.confirm_frames_to_recover <= 0) {
+      throw std::invalid_argument("confirm_frames_to_recover must be > 0");
+    }
     common::require_positive("diagnostics_timeout_s", diagnostics_timeout_s_);
     common::require_nonnegative("diagnostics_startup_grace_s",
                                 diagnostics_startup_grace_s_);

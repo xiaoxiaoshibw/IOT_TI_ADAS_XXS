@@ -10,6 +10,11 @@
     trajectory_timeout_s: 1.0
     follower_cmd_timeout_s: 0.8
     gate_cmd_timeout_s: 0.8
+    # 与 SoC 配置保持一致；值为各通道正常超时的倍率，core 按严重度排序。
+    stale_warn_threshold_s: 2.0
+    stale_mrm_threshold_s: 1.0
+    confirm_frames_to_escalate: 3
+    confirm_frames_to_recover: 3
     diagnostics_timeout_s: 3.0
     diagnostics_startup_grace_s: 5.0
     required_diagnostic_components:
