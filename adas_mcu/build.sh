@@ -5,11 +5,13 @@ set -e
 CGT=/home/xxs/程序/ti/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/ti-cgt-c2000_25.11.1.LTS
 CW=/home/xxs/程序/ti/c2000/C2000Ware_26_01_00_00
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 CC=$CGT/bin/cl2000
 LD=$CGT/bin/cl2000
 HEX=$CGT/bin/hex2000
 
-PROJ=/home/xxs/ADAS_ORIN_TI/ADAS0.0.2/MCU
+PROJ="$SCRIPT_DIR"
 SRC=$PROJ/src
 INC=$PROJ/include
 BLD=$PROJ/build

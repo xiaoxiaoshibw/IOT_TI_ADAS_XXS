@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-mcu="$root/MCU"
+mcu="$root/adas_mcu"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cc=(gcc -std=c99 -Wall -Wextra -Werror -I "$mcu/include")
