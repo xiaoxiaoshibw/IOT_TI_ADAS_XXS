@@ -166,6 +166,16 @@ inline QString probe_gpu_vendor() {
 inline QVector<PreflightItem> run_preflight(const LaunchConfig& config) {
   QVector<PreflightItem> items;
 
+  if (QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
+          .compare(QStringLiteral("sil"), Qt::CaseInsensitive) == 0) {
+    // SIL 不依赖 CARLA、GPU、Orin、CAN 或 F280025C；启动器本身会在
+    // ProcessManager 内定位 scripts/run_sil_fallback.sh，并把真实错误写入底部日志。
+    items.push_back({QStringLiteral("sil_runtime"), QStringLiteral("SIL 运行环境"),
+                     PreflightLevel::Ok,
+                     QStringLiteral("本地闭环模式：跳过 CARLA / Orin / MCU / CAN 体检")});
+    return items;
+  }
+
   const QString carla_exe = carla_executable(config);
   items.push_back(classify_carla_executable(QFileInfo::exists(carla_exe), carla_exe));
 

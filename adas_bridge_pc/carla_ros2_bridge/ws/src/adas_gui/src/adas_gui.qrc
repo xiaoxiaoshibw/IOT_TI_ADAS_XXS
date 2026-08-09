@@ -1,0 +1,5 @@
+<RCC>
+  <!-- Icons are generated in icons.cpp; this resource is kept as an optional
+       hook for the original GUI's runtime font loading. -->
+  <qresource prefix="/adas_gui" />
+</RCC>

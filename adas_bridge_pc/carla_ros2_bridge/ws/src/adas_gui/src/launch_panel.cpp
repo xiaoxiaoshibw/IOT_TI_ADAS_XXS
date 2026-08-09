@@ -233,7 +233,8 @@ void LaunchPanel::build_ui() {
   product->setStyleSheet(QStringLiteral(
       "color:%1;font-size:15px;font-weight:700;letter-spacing:0px;")
       .arg(theme::kTextPrimary));
-  auto* mode = new QLabel(QStringLiteral("HIL / SIL"));
+  auto* mode = new QLabel(manager_.silMode() ? QStringLiteral("SIL")
+                                             : QStringLiteral("HIL / SIL"));
   mode->setStyleSheet(QStringLiteral(
       "color:%1;background:%2;border:1px solid %3;border-radius:5px;"
       "padding:3px 7px;font-size:10px;font-weight:700;")
@@ -347,8 +348,10 @@ void LaunchPanel::build_ui() {
   bridge_row->setSpacing(6);
   bridge_row->addWidget(bridge_light_);
   bridge_row->addWidget(bridge_state_label_, 1);
-  status_grid->addRow(QStringLiteral("CARLA"), carla_row);
-  status_grid->addRow(QStringLiteral("桥接"), bridge_row);
+  status_grid->addRow(manager_.silMode() ? QStringLiteral("SIL 仿真") : QStringLiteral("CARLA"),
+                      carla_row);
+  status_grid->addRow(manager_.silMode() ? QStringLiteral("SIL 栈") : QStringLiteral("桥接"),
+                      bridge_row);
   status_grid->addRow(QStringLiteral("时长"), runtime_label_);
   status_box->layout()->addWidget(status_body);
   root->addWidget(status_box);
@@ -362,13 +365,18 @@ void LaunchPanel::build_ui() {
   health_grid->setVerticalSpacing(2);
   health_grid->setColumnStretch(1, 1);
   const QList<QPair<QString, QString>> health_rows = {
-      {QStringLiteral("carla"), QStringLiteral("CARLA")},
-      {QStringLiteral("bridge"), QStringLiteral("ROS2 Bridge")},
+      {QStringLiteral("carla"), manager_.silMode() ? QStringLiteral("SIL 仿真")
+                                                     : QStringLiteral("CARLA")},
+      {QStringLiteral("bridge"), manager_.silMode() ? QStringLiteral("SIL 控制栈")
+                                                      : QStringLiteral("ROS2 Bridge")},
       {QStringLiteral("orin_stack"), QStringLiteral("Orin控制栈")},
-      {QStringLiteral("can_gateway"), QStringLiteral("CAN Gateway")},
+      {QStringLiteral("can_gateway"), manager_.silMode() ? QStringLiteral("SIL 执行输出")
+                                                           : QStringLiteral("CAN Gateway")},
       {QStringLiteral("safety_monitor"), QStringLiteral("Safety Monitor")},
-      {QStringLiteral("mcu"), QStringLiteral("F280025C MCU")},
-      {QStringLiteral("can_link"), QStringLiteral("CAN链路")},
+      {QStringLiteral("mcu"), manager_.silMode() ? QStringLiteral("SIL MCU 模型")
+                                                   : QStringLiteral("F280025C MCU")},
+      {QStringLiteral("can_link"), manager_.silMode() ? QStringLiteral("SIL 数据链路")
+                                                        : QStringLiteral("CAN链路")},
       {QStringLiteral("odometry"), QStringLiteral("里程计")},
       {QStringLiteral("navigation"), QStringLiteral("导航模块")},
   };

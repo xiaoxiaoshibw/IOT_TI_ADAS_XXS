@@ -34,6 +34,8 @@ QString age_detail(bool ever, double age_s, const QString& evidence) {
 }  // namespace
 
 RosBridge::RosBridge(QObject* parent) : QObject(parent) {
+  sil_mode_ = QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
+                  .compare(QStringLiteral("sil"), Qt::CaseInsensitive) == 0;
   qRegisterMetaType<GuiMcuStatus>("adas::gui::GuiMcuStatus");
   qRegisterMetaType<GuiActuation>("adas::gui::GuiActuation");
   qRegisterMetaType<GuiNavStatus>("adas::gui::GuiNavStatus");
@@ -81,6 +83,22 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
         last_actuation_ = Clock::now();
         emit actuationChanged(actuation);
       });
+  if (sil_mode_) {
+    // SIL 没有 MCU/CAN feedback 话题；vehicle_interface 的闭环命令就是原 GUI
+    // 执行器卡片需要的同构数据。保留 HIL 订阅，上线时只由模式开关决定数据源。
+    sub_sil_actuation_ = node_->create_subscription<adas_msgs::msg::ActuationCommand>(
+        "/adas/vehicle/actuation_cmd", rclcpp::QoS(10).reliable(),
+        [this](adas_msgs::msg::ActuationCommand::ConstSharedPtr message) {
+          GuiActuation actuation;
+          actuation.steer = message->steer;
+          actuation.throttle = message->throttle;
+          actuation.brake = message->brake;
+          actuation.ever_received = true;
+          last_actuation_ = Clock::now();
+          emit actuationChanged(actuation);
+          emitSilMcuStatus();
+        });
+  }
   {
     rclcpp::QoS qos(1);
     qos.reliable().transient_local();
@@ -244,15 +262,60 @@ void RosBridge::publishFaultInjectCommand(int cmd, int param, const QString& lab
   pub_fault_inject_->publish(msg);
 }
 
+void RosBridge::emitSilMcuStatus() {
+  if (!sil_mode_) return;
+  const auto now = Clock::now();
+  if (last_sil_status_emit_ != Clock::time_point{} &&
+      now - last_sil_status_emit_ < std::chrono::milliseconds(100)) {
+    return;
+  }
+  last_sil_status_emit_ = now;
+
+  GuiMcuStatus status;
+  // 给原 SafetyPanel 提供与 HIL McuStatus 相同的语义：SIL 的控制栈正常时
+  // 等价于 ACTIVE/PRIMARY，安全聚合进入 MRM 时映射为对应的停车态。
+  status.system_state = latest_safety_level_ >= 3 ? 5U
+                       : latest_safety_level_ >= 2 ? 4U
+                       : latest_safety_level_ == 1 ? 3U : 2U;
+  status.active_source = 1U;
+  status.fault_level = latest_safety_level_ >= 2 ? 2U
+                      : latest_safety_level_ == 1 ? 1U : 0U;
+  status.primary_fresh = true;
+  status.aeb_floor_active = false;
+  status.degraded = latest_safety_level_ >= 1;
+  status.manual_override = false;
+  status.estop = latest_safety_level_ >= 3;
+  status.protocol_version = 3U;
+  status.protocol_version_ok = true;
+  status.test_build = false;
+  status.heartbeat_age_s = 0.0F;
+  status.feedback_age_s = 0.0F;
+  status.command_age_s = 0.0F;
+  status.degrade_reason = QStringLiteral("SIL vehicle_interface（无 MCU/CAN）");
+  status.ever_received = true;
+  last_mcu_ = now;
+  ever_mcu_ = true;
+  latest_mcu_ = status;
+  emit mcuStatusChanged(status);
+}
+
 bool RosBridge::hasCarlaBridgeNode() const {
   auto names = node_->get_node_names();
-  if (!has_node(names, "carla_bridge")) return false;
-  // DDS zombie: 进程已死但 discovery 缓存未过期（~10s），节点名仍在。
-  // 用 pgrep 确认进程真实存活，避免误判孤儿/僵尸为"外部实例"。
-  QProcess check;
-  check.start("pgrep", {"-f", "adas_carla_bridge.*bridge_node|carla_bridge"});
-  check.waitForFinished(1000);
-  return check.exitCode() == 0;
+  if (has_node(names, "carla_bridge")) {
+    // DDS zombie: 进程已死但 discovery 缓存未过期（~10s），节点名仍在。
+    // 用 pgrep 确认进程真实存活，避免误判孤儿/僵尸为"外部实例"。
+    QProcess check;
+    check.start("pgrep", {"-f", "adas_carla_bridge.*bridge_node|carla_bridge"});
+    check.waitForFinished(1000);
+    return check.exitCode() == 0;
+  }
+  if (sil_mode_) {
+    // SIL 没有 carla_bridge 节点；用控制输出和安全态势两个发布者作为
+    // 原 GUI 的 bridge probe，允许一键启动时复用已经运行的 SIL。
+    return node_->count_publishers("/adas/vehicle/actuation_cmd") > 0U &&
+           node_->count_publishers("/adas/system/safety_status") > 0U;
+  }
+  return false;
 }
 
 void RosBridge::handleObjects(const adas_msgs::msg::TrackedObjectArray& message) {
@@ -310,7 +373,9 @@ void RosBridge::updateHealthSnapshot() {
     return seconds >= 0.0 && seconds <= limit_s;
   };
   const auto names = node_->get_node_names();
-  const bool bridge_node = has_node(names, "carla_bridge");
+  const bool sil_runtime = sil_mode_ &&
+                           node_->count_publishers("/adas/vehicle/actuation_cmd") > 0U;
+  const bool bridge_node = has_node(names, "carla_bridge") || sil_runtime;
   const bool odom_fresh = fresh(last_odom_, 0.5);
   const bool lane_fresh = fresh(last_lane_, 0.5);
   const bool mcu_fresh = fresh(last_mcu_, 0.5);
@@ -330,16 +395,19 @@ void RosBridge::updateHealthSnapshot() {
   if (bridge_node && odom_fresh) carla_state = HealthState::Healthy;
   else if (bridge_node && last_odom_ == Clock::time_point{}) carla_state = HealthState::Starting;
   else if (bridge_node) carla_state = HealthState::Degraded;
-  add("carla", "CARLA", carla_state,
-      age_detail(last_odom_ != Clock::time_point{}, age(last_odom_),
-                 QStringLiteral("里程计流")));
+  add("carla", sil_mode_ ? "SIL 仿真" : "CARLA", carla_state,
+      sil_mode_ ? QStringLiteral("本地 SIL 里程计=%1，控制输出=%2")
+                      .arg(odom_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"),
+                           actuation_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"))
+                : age_detail(last_odom_ != Clock::time_point{}, age(last_odom_),
+                             QStringLiteral("里程计流")));
 
   HealthState bridge_state = HealthState::Offline;
   if (bridge_node && odom_fresh && lane_fresh) bridge_state = HealthState::Healthy;
   else if (bridge_node && last_odom_ == Clock::time_point{}) bridge_state = HealthState::Starting;
   else if (bridge_node) bridge_state = HealthState::Degraded;
-  add("bridge", "CARLA ROS2 Bridge", bridge_state,
-      QStringLiteral("节点=%1，里程计=%2，车道=%3")
+  add("bridge", sil_mode_ ? "SIL 控制栈" : "CARLA ROS2 Bridge", bridge_state,
+      QStringLiteral("节点/运行时=%1，里程计=%2，车道=%3")
           .arg(bridge_node ? QStringLiteral("已发现") : QStringLiteral("未发现"),
                odom_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"),
                lane_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流")));
@@ -368,10 +436,11 @@ void RosBridge::updateHealthSnapshot() {
 
   const bool gateway_node = has_node(names, "can_gateway");
   HealthState gateway_state = HealthState::Offline;
-  if (mcu_fresh && actuation_fresh) gateway_state = HealthState::Healthy;
+  if (sil_mode_ && actuation_fresh) gateway_state = HealthState::Healthy;
+  else if (mcu_fresh && actuation_fresh) gateway_state = HealthState::Healthy;
   else if (!ever_mcu_) gateway_state = HealthState::Starting;
   else gateway_state = HealthState::Degraded;
-  add("can_gateway", "CAN Gateway", gateway_state,
+  add("can_gateway", sil_mode_ ? "SIL 执行输出" : "CAN Gateway", gateway_state,
       QStringLiteral("MCU遥测=%1，执行反馈=%2，节点名=%3（跨发行版仅供参考）")
           .arg(mcu_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"),
                actuation_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"),
@@ -404,7 +473,7 @@ void RosBridge::updateHealthSnapshot() {
                     ? HealthState::Degraded
                     : HealthState::Healthy;
   }
-  add("mcu", "F280025C MCU", mcu_state,
+  add("mcu", sil_mode_ ? "SIL MCU 模型" : "F280025C MCU", mcu_state,
       ever_mcu_ ? QStringLiteral("状态=%1，故障码=0x%2，心跳年龄=%3 s")
                       .arg(latest_mcu_.system_state)
                       .arg(latest_mcu_.fault_code, 4, 16, QChar('0'))
@@ -412,16 +481,23 @@ void RosBridge::updateHealthSnapshot() {
                 : QStringLiteral("等待 /adas/mcu/status"));
 
   HealthState can_state = HealthState::Unknown;
-  if (ever_mcu_ && !mcu_fresh) can_state = HealthState::Offline;
-  else if (mcu_fresh) {
+  if (sil_mode_) {
+    can_state = actuation_fresh ? HealthState::Healthy :
+                last_actuation_ == Clock::time_point{} ? HealthState::Starting
+                                                        : HealthState::Degraded;
+  }
+  if (!sil_mode_ && ever_mcu_ && !mcu_fresh) can_state = HealthState::Offline;
+  else if (!sil_mode_ && mcu_fresh) {
     const bool bus_off = (latest_mcu_.fault_code & (1U << 11U)) != 0U;
     if (bus_off || !latest_mcu_.protocol_version_ok) can_state = HealthState::Fault;
     else if (latest_mcu_.feedback_age_s < 0.0f || latest_mcu_.feedback_age_s >= 0.5f)
       can_state = HealthState::Degraded;
     else can_state = HealthState::Healthy;
   }
-  add("can_link", "CAN链路", can_state,
-      ever_mcu_ ? QStringLiteral("反馈年龄=%1 s，协议=%2")
+  add("can_link", sil_mode_ ? "SIL 数据链路" : "CAN链路", can_state,
+      sil_mode_ ? QStringLiteral("SIL 不经 CAN，执行输出=%1")
+                      .arg(actuation_fresh ? QStringLiteral("新鲜") : QStringLiteral("断流"))
+                : ever_mcu_ ? QStringLiteral("反馈年龄=%1 s，协议=%2")
                       .arg(latest_mcu_.feedback_age_s, 0, 'f', 2)
                       .arg(latest_mcu_.protocol_version_ok ? QStringLiteral("匹配")
                                                            : QStringLiteral("不匹配"))

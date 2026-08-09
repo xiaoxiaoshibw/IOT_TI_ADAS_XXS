@@ -159,8 +159,10 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
   setCentralWidget(rows_);
 
   // 状态栏：中文 + LED 颜色规则（绿/黄/红/灰）
-  dot_mcu_ = make_dot(QStringLiteral("MCU"));
-  dot_actuation_ = make_dot(QStringLiteral("执行器"));
+  dot_mcu_ = make_dot(bridge->isSilMode() ? QStringLiteral("SIL 状态")
+                                          : QStringLiteral("MCU"));
+  dot_actuation_ = make_dot(bridge->isSilMode() ? QStringLiteral("SIL 执行")
+                                                 : QStringLiteral("执行器"));
   dot_ego_ = make_dot(QStringLiteral("里程计"));
   dot_nav_ = make_dot(QStringLiteral("导航"));
   scenario_label_ = new QLabel(QStringLiteral("场景: --"));
@@ -428,8 +430,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(QStringLiteral("退出 ADAS 验证台"));
-    box.setText(QStringLiteral("<b>完整 HIL 会话仍在运行</b><br>"
-                               "关闭 GUI 将停止 bridge、CARLA 与 Orin HIL/CAN 服务。"));
+    box.setText(bridge_->isSilMode()
+                    ? QStringLiteral("<b>完整 SIL 会话仍在运行</b><br>"
+                                     "关闭 GUI 将停止本地 SIL 闭环进程。")
+                    : QStringLiteral("<b>完整 HIL 会话仍在运行</b><br>"
+                                     "关闭 GUI 将停止 bridge、CARLA 与 Orin HIL/CAN 服务。"));
     box.setInformativeText(QStringLiteral("确认停止完整系统并退出 GUI？"));
     box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
     box.setDefaultButton(QMessageBox::Cancel);

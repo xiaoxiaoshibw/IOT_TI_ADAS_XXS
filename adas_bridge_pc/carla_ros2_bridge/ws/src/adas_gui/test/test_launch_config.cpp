@@ -54,7 +54,8 @@ TEST(LaunchConfig, BridgeArgumentsRos2Source) {
                              "bridge_node", "--scenario",
                              "aeb",         "--town",
                              "Town03",      "--carla-port",
-                             "2000",        "--control-source",
+                             "2000",        "--duration",
+                             "0",           "--control-source",
                              "ros2"};
   EXPECT_EQ(args, expected);
 }

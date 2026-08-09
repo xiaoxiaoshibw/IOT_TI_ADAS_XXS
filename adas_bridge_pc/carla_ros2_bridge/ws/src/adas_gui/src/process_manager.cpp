@@ -122,6 +122,8 @@ void ManagedProcess::forward_output(bool stderr) {
 ProcessManager::ProcessManager(QObject* parent)
     : QObject(parent), carla_(QStringLiteral("CARLA")),
       bridge_(QStringLiteral("桥接")) {
+  sil_mode_ = QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
+                  .compare(QStringLiteral("sil"), Qt::CaseInsensitive) == 0;
   connect(&carla_, &ManagedProcess::logLine, this, &ProcessManager::logLine);
   connect(&bridge_, &ManagedProcess::logLine, this, &ProcessManager::logLine);
   // Orin 远端命令的 stdout/stderr 走同一 LogDrawer（tag 由 OrinStackManager 自带）
@@ -229,8 +231,12 @@ ProcessManager::ProcessManager(QObject* parent)
     forward_hil_output(hil_manager_, hil_error_buffer_, true);
   });
   connect(&hil_manager_, &QProcess::started, this, [this]() {
-    emit carlaChanged(ProcState::Starting, false, QStringLiteral("统一 HIL 管理器已启动"));
-    emit bridgeChanged(ProcState::Starting, QStringLiteral("等待 CARLA 就绪后自动启动"));
+    emit carlaChanged(ProcState::Starting, false,
+                      sil_mode_ ? QStringLiteral("统一 SIL 管理器已启动")
+                                : QStringLiteral("统一 HIL 管理器已启动"));
+    emit bridgeChanged(ProcState::Starting,
+                       sil_mode_ ? QStringLiteral("等待 SIL 话题就绪")
+                                 : QStringLiteral("等待 CARLA 就绪后自动启动"));
   });
   connect(&hil_manager_, &QProcess::errorOccurred, this,
           [this](QProcess::ProcessError) {
@@ -252,7 +258,9 @@ ProcessManager::ProcessManager(QObject* parent)
             const bool clean = status == QProcess::NormalExit && (code == 0 || expected);
             const ProcState state = clean ? ProcState::Stopped : ProcState::Failed;
             const QString detail = expected ? QStringLiteral("完整系统已停止")
-                                            : QStringLiteral("统一管理器退出：exit=%1").arg(code);
+                                            : (sil_mode_ ? QStringLiteral("SIL 管理器退出：exit=%1")
+                                                         : QStringLiteral("统一管理器退出：exit=%1"))
+                                                .arg(code);
             emit carlaChanged(state, false, detail);
             emit bridgeChanged(state, detail);
           });
@@ -357,9 +365,50 @@ QString find_release_script(const QString& name) {
   return QString();
 }
 
+QString find_sil_script() {
+  const QString override_root =
+      QProcessEnvironment::systemEnvironment().value(QStringLiteral("ADAS_SIL_ROOT"));
+  if (!override_root.isEmpty()) {
+    const QString candidate =
+        QDir(override_root).filePath(QStringLiteral("scripts/run_sil_fallback.sh"));
+    if (QFileInfo::exists(candidate)) return candidate;
+  }
+
+  // 安装后的 adas_gui 位于 ws/install/adas_gui/lib/adas_gui；向上搜索即可
+  // 找到 bowen_ADAS/scripts/run_sil_fallback.sh。也支持从源码目录启动。
+  for (QDir dir(QCoreApplication::applicationDirPath());; ) {
+    const QString candidate = dir.filePath(QStringLiteral("scripts/run_sil_fallback.sh"));
+    if (QFileInfo::exists(candidate)) return candidate;
+    if (!dir.cdUp()) break;
+  }
+  for (QDir dir(QDir::currentPath());; ) {
+    const QString candidate = dir.filePath(QStringLiteral("scripts/run_sil_fallback.sh"));
+    if (QFileInfo::exists(candidate)) return candidate;
+    if (!dir.cdUp()) break;
+  }
+  return QString();
+}
+
+QString sil_scenario_name(const QString& scenario) {
+  if (scenario.startsWith(QStringLiteral("aeb"), Qt::CaseInsensitive)) {
+    return QStringLiteral("aeb");
+  }
+  if (scenario.startsWith(QStringLiteral("acc"), Qt::CaseInsensitive)) {
+    return QStringLiteral("acc");
+  }
+  if (scenario.contains(QStringLiteral("overtake"), Qt::CaseInsensitive)) {
+    return QStringLiteral("overtake");
+  }
+  return QStringLiteral("baseline");
+}
+
 }  // namespace
 
 void ProcessManager::startCarla(const LaunchConfig& config) {
+  if (sil_mode_) {
+    start_sil_stack(config);
+    return;
+  }
   pending_config_ = config;
   if (port_open_now(config.carla_port)) {
     external_carla_ = true;
@@ -402,6 +451,18 @@ void ProcessManager::startCarla(const LaunchConfig& config) {
 }
 
 void ProcessManager::startBridge(const LaunchConfig& config) {
+  if (sil_mode_) {
+    if (bridge_probe_ && bridge_probe_()) {
+      external_carla_ = true;
+      external_bridge_ = true;
+      carla_ready_ = true;
+      emit carlaChanged(ProcState::Running, true, QStringLiteral("外部 SIL · 话题已就绪"));
+      emit bridgeChanged(ProcState::Running, QStringLiteral("外部 SIL · ROS graph 已发现"));
+      return;
+    }
+    start_sil_stack(config);
+    return;
+  }
   const bool graph_has_bridge = bridge_probe_ ? bridge_probe_() : external_bridge_;
   external_bridge_ = graph_has_bridge;
   emit logLine(QStringLiteral("桥接"),
@@ -459,6 +520,22 @@ void ProcessManager::setExternalBridgeDetected(bool detected) {
 }
 
 void ProcessManager::startAll(const LaunchConfig& config) {
+  if (sil_mode_) {
+    ++startup_generation_;
+    if (bridge_probe_ && bridge_probe_()) {
+      external_carla_ = true;
+      external_bridge_ = true;
+      carla_ready_ = true;
+      emit logLine(QStringLiteral("SIL"),
+                   QStringLiteral("检测到已运行 SIL，复用现有闭环，不重复启动"));
+      emit carlaChanged(ProcState::Running, true, QStringLiteral("外部 SIL · 话题已就绪"));
+      emit bridgeChanged(ProcState::Running, QStringLiteral("外部 SIL · ROS graph 已发现"));
+      emit stackProgress(QStringLiteral("complete"), QStringLiteral("SIL 闭环已连接 ✅"));
+    } else {
+      start_sil_stack(config);
+    }
+    return;
+  }
   if (readiness_running_) {
     bridge_pending_ = true;
     emit logLine(QStringLiteral("STARTUP"),
@@ -580,6 +657,35 @@ void ProcessManager::stopBridge() {
     emit logLine(QStringLiteral("停止"), QStringLiteral("正在停止本 GUI 启动的桥接"));
   }
   bridge_.stop();
+}
+
+void ProcessManager::start_sil_stack(const LaunchConfig& config) {
+  if (hilManagerActive()) return;
+  const QString script = find_sil_script();
+  if (script.isEmpty()) {
+    const QString detail =
+        QStringLiteral("找不到 scripts/run_sil_fallback.sh；可设置 ADAS_SIL_ROOT=/home/xxs/bowen_ADAS");
+    emit logLine(QStringLiteral("SIL"), detail);
+    emit carlaChanged(ProcState::Failed, false, detail);
+    emit bridgeChanged(ProcState::Failed, detail);
+    return;
+  }
+
+  pending_config_ = config;
+  hil_stop_requested_ = false;
+  hil_output_buffer_.clear();
+  hil_error_buffer_.clear();
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert(QStringLiteral("ADAS_GUI_MODE"), QStringLiteral("sil"));
+  hil_manager_.setProcessEnvironment(env);
+  const QString scenario = sil_scenario_name(config.scenario);
+  const QStringList args{QStringLiteral("--scenario"), scenario};
+  emit logLine(QStringLiteral("SIL"),
+               QStringLiteral("$ %1 %2 (ROS_DOMAIN_ID=%3)")
+                   .arg(script, args.join(' '), env.value(QStringLiteral("ROS_DOMAIN_ID"))));
+  emit stackProgress(QStringLiteral("sil"),
+                    QStringLiteral("启动 SIL 闭环：%1").arg(scenario));
+  hil_manager_.start(script, args);
 }
 
 void ProcessManager::start_release_stack(const LaunchConfig& config,

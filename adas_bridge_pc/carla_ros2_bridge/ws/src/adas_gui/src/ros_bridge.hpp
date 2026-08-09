@@ -97,6 +97,9 @@ class RosBridge : public QObject {
   void publishGoal(double world_x, double world_y);
   void publishCancel();
   bool hasCarlaBridgeNode() const;
+  // SIL 适配仍沿用原 GUI 的 ROS 观察面；仅在 ADAS_GUI_MODE=sil 时把
+  // vehicle_interface 的闭环输出映射为原来的 MCU/执行器显示模型。
+  bool isSilMode() const { return sil_mode_; }
   // 故障注入命令（审计整改 TOP10-2）：向 `/adas/_debug/fault_inject_cmd`
   // 发布 JSON `{cmd,param,label,ts_ms,source}`。桥节点订阅后通过 PC CANalyst-II
   // 发送 0x301 帧到 MCU。仅当 MCU 烧录 ADAS_TEST_BUILD=1 时生效。
@@ -125,10 +128,12 @@ class RosBridge : public QObject {
   void spin();
   void updateHealthSnapshot();
   void handleObjects(const adas_msgs::msg::TrackedObjectArray& message);
+  void emitSilMcuStatus();
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<adas_msgs::msg::McuStatus>::SharedPtr sub_status_;
   rclcpp::Subscription<adas_msgs::msg::ActuationCommand>::SharedPtr sub_actuation_;
+  rclcpp::Subscription<adas_msgs::msg::ActuationCommand>::SharedPtr sub_sil_actuation_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_dtc_;
   rclcpp::Subscription<adas_msgs::msg::LaneGraph>::SharedPtr sub_map_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr sub_route_;
@@ -164,6 +169,8 @@ class RosBridge : public QObject {
   double latest_ego_y_{0.0};
   double latest_ego_yaw_{0.0};
   std::chrono::steady_clock::time_point last_pose_emit_{};
+  std::chrono::steady_clock::time_point last_sil_status_emit_{};
+  bool sil_mode_{false};
   std::atomic<bool> running_{true};
   std::thread spin_thread_;
 };

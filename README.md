@@ -23,6 +23,39 @@
 
 ## 2. 快速安装
 
+### 2.0 比赛日硬件故障兜底：PC SIL
+
+`scripts/run_sil_fallback.sh` 是独立的 PC SIL 入口。它只使用 `adas_soc` 内置的
+运动学仿真车辆和 ROS2 节点，不需要 CARLA、Orin Nano、F280025C、CAN 适配器或实际传感器。
+首次使用可直接执行：
+
+```bash
+cd /home/xxs/bowen_ADAS
+./scripts/run_sil_fallback.sh --build --host-tests --check
+```
+
+验收通过后，比赛现场持续运行基准 SIL：
+
+```bash
+./scripts/run_sil_fallback.sh
+```
+
+按 `Ctrl-C` 停止。可用 `--scenario acc|aeb|overtake|redundant|lqr` 切换内置场景，
+日志默认写入 `logs/sil/`。脚本默认使用 `ROS_DOMAIN_ID=145`，与真实 HIL/GUI 隔离；
+其它要接入 SIL 的工具必须显式使用同一 Domain。
+
+原 Qt GUI 的 SIL 适配保留原有界面、地图/导航、日志、安全态势和故障注入交互，
+只替换数据源与启动后端。启动方式：
+
+```bash
+cd /home/xxs/bowen_ADAS
+ADAS_GUI_MODE=sil ROS_DOMAIN_ID=145 RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
+  ./adas_bridge_pc/start_gui.sh
+```
+
+GUI 的“一键启动完整系统”在该模式下启动或复用 `run_sil_fallback.sh`，不会拉起
+CARLA，也不会尝试连接 Orin、F280025C 或 CAN 设备。
+
 ### 2.1 顶层依赖(系统级)
 
 ```bash

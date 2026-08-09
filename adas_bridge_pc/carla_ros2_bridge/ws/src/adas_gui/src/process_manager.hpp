@@ -104,6 +104,7 @@ class ProcessManager : public QObject {
   bool hasManagedBridge() const { return hilManagerActive() || bridge_.active(); }
   bool externalCarlaDetected() const { return external_carla_; }
   bool externalBridgeDetected() const { return external_bridge_; }
+  bool silMode() const { return sil_mode_; }
   // 由 RosBridge 提供同步 ROS graph 探针；启动前必须再次检查，避免 GUI
   // 重启后把仍在运行的外部 carla_bridge 再启动一份。
   void setBridgeProbe(std::function<bool()> probe) { bridge_probe_ = std::move(probe); }
@@ -166,6 +167,7 @@ class ProcessManager : public QObject {
   void stop_readiness_probe();
   void on_readiness_finished(int exit_code, QProcess::ExitStatus exit_status);
   void start_release_stack(const LaunchConfig& config, const QString& script);
+  void start_sil_stack(const LaunchConfig& config);
   void stop_release_stack(const QString& script);
   void forward_hil_output(QProcess& process, QByteArray& buffer, bool stderr);
 
@@ -197,6 +199,7 @@ class ProcessManager : public QObject {
   bool bridge_pending_{false};  // 等 CARLA 就绪后自动启桥
   bool external_carla_{false};
   bool external_bridge_{false};
+  bool sil_mode_{false};
   std::function<bool()> bridge_probe_;
 
   // ---- 全流程编排上下文 ----
