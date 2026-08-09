@@ -42,6 +42,12 @@ struct TrackerParams {
   double v_filter_tau_s{0.3};
   double a_filter_tau_s{0.5};
   double track_stale_s{0.5};        // 超时未更新的 track 清理
+  // Commit 5 — 主前车选举的"稳定带"。详见 .cpp select_primary_lead()。
+  int confirm_frames{3};            // 新候选至少连续 N 帧合格才允许抢占
+  double gain_m{4.0};               // 新候选只有比当前主车近 ≥ gain_m 才允许抢
+  int retain_frames_on_lost{3};     // 主车短暂丢失后保留 N 帧其最后已知 gap/speed
+  double prediction_horizon_s{1.5};  // 横向预测前瞻时长（只用于远距离目标限定）
+  double prediction_max_s_m{20.0};  // 横向预测弧长上限（避免远距离外推爆炸）
 };
 
 struct TrackerOutput {
@@ -71,7 +77,18 @@ class ObjectTrackerCore {
 
   TrackerParams params_;
   std::map<uint32_t, Track> tracks_;
+  // Commit 5 — sticky 主前车选择的内部状态。candidate_frames_[id] 累积新候选
+  // 连续合格的帧数，达到 confirm_frames 才允许切换；切走时把原主车归零。
+  // lost_frames_ 记录当前主车被短暂漏检的帧数（≤ retain_frames_on_lost 时仍
+  // 沿用其最后已知 gap/speed，超过则清空）。
+  std::map<uint32_t, int> candidate_frames_;
+  int lost_frames_{0};
   int last_primary_{-1};
+  double last_primary_gap_m_{0.0};
+  double last_primary_speed_mps_{0.0};
+  // 把更新算法拆成两个私有助手
+  bool qualify_for_lead(const TrackedObjectData& t) const;
+  int select_primary_lead(const std::vector<TrackedObjectData>& objects);
 };
 
 }  // namespace adas::perception

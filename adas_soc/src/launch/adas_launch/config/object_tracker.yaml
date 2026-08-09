@@ -8,3 +8,9 @@
     track_stale_s: 0.5
     expected_rate_hz: 20.0
     input_timeout_s: 0.6
+    # Commit 5 — sticky 主前车选择参数
+    confirm_frames: 3
+    gain_m: 4.0
+    retain_frames_on_lost: 3
+    prediction_horizon_s: 1.5
+    prediction_max_s_m: 20.0
