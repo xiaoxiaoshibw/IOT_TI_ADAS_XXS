@@ -34,6 +34,18 @@ AebResult AebCore::update(const common::KinematicState& ego,
   uint8_t best_class = 0;
   const double hit_dist = params_.corridor_half_width_m + params_.obj_radius_m;
   for (const auto& obj : objects) {
+    // Transform the object's current position into the ego frame before
+    // prediction.  A vehicle well behind the ego must not cause an AEB
+    // decision merely because its world-frame trajectory intersects the
+    // ego's future path.
+    const double dx0 = obj.x - ego.pose.x;
+    const double dy0 = obj.y - ego.pose.y;
+    const double initial_longitudinal =
+        std::cos(ego.pose.yaw) * dx0 + std::sin(ego.pose.yaw) * dy0;
+    if (initial_longitudinal < -params_.rear_filter_m || initial_longitudinal > 50.0) {
+      continue;
+    }
+
     const double ovx = std::cos(obj.yaw) * obj.v_mps;
     const double ovy = std::sin(obj.yaw) * obj.v_mps;
     double ex = ego.pose.x;
@@ -42,6 +54,19 @@ AebResult AebCore::update(const common::KinematicState& ego,
     for (double t = 0.0; t <= params_.horizon_s + 1e-9; t += params_.step_s) {
       const double ox = obj.x + ovx * t;
       const double oy = obj.y + ovy * t;
+      const double dx = ox - ex;
+      const double dy = oy - ey;
+      const double longitudinal = std::cos(eyaw) * dx + std::sin(eyaw) * dy;
+      const double lateral = -std::sin(eyaw) * dx + std::cos(eyaw) * dy;
+      if (longitudinal < -params_.rear_filter_m || longitudinal > 50.0 ||
+          std::abs(lateral) > params_.corridor_width_m) {
+        // The target may enter the corridor later (e.g. a crossing
+        // pedestrian), so this is evaluated for every prediction sample.
+        eyaw = ac::normalize_angle(eyaw + ego.yaw_rate_rps * params_.step_s);
+        ex += ego.velocity_mps * std::cos(eyaw) * params_.step_s;
+        ey += ego.velocity_mps * std::sin(eyaw) * params_.step_s;
+        continue;
+      }
       if (ac::distance2d(ex, ey, ox, oy) < hit_dist) {
         if (t < best_ttc) {
           best_ttc = t;

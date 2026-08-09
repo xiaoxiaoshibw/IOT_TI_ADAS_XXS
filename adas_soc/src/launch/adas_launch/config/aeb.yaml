@@ -6,6 +6,8 @@
     horizon_s: 4.0
     step_s: 0.1
     corridor_half_width_m: 1.3
+    rear_filter_m: 5.0
+    corridor_width_m: 3.5
     obj_radius_m: 0.5
     ttc_emergency_car_s: 1.8
     ttc_emergency_ped_s: 2.5

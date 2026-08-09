@@ -23,6 +23,8 @@ struct AebParams {
   double horizon_s{4.0};
   double step_s{0.1};
   double corridor_half_width_m{1.3};   // 自车半宽 + 侧向裕量
+  double rear_filter_m{5.0};           // 车后超过该距离的目标不参与 AEB
+  double corridor_width_m{3.5};        // 冲突扫描走廊的横向半宽
   double obj_radius_m{0.5};            // 目标等效半径（点目标膨胀）
   double ttc_emergency_car_s{1.8};
   double ttc_emergency_ped_s{2.5};     // 行人阈值更长

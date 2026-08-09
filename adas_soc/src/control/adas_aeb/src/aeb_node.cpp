@@ -28,6 +28,8 @@ class AebNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("horizon_s", 4.0);
     declare_parameter<double>("step_s", 0.1);
     declare_parameter<double>("corridor_half_width_m", 1.3);
+    declare_parameter<double>("rear_filter_m", 5.0);
+    declare_parameter<double>("corridor_width_m", 3.5);
     declare_parameter<double>("obj_radius_m", 0.5);
     declare_parameter<double>("ttc_emergency_car_s", 1.8);
     declare_parameter<double>("ttc_emergency_ped_s", 2.5);
@@ -44,6 +46,8 @@ class AebNode : public rclcpp_lifecycle::LifecycleNode {
       params_.horizon_s = get_parameter("horizon_s").as_double();
       params_.step_s = get_parameter("step_s").as_double();
       params_.corridor_half_width_m = get_parameter("corridor_half_width_m").as_double();
+      params_.rear_filter_m = get_parameter("rear_filter_m").as_double();
+      params_.corridor_width_m = get_parameter("corridor_width_m").as_double();
       params_.obj_radius_m = get_parameter("obj_radius_m").as_double();
       params_.ttc_emergency_car_s = get_parameter("ttc_emergency_car_s").as_double();
       params_.ttc_emergency_ped_s = get_parameter("ttc_emergency_ped_s").as_double();
@@ -145,6 +149,8 @@ class AebNode : public rclcpp_lifecycle::LifecycleNode {
       throw std::invalid_argument("step_s must not exceed horizon_s");
     }
     common::require_positive("corridor_half_width_m", params_.corridor_half_width_m);
+    common::require_nonnegative("rear_filter_m", params_.rear_filter_m);
+    common::require_positive("corridor_width_m", params_.corridor_width_m);
     common::require_nonnegative("obj_radius_m", params_.obj_radius_m);
     common::require_positive("ttc_emergency_car_s", params_.ttc_emergency_car_s);
     common::require_positive("ttc_emergency_ped_s", params_.ttc_emergency_ped_s);

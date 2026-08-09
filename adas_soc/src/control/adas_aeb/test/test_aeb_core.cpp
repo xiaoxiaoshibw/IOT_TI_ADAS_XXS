@@ -129,3 +129,57 @@ TEST(AebCore, CurvedPathFollowsYawRate) {
   const auto r = feed(core, ego, {stationary_at(28.0, 0.0)}, 50);
   EXPECT_FALSE(r.emergency_active);
 }
+
+TEST(AebCore, RearObjectBeyondFilterDoesNotTrigger) {
+  ct::AebCore core((ct::AebParams()));
+  const auto r = feed(core, ego_straight(15.0), {stationary_at(-10.0, 0.0)}, 50);
+  EXPECT_FALSE(r.emergency_active);
+  EXPECT_EQ(r.state, ct::AebState::kMonitoring);
+}
+
+TEST(AebCore, ForwardObjectOutsideCorridorDoesNotTrigger) {
+  ct::AebCore core((ct::AebParams()));
+  const auto r = feed(core, ego_straight(15.0), {stationary_at(30.0, 5.0)}, 50);
+  EXPECT_FALSE(r.emergency_active);
+  EXPECT_EQ(r.state, ct::AebState::kMonitoring);
+}
+
+TEST(AebCore, ForwardObjectInsideCorridorIsEvaluated) {
+  ct::AebParams params;
+  params.corridor_half_width_m = 2.0;
+  ct::AebCore core(params);
+  // At 20m/s this target reaches the collision corridor in about 1.4s.
+  const auto r = feed(core, ego_straight(20.0), {stationary_at(30.0, 2.0)}, 3);
+  EXPECT_TRUE(r.emergency_active);
+  EXPECT_EQ(r.state, ct::AebState::kEmergency);
+}
+
+TEST(AebCore, FasterObjectBehindEgoDoesNotTrigger) {
+  ct::AebCore core((ct::AebParams()));
+  auto object = stationary_at(-10.0, 0.0);
+  object.yaw = 0.0;
+  object.v_mps = 30.0;  // 同向且比自车快，但当前位于车后 5m 外
+  const auto r = feed(core, ego_straight(15.0), {object}, 50);
+  EXPECT_FALSE(r.emergency_active);
+  EXPECT_EQ(r.state, ct::AebState::kMonitoring);
+}
+
+TEST(AebCore, TtcExactlyAtThresholdIsDeterministicallyNotDangerous) {
+  // The danger contract is strict: TTC equal to the configured limit is not
+  // an emergency; only TTC below the limit enters the confirmation window.
+  constexpr double kHitDistance = 1.8;
+  {
+    ct::AebCore core((ct::AebParams()));
+    const auto r = feed(core, ego_straight(10.0),
+                        {stationary_at(10.0 * 1.8 + kHitDistance - 0.01, 0.0)}, 3);
+    EXPECT_NEAR(r.ttc_s, 1.8, 1e-9);
+    EXPECT_FALSE(r.emergency_active);
+  }
+  {
+    ct::AebCore core((ct::AebParams()));
+    auto pedestrian = stationary_at(10.0 * 2.5 + kHitDistance - 0.01, 0.0, 3);
+    const auto r = feed(core, ego_straight(10.0), {pedestrian}, 3);
+    EXPECT_NEAR(r.ttc_s, 2.5, 1e-9);
+    EXPECT_FALSE(r.emergency_active);
+  }
+}
