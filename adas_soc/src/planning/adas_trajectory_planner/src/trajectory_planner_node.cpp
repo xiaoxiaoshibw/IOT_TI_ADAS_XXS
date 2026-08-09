@@ -53,6 +53,7 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     // its 1.1 s/4 m defaults untouched.
     declare_parameter<double>("global_route.lead_time_gap_s", 1.4);
     declare_parameter<double>("global_route.lead_standstill_m", 4.0);
+    declare_parameter<bool>("lateral_avoidance_enabled", false);
     // 20 Hz bounds the behavior->trajectory scheduler wait to 50 ms while
     // behavior decisions remain at 10 Hz. The core is O(horizon/step) and is
     // intentionally much lighter than perception or CARLA processing.
@@ -181,6 +182,8 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     params_.lane_change_time_s = get_parameter("lane_change_time_s").as_double();
     params_.lane_change_min_len_m = get_parameter("lane_change_min_len_m").as_double();
     params_.lane_width_m = get_parameter("lane_width_m").as_double();
+    params_.lateral_avoidance_enabled =
+        get_parameter("lateral_avoidance_enabled").as_bool();
     input_timeout_s_ = get_parameter("input_timeout_s").as_double();
     global_route_enabled_ = get_parameter("global_route.enabled").as_bool();
     global_route_goal_stop_distance_m_ =
@@ -248,6 +251,18 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     lane.curvature = lane_->curvature;
     lane.lane_width = lane_->lane_width;
     LeadInfo lead;
+    std::vector<StaticObstacle> obstacles;
+    if (objects_ && fresh(objects_rx_time_, objects_received_)) {
+      obstacles.reserve(objects_->objects.size());
+      for (const auto& object : objects_->objects) {
+        // The current message contract has no STATIC class. Unknown-class
+        // detections are the conservative static-obstacle input; classified
+        // vehicles/pedestrians remain on the normal dynamic-object path.
+        obstacles.push_back({object.path_longitudinal_m, object.path_lateral_m,
+                             object.classification ==
+                                 adas_msgs::msg::TrackedObject::CLASS_UNKNOWN});
+      }
+    }
     if (objects_ && objects_->primary_lead_id >= 0 &&
         fresh(objects_rx_time_, objects_received_)) {
       lead.present = true;
@@ -262,7 +277,7 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     const auto trajectory = global_route_enabled_ && global_route_ &&
                                     global_route_->poses.size() >= 2U
-                                ? plan_global_route(ego, lane, cruise_override, lead)
+                                ? plan_global_route(ego, lane, cruise_override, lead, obstacles)
                                 : core_->plan(ego, lane, lead, cruise_override, target_lane);
     if (trajectory.empty()) {
       output_valid_ = false;
@@ -295,7 +310,8 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
   common::Trajectory plan_global_route(const common::KinematicState& ego,
                                        const common::LaneStateData& lane,
                                        double cruise_override_mps,
-                                       const LeadInfo& lead) const {
+                                       const LeadInfo& lead,
+                                       const std::vector<StaticObstacle>& obstacles) const {
     // Commit 2 — 把 node 内的内联实现委托给 core::plan_global_route（lead 沿
     // 路由做跟车共移 cap，详见 core 实现）。node 仅负责从 nav_msgs/Path 截取
     // 滚动视界内的 pose 序列 + 转换 yaw。core 负责 cruise ∩ curve ∩ stop
@@ -339,7 +355,8 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     const double cruise = std::max(
         0.0, cruise_override_mps >= 0.0 ? cruise_override_mps : params_.cruise_speed_mps);
     return core_->plan_global_route(ego, route, cruise,
-                                    global_route_goal_stop_distance_m_, reaches_goal, lead);
+                                    global_route_goal_stop_distance_m_, reaches_goal, lead,
+                                    obstacles);
   }
 
   void produce_diagnostics(diagnostic_updater::DiagnosticStatusWrapper& stat) {

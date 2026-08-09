@@ -6,6 +6,8 @@
 #ifndef ADAS_TRAJECTORY_PLANNER__TRAJECTORY_PLANNER_CORE_HPP_
 #define ADAS_TRAJECTORY_PLANNER__TRAJECTORY_PLANNER_CORE_HPP_
 
+#include <vector>
+
 #include "adas_common/types.hpp"
 
 namespace adas::planning {
@@ -37,6 +39,7 @@ struct PlannerParams {
   double lane_change_time_s{3.0};  // 过渡时长（长度 = v × 时长，有下限）
   double lane_change_min_len_m{25.0};
   double lane_width_m{3.5};
+  bool lateral_avoidance_enabled{false};
 };
 
 // 主前车信息（由 object_tracker 选举结果投影）
@@ -44,6 +47,12 @@ struct LeadInfo {
   bool present{false};
   double gap_m{0.0};       // 沿路径纵向间距
   double speed_mps{0.0};   // 滤波后前车速度（≥0）
+};
+
+struct StaticObstacle {
+  double longitudinal_m{0.0};
+  double lateral_m{0.0};
+  bool is_static{true};
 };
 
 class TrajectoryPlannerCore {
@@ -76,7 +85,12 @@ class TrajectoryPlannerCore {
                                        double cruise_speed_mps,
                                        double goal_stop_distance_m,
                                        bool stop_at_route_end = true,
-                                       const LeadInfo& lead = LeadInfo()) const;
+                                       const LeadInfo& lead = LeadInfo(),
+                                       const std::vector<StaticObstacle>& obstacles = {}) const;
+
+  common::Trajectory avoid_obstacles_laterally(
+      const common::Trajectory& reference,
+      const std::vector<StaticObstacle>& obstacles) const;
 
  private:
   PlannerParams params_;

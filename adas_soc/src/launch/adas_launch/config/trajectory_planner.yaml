@@ -9,6 +9,7 @@
     # the lane-state plan() branch keeps follow_time_gap_s/follow_standstill_m).
     global_route.lead_time_gap_s: 1.4
     global_route.lead_standstill_m: 4.0
+    lateral_avoidance_enabled: false
     horizon_s: 8.0
     min_length_m: 30.0
     max_length_m: 120.0

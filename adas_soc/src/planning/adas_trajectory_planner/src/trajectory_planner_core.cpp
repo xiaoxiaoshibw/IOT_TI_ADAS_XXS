@@ -151,17 +151,55 @@ common::Trajectory TrajectoryPlannerCore::plan(const common::KinematicState& ego
   return traj;
 }
 
+common::Trajectory TrajectoryPlannerCore::avoid_obstacles_laterally(
+    const common::Trajectory& reference,
+    const std::vector<StaticObstacle>& obstacles) const {
+  if (!params_.lateral_avoidance_enabled || reference.size() < 2U) return reference;
+
+  double reference_length = 0.0;
+  for (std::size_t i = 1; i < reference.size(); ++i) {
+    reference_length += ac::distance2d(reference[i - 1].x, reference[i - 1].y,
+                                       reference[i].x, reference[i].y);
+  }
+  const double max_offset = 0.5 * params_.lane_width_m;
+  double offset = 0.0;
+  for (const auto& obstacle : obstacles) {
+    if (!obstacle.is_static || !std::isfinite(obstacle.longitudinal_m) ||
+        !std::isfinite(obstacle.lateral_m) || obstacle.longitudinal_m < 0.0 ||
+        obstacle.longitudinal_m > reference_length ||
+        std::fabs(obstacle.lateral_m) > max_offset) {
+      continue;
+    }
+    // Minimal framework: move to the positive lateral side with one lane-half
+    // of clearance, then clamp to the supported half-lane limit.
+    offset = std::clamp(obstacle.lateral_m + max_offset, -max_offset, max_offset);
+    break;  // deliberately one static obstacle only in the first iteration
+  }
+  if (std::fabs(offset) <= 1e-9) return reference;
+
+  common::Trajectory shifted = reference;
+  for (auto& point : shifted) {
+    point.x -= std::sin(point.yaw) * offset;
+    point.y += std::cos(point.yaw) * offset;
+  }
+  return shifted;
+}
+
 common::Trajectory TrajectoryPlannerCore::plan_global_route(
     const common::KinematicState& ego, const common::Trajectory& route,
     double cruise_speed_mps, double goal_stop_distance_m,
-    bool stop_at_route_end, const LeadInfo& lead) const {
+    bool stop_at_route_end, const LeadInfo& lead,
+    const std::vector<StaticObstacle>& obstacles) const {
   common::Trajectory result;
-  if (route.size() < 2U) return result;
+  const common::Trajectory working_route =
+      params_.lateral_avoidance_enabled ? avoid_obstacles_laterally(route, obstacles) : route;
+  const auto& planning_route = working_route;
+  if (planning_route.size() < 2U) return result;
 
   const double cruise = std::max(0.0, cruise_speed_mps);
   const double max_decel = std::max(params_.max_decel_mps2, 1e-3);
   const double max_lat_accel = std::max(params_.max_lat_accel_mps2, 1e-3);
-  const std::size_t count = route.size();
+  const std::size_t count = planning_route.size();
 
   // Commit 2 — lead-vehicle pre-cap inputs (computed once outside the loop).
   const double v_lead = lead.present ? std::max(0.0, lead.speed_mps) : 0.0;
@@ -173,8 +211,9 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
   std::vector<double> ds(count, 0.0);
   std::vector<double> station(count, 0.0);
   for (std::size_t i = 1U; i < count; ++i) {
-    ds[i] = std::max(0.01, ac::distance2d(route[i].x, route[i].y,
-                                           route[i - 1U].x, route[i - 1U].y));
+    ds[i] = std::max(0.01, ac::distance2d(planning_route[i].x, planning_route[i].y,
+                                           planning_route[i - 1U].x,
+                                           planning_route[i - 1U].y));
     station[i] = station[i - 1U] + ds[i];
   }
 
@@ -182,10 +221,11 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
   // atan2(sin, cos) 把整段曲率符号翻转。原始 yaw 序列来自 map 中心线采样，
   // CARLA 的 2 m 步长偶尔跨过整圈时尤其重要。
   std::vector<double> yaw_unwrap(count, 0.0);
-  yaw_unwrap[0U] = route[0U].yaw;
+  yaw_unwrap[0U] = planning_route[0U].yaw;
   for (std::size_t i = 1U; i < count; ++i) {
-    const double delta = std::atan2(std::sin(route[i].yaw - route[i - 1U].yaw),
-                                    std::cos(route[i].yaw - route[i - 1U].yaw));
+    const double delta = std::atan2(
+        std::sin(planning_route[i].yaw - planning_route[i - 1U].yaw),
+        std::cos(planning_route[i].yaw - planning_route[i - 1U].yaw));
     yaw_unwrap[i] = yaw_unwrap[i - 1U] + delta;
   }
 
@@ -299,7 +339,7 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
   result.reserve(count);
   double elapsed = 0.0;
   for (std::size_t i = 0U; i < count; ++i) {
-    auto point = route[i];
+    auto point = planning_route[i];
     point.curvature = curvature_smooth[i];
     point.velocity_mps = speed[i];
     point.time_from_start_s = elapsed;

@@ -455,3 +455,53 @@ TEST(TrajectoryPlannerCore, NoThreeMetersFloor) {
   // 弯中段速度应大于 3.0 m/s 的硬地板；若仍被限制在 3.0 m/s 即视为回归
   EXPECT_GT(max_v, 5.0) << "硬 3 m/s 地板已被删除，最大速度应反映真实曲率 cap";
 }
+
+TEST(TrajectoryPlannerCore, LateralAvoidanceDisabledPreservesReference) {
+  ap::TrajectoryPlannerCore core(default_params());
+  const auto route = straight_route(80);
+  const auto baseline = core.plan_global_route(
+      ego_at(0, 0, 0, 15.0), route, 15.0, 1.5, false);
+  const std::vector<ap::StaticObstacle> obstacles = {{20.0, 0.0, true}};
+  const auto with_obstacle = core.plan_global_route(
+      ego_at(0, 0, 0, 15.0), route, 15.0, 1.5, false, ap::LeadInfo(), obstacles);
+  ASSERT_EQ(with_obstacle.size(), baseline.size());
+  for (std::size_t i = 0; i < baseline.size(); ++i) {
+    EXPECT_DOUBLE_EQ(with_obstacle[i].x, baseline[i].x);
+    EXPECT_DOUBLE_EQ(with_obstacle[i].y, baseline[i].y);
+  }
+}
+
+TEST(TrajectoryPlannerCore, StaticCenterObstacleShiftsByHalfLane) {
+  ap::PlannerParams params = default_params();
+  params.lateral_avoidance_enabled = true;
+  ap::TrajectoryPlannerCore core(params);
+  const auto route = straight_route(80);
+  const auto trajectory = core.plan_global_route(
+      ego_at(0, 0, 0, 15.0), route, 15.0, 1.5, false, ap::LeadInfo(),
+      {{20.0, 0.0, true}});
+  ASSERT_FALSE(trajectory.empty());
+  EXPECT_NEAR(trajectory.front().y, 0.5 * params.lane_width_m, 1e-9);
+  EXPECT_NEAR(trajectory.back().y, 0.5 * params.lane_width_m, 1e-9);
+}
+
+TEST(TrajectoryPlannerCore, ObstacleOutsideLaneDoesNotShift) {
+  ap::PlannerParams params = default_params();
+  params.lateral_avoidance_enabled = true;
+  ap::TrajectoryPlannerCore core(params);
+  const auto trajectory = core.plan_global_route(
+      ego_at(0, 0, 0, 15.0), straight_route(80), 15.0, 1.5, false,
+      ap::LeadInfo(), {{20.0, params.lane_width_m, true}});
+  ASSERT_FALSE(trajectory.empty());
+  EXPECT_NEAR(trajectory.front().y, 0.0, 1e-9);
+}
+
+TEST(TrajectoryPlannerCore, OnlyFirstStaticObstacleIsApplied) {
+  ap::PlannerParams params = default_params();
+  params.lateral_avoidance_enabled = true;
+  ap::TrajectoryPlannerCore core(params);
+  const auto trajectory = core.plan_global_route(
+      ego_at(0, 0, 0, 15.0), straight_route(80), 15.0, 1.5, false,
+      ap::LeadInfo(), {{20.0, 0.0, true}, {30.0, -1.0, true}});
+  ASSERT_FALSE(trajectory.empty());
+  EXPECT_NEAR(trajectory.front().y, 0.5 * params.lane_width_m, 1e-9);
+}
