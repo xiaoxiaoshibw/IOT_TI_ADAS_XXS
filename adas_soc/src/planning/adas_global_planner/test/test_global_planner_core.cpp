@@ -111,3 +111,46 @@ TEST(SemanticRoute, StopsAtProjectedGoalInsteadOfLaneEnd) {
   EXPECT_NEAR(semantic.length_m, 70.0, 1e-9);
   EXPECT_TRUE(semantic.points.back().stop);
 }
+
+TEST(GlobalPlannerReplan, DeviationBelowThresholdDoesNotRequest) {
+  ap::ReplanPolicy policy(5.25, 10.0);
+  EXPECT_FALSE(policy.request(5.25, 0.0));
+  EXPECT_FALSE(policy.request(4.0, 1.0));
+}
+
+TEST(GlobalPlannerReplan, DeviationAboveThresholdRequests) {
+  ap::ReplanPolicy policy(5.25, 10.0);
+  EXPECT_TRUE(policy.request(5.26, 0.0));
+}
+
+TEST(GlobalPlannerReplan, CooldownSuppressesRepeatedRequest) {
+  ap::ReplanPolicy policy(5.25, 10.0);
+  ASSERT_TRUE(policy.request(6.0, 100.0));
+  EXPECT_FALSE(policy.request(6.0, 105.0));
+  EXPECT_TRUE(policy.request(6.0, 110.0));
+}
+
+TEST(GlobalPlannerReplan, FailedReplanKeepsPreviousRoute) {
+  auto graph = simple_graph();
+  ASSERT_TRUE(graph.add_lane(lane(4, 0.0, 20.0, 10.0, 20.0)));
+  const ap::GlobalPlannerCore planner;
+  const auto previous = planner.plan(graph, 1, 3);
+  ASSERT_TRUE(previous.valid);
+  auto candidate = previous;
+  ASSERT_FALSE(planner.replan(graph, ap::Pose{0.0, 0.0, 0.0},
+                              ap::Pose{5.0, 20.0, 0.0}, candidate));
+  candidate = previous;
+  EXPECT_TRUE(candidate.valid);
+  EXPECT_EQ(candidate.goal_lane_id, previous.goal_lane_id);
+}
+
+TEST(GlobalPlannerReplan, SameStartAndGoalReturnsImmediateRoute) {
+  auto graph = simple_graph();
+  const ap::GlobalPlannerCore planner;
+  ap::GlobalRoute route;
+  ASSERT_TRUE(planner.replan(graph, ap::Pose{12.0, 0.0, 0.0},
+                             ap::Pose{12.0, 0.0, 0.0}, route));
+  ASSERT_TRUE(route.valid);
+  ASSERT_EQ(route.segments.size(), 1U);
+  EXPECT_EQ(route.start_lane_id, route.goal_lane_id);
+}

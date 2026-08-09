@@ -1,9 +1,12 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include "adas_global_planner/global_planner_core.hpp"
@@ -40,6 +43,15 @@ std::string route_id(const std::string& map_hash, const rclcpp::Time& stamp) {
   return value.str();
 }
 
+double point_segment_distance(double px, double py, const MapPoint& a, const MapPoint& b) {
+  const double dx = b.x - a.x;
+  const double dy = b.y - a.y;
+  const double length2 = dx * dx + dy * dy;
+  if (length2 <= 1e-12) return std::hypot(px - a.x, py - a.y);
+  const double t = std::clamp(((px - a.x) * dx + (py - a.y) * dy) / length2, 0.0, 1.0);
+  return std::hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+}
+
 }  // namespace
 
 class GlobalPlannerNode : public rclcpp::Node {
@@ -51,6 +63,18 @@ class GlobalPlannerNode : public rclcpp::Node {
     cost.turn_penalty_m = declare_parameter("turn_penalty_m", 1.0);
     cost.snap_max_distance_m = declare_parameter("snap_max_distance_m", 8.0);
     arrival_tolerance_m_ = declare_parameter("arrival_tolerance_m", 1.5);
+    lane_width_m_ = declare_parameter("lane_width_m", 3.5);
+    replan_threshold_m_ =
+        declare_parameter("replan_threshold_m", 1.5 * lane_width_m_);
+    deviation_check_rate_hz_ = declare_parameter("deviation_check_rate_hz", 5.0);
+    replan_cooldown_s_ = declare_parameter("replan_cooldown_s", 10.0);
+    if (!std::isfinite(lane_width_m_) || lane_width_m_ <= 0.0 ||
+        !std::isfinite(replan_threshold_m_) || replan_threshold_m_ <= 0.0 ||
+        !std::isfinite(deviation_check_rate_hz_) || deviation_check_rate_hz_ <= 0.0 ||
+        !std::isfinite(replan_cooldown_s_) || replan_cooldown_s_ < 0.0) {
+      throw std::invalid_argument("invalid global planner replan parameters");
+    }
+    replan_policy_ = std::make_unique<ReplanPolicy>(replan_threshold_m_, replan_cooldown_s_);
     planner_ = std::make_unique<GlobalPlannerCore>(cost);
 
     const auto map_qos = rclcpp::QoS(1).reliable().transient_local();
@@ -71,6 +95,9 @@ class GlobalPlannerNode : public rclcpp::Node {
         "/adas/planning/global_route", rclcpp::QoS(1).reliable().transient_local());
     pub_status_ = create_publisher<adas_msgs::msg::NavigationStatus>(
         "/adas/navigation/status", rclcpp::QoS(1).reliable().transient_local());
+    deviation_timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / deviation_check_rate_hz_),
+        std::bind(&GlobalPlannerNode::check_route_deviation, this));
     publish_status(adas_msgs::msg::NavigationStatus::WAITING_FOR_MAP, "waiting for lane graph");
   }
 
@@ -161,13 +188,37 @@ class GlobalPlannerNode : public rclcpp::Node {
     plan_when_localized_ = false;
     active_route_id_.clear();
     remaining_distance_m_ = 0.0;
+    if (replan_policy_) replan_policy_->reset();
     nav_msgs::msg::Path empty;
     empty.header.stamp = now();
     empty.header.frame_id = "map";
     pub_route_->publish(empty);
   }
 
-  void plan_route() {
+  void check_route_deviation() {
+    if (!goal_ || !graph_ || !active_route_.valid || !odom_ || arrived_) return;
+
+    const double x = odom_->pose.pose.position.x;
+    const double y = odom_->pose.pose.position.y;
+    double deviation = std::numeric_limits<double>::infinity();
+    for (const auto& segment : active_route_.segments) {
+      for (std::size_t i = 1; i < segment.centerline.size(); ++i) {
+        deviation = std::min(
+            deviation, point_segment_distance(x, y, segment.centerline[i - 1],
+                                              segment.centerline[i]));
+      }
+    }
+    if (!std::isfinite(deviation) || deviation <= replan_threshold_m_) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+    if (!replan_policy_ || !replan_policy_->request(deviation, now_s)) return;
+    RCLCPP_WARN(get_logger(), "route deviation %.2fm exceeds %.2fm; replanning",
+                deviation, replan_threshold_m_);
+    plan_route(true);
+  }
+
+  void plan_route(bool is_replan = false) {
     if (!graph_) {
       publish_status(adas_msgs::msg::NavigationStatus::WAITING_FOR_MAP, "goal stored; waiting for map");
       return;
@@ -179,10 +230,27 @@ class GlobalPlannerNode : public rclcpp::Node {
     }
     plan_when_localized_ = false;
     publish_status(adas_msgs::msg::NavigationStatus::PLANNING, "planning route");
-    active_route_ = planner_->plan(
-        *graph_, odom_->pose.pose.position.x, odom_->pose.pose.position.y,
-        goal_->pose.position.x, goal_->pose.position.y);
-    if (!active_route_.valid) {
+    const GlobalRoute previous_route = active_route_;
+    GlobalRoute candidate;
+    const Pose current{odom_->pose.pose.position.x, odom_->pose.pose.position.y,
+                       yaw_from_pose(odom_->pose.pose)};
+    const Pose target{goal_->pose.position.x, goal_->pose.position.y,
+                      yaw_from_pose(goal_->pose)};
+    const bool planned = is_replan
+                             ? planner_->replan(*graph_, current, target, candidate)
+                             : (candidate = planner_->plan(*graph_, current.x, current.y,
+                                                           target.x, target.y),
+                                candidate.valid);
+    if (!planned) {
+      if (is_replan && previous_route.valid) {
+        active_route_ = previous_route;
+        RCLCPP_WARN(get_logger(), "replan failed (%s); retaining previous route",
+                    candidate.failure_reason.c_str());
+        publish_status(adas_msgs::msg::NavigationStatus::DRIVING,
+                       "replan failed; retaining previous route");
+        return;
+      }
+      active_route_ = candidate;
       publish_status(adas_msgs::msg::NavigationStatus::FAILED, active_route_.failure_reason);
       return;
     }
@@ -192,19 +260,37 @@ class GlobalPlannerNode : public rclcpp::Node {
     // 弯道前突然打满方向。先裁剪起终点、按前向投影连接 successor，再做
     // 路线完整性校验；校验失败时保持安全停车，不发布一条可能撞墙的路线。
     const auto semantic = build_semantic_route(
-        active_route_, odom_->pose.pose.position.x, odom_->pose.pose.position.y,
-        goal_->pose.position.x, goal_->pose.position.y);
+        candidate, current.x, current.y, target.x, target.y);
     if (!semantic.valid) {
+      if (is_replan && previous_route.valid) {
+        active_route_ = previous_route;
+        RCLCPP_WARN(get_logger(), "replanned route geometry invalid (%s); retaining previous route",
+                    semantic.failure_reason.c_str());
+        publish_status(adas_msgs::msg::NavigationStatus::DRIVING,
+                       "replan geometry invalid; retaining previous route");
+        return;
+      }
+      active_route_ = candidate;
       publish_status(adas_msgs::msg::NavigationStatus::FAILED,
                      "route geometry invalid: " + semantic.failure_reason);
       return;
     }
     const auto validation = validate_route(semantic.points);
     if (!validation.valid) {
+      if (is_replan && previous_route.valid) {
+        active_route_ = previous_route;
+        RCLCPP_WARN(get_logger(), "replanned route validation failed (%s); retaining previous route",
+                    validation.reason.c_str());
+        publish_status(adas_msgs::msg::NavigationStatus::DRIVING,
+                       "replan validation failed; retaining previous route");
+        return;
+      }
+      active_route_ = candidate;
       publish_status(adas_msgs::msg::NavigationStatus::FAILED,
                      "route validation failed: " + validation.reason);
       return;
     }
+    active_route_ = std::move(candidate);
 
     // The clicked goal may be off the lane centerline. The route endpoint is
     // the safe projection onto the final lane, so stopping and ARRIVED must
@@ -246,11 +332,16 @@ class GlobalPlannerNode : public rclcpp::Node {
   }
 
   double arrival_tolerance_m_{1.5};
+  double lane_width_m_{3.5};
+  double replan_threshold_m_{5.25};
+  double deviation_check_rate_hz_{5.0};
+  double replan_cooldown_s_{10.0};
   double remaining_distance_m_{0.0};
   MapPoint arrival_point_{};
   bool arrival_point_valid_{false};
   bool arrived_{false};
   bool plan_when_localized_{false};
+  std::unique_ptr<ReplanPolicy> replan_policy_;
   std::string map_id_;
   std::string map_hash_;
   std::string goal_id_;
@@ -266,6 +357,7 @@ class GlobalPlannerNode : public rclcpp::Node {
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_cancel_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_;
   rclcpp::Publisher<adas_msgs::msg::NavigationStatus>::SharedPtr pub_status_;
+  rclcpp::TimerBase::SharedPtr deviation_timer_;
 };
 
 }  // namespace adas::planning

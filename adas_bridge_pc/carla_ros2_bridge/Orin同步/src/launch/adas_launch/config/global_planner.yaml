@@ -5,6 +5,10 @@ global_planner:
     turn_penalty_m: 1.0
     snap_max_distance_m: 8.0
     arrival_tolerance_m: 1.5
+    lane_width_m: 3.5
+    deviation_check_rate_hz: 5.0
+    replan_threshold_m: 5.25
+    replan_cooldown_s: 10.0
     transform_timeout_s: 0.1
     route_heartbeat_hz: 2.0
     route_geometry.sample_spacing_m: 2.0

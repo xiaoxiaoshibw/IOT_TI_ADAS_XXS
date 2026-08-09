@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace adas::planning {
@@ -203,6 +204,41 @@ GlobalRoute GlobalPlannerCore::plan(const LaneGraph& graph, double start_x, doub
     return route;
   }
   return plan(graph, start_lane, goal_lane);
+}
+
+bool GlobalPlannerCore::replan(const LaneGraph& graph, const Pose& current,
+                               const Pose& goal, GlobalRoute& route) const {
+  if (!std::isfinite(current.x) || !std::isfinite(current.y) ||
+      !std::isfinite(goal.x) || !std::isfinite(goal.y)) {
+    route = GlobalRoute{};
+    route.failure_reason = "current or goal pose is not finite";
+    return false;
+  }
+  route = plan(graph, current.x, current.y, goal.x, goal.y);
+  return route.valid;
+}
+
+ReplanPolicy::ReplanPolicy(double threshold_m, double cooldown_s)
+    : threshold_m_(threshold_m), cooldown_s_(cooldown_s) {
+  if (!std::isfinite(threshold_m_) || threshold_m_ <= 0.0 ||
+      !std::isfinite(cooldown_s_) || cooldown_s_ < 0.0) {
+    throw std::invalid_argument("invalid replan policy parameters");
+  }
+}
+
+bool ReplanPolicy::request(double deviation_m, double now_s) {
+  if (!std::isfinite(deviation_m) || !std::isfinite(now_s) || deviation_m <= threshold_m_) {
+    return false;
+  }
+  if (attempted_ && now_s - last_attempt_s_ < cooldown_s_) return false;
+  attempted_ = true;
+  last_attempt_s_ = now_s;
+  return true;
+}
+
+void ReplanPolicy::reset() {
+  attempted_ = false;
+  last_attempt_s_ = 0.0;
 }
 
 }  // namespace adas::planning
