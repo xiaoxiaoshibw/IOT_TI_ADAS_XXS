@@ -41,8 +41,15 @@ install(TARGETS ${PROJECT_NAME}_core ${PROJECT_NAME}_node
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(lifecycle_msgs REQUIRED)
   ament_add_gtest(test_${PROJECT_NAME}_core test/test_sim_vehicle_interface.cpp)
   target_link_libraries(test_${PROJECT_NAME}_core ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_${PROJECT_NAME}_node test/test_vehicle_interface_node.cpp)
+  target_link_libraries(test_${PROJECT_NAME}_node ${PROJECT_NAME}_core)
+  ament_target_dependencies(test_${PROJECT_NAME}_node
+    rclcpp rclcpp_components rclcpp_lifecycle diagnostic_msgs diagnostic_updater
+    adas_msgs adas_common nav_msgs lifecycle_msgs)
 endif()
 
 ament_package()

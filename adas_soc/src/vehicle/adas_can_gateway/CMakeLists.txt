@@ -43,6 +43,12 @@ if(BUILD_TESTING)
   target_link_libraries(test_startup_gate ${PROJECT_NAME}_protocol)
   ament_add_gtest(test_hil_session_manager test/test_hil_session_manager.cpp)
   target_link_libraries(test_hil_session_manager ${PROJECT_NAME}_protocol)
+
+  ament_add_gtest(test_${PROJECT_NAME}_node test/test_can_gateway_node.cpp)
+  target_link_libraries(test_${PROJECT_NAME}_node ${PROJECT_NAME}_protocol PkgConfig::LIBUSB)
+  target_compile_definitions(test_${PROJECT_NAME}_node PRIVATE ADAS_CAN_GATEWAY_NO_MAIN)
+  ament_target_dependencies(test_${PROJECT_NAME}_node
+    rclcpp adas_msgs diagnostic_updater std_srvs)
 endif()
 
 ament_package()

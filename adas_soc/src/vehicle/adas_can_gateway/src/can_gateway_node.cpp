@@ -127,7 +127,8 @@ bool finite_control(const adas_msgs::msg::Control& command) {
 
 class CanGatewayNode final : public rclcpp::Node {
  public:
-  CanGatewayNode() : Node("can_gateway") {
+  explicit CanGatewayNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+      : Node("can_gateway", options) {
     // 默认主控制链路：Jetson HIL 上为 PEAK PCAN-USB → SocketCAN can1 @ 500k，
     // 由 can_hil.yaml 覆盖 can_interface；此处代码默认值仅裸跑时生效。
     // canalystii（USB CANalyst-II）为调试备源路径，仅显式配置 transport:=canalystii 时启用。
@@ -1077,6 +1078,7 @@ receive();
 
 }  // namespace adas::can_gateway
 
+#ifndef ADAS_CAN_GATEWAY_NO_MAIN
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   try {
@@ -1089,3 +1091,4 @@ int main(int argc, char** argv) {
   rclcpp::shutdown();
   return 0;
 }
+#endif
