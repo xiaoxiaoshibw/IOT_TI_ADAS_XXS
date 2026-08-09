@@ -167,6 +167,89 @@ def nearest_route_point(
     return index, point, lateral
 
 
+def _percentile(values: Sequence[float], pct: float) -> float | None:
+    """Return the pct-quantile (0..100) of values via linear interpolation.
+
+    Empty input returns None. Values need not be sorted.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (pct / 100.0) * (len(ordered) - 1)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[lower]
+    frac = rank - lower
+    return ordered[lower] * (1.0 - frac) + ordered[upper] * frac
+
+
+def _safe_float(value: Any) -> float | None:
+    """Parse a CSV cell into float, returning None when blank or invalid."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result
+
+
+def _column(rows: Sequence[Mapping[str, Any]], name: str) -> list[float | None]:
+    """Project a named column to per-row floats (None where blank/invalid)."""
+    return [_safe_float(r.get(name)) for r in rows]
+
+
+def _safe_diff_series(values: Sequence[float | None]) -> list[float]:
+    """Compute per-row d(value)/dt using elapsed_s from `rows` (paired arg).
+
+    Returns only entries with two valid samples. Caller passes (values, times).
+    """
+    raise NotImplementedError("use _time_derivative instead")
+
+
+def _time_derivative(
+    values: Sequence[float | None], times: Sequence[float | None]
+) -> list[float]:
+    """Compute d(value)/dt between consecutive valid pairs of (value, time)."""
+    out: list[float] = []
+    prev_v: float | None = None
+    prev_t: float | None = None
+    for v, t in zip(values, times):
+        if v is None or t is None:
+            prev_v, prev_t = None, None
+            continue
+        if prev_v is None or prev_t is None:
+            prev_v, prev_t = v, t
+            continue
+        dt = t - prev_t
+        if dt <= 0.0:
+            prev_v, prev_t = v, t
+            continue
+        out.append((v - prev_v) / dt)
+        prev_v, prev_t = v, t
+    return out
+
+
+def _count_transitions(values: Sequence[float | None], *, trigger: float | None = None) -> int:
+    """Count rising-edge transitions of `values`. If `trigger` is given, also
+    require the new value to equal `trigger` (e.g. lane_valid going False)."""
+    prev: float | None = None
+    count = 0
+    for v in values:
+        if v is None:
+            continue
+        if prev is not None and v != prev:
+            if trigger is None or v == trigger:
+                count += 1
+        prev = v
+    return count
+
+
 def navigation_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     samples = list(rows)
     lateral = [float(r["lateral_error"]) for r in samples if r.get("lateral_error") not in (None, "")]
@@ -177,12 +260,72 @@ def navigation_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if r.get("vehicle_x") not in (None, "") and r.get("vehicle_y") not in (None, "")
     ]
     distance = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poses, poses[1:]))
+
+    # Commit 1b — extend the per-scenario aggregate. All new columns are
+    # backward-compatible: blank cells parse as None and the corresponding
+    # metric stays None. None values are kept distinct from zero so callers
+    # can tell "not measured" from "measured zero".
+    times = _column(samples, "elapsed_s")
+    steering = _column(samples, "steering")
+    velocity = _column(samples, "velocity")
+    gate_accel = _column(samples, "gate_longitudinal_accel_mps2")
+    lane_offset = _column(samples, "lane_lateral_offset_m")
+    lane_heading = _column(samples, "lane_heading_error_rad")
+    lane_valid = _column(samples, "lane_valid")
+    lead_id = _column(samples, "lead_id")
+    lead_gap = _column(samples, "lead_gap_m")
+    lead_speed = _column(samples, "lead_speed_mps")
+    throttle = _column(samples, "throttle")
+    brake = _column(samples, "brake")
+    safety_state = _column(samples, "safety_state")
+
+    abs_offset = [abs(v) for v in lane_offset if v is not None]
+    abs_heading = [abs(v) for v in lane_heading if v is not None]
+    lead_gap_clean = [v for v in lead_gap if v is not None]
+    lead_speed_clean = [v for v in lead_speed if v is not None]
+    velocity_clean = [v for v in velocity if v is not None]
+
+    steering_rate = _time_derivative(steering, times)
+    accel_from_odom = _time_derivative(velocity, times)
+    jerk_from_odom = _time_derivative(accel_from_odom, times)
+
+    # throttle/brake simultaneous — a sign of PID oscillation. Use a small
+    # band so quiet idle cells don't count.
+    sim_count = 0
+    for t, b in zip(throttle, brake):
+        if t is None or b is None:
+            continue
+        if t > 0.05 and b > 0.05:
+            sim_count += 1
+
+    # Time spent in MRM (LEVEL_MRM_COMFORT=2 or LEVEL_MRM_EMERGENCY=3).
+    mrm_states = {2, 3}
+    mrm_samples = sum(1 for v in safety_state if v is not None and int(v) in mrm_states)
+    safety_total = sum(1 for v in safety_state if v is not None)
+    aeb_rising = _count_transitions(safety_state, trigger=3.0)
+
     return {
         "sample_count": len(samples),
         "lateral_error_rms_m": math.sqrt(sum(v * v for v in lateral) / len(lateral)) if lateral else None,
         "lateral_error_max_abs_m": max(map(abs, lateral)) if lateral else None,
         "speed_error_rms_mps": math.sqrt(sum(v * v for v in speed) / len(speed)) if speed else None,
         "travel_distance_m": distance if poses else None,
+        # Commit 1b additions below.
+        "lane_lateral_offset_abs_p95_m": _percentile(abs_offset, 95.0),
+        "lane_lateral_offset_abs_max_m": max(abs_offset) if abs_offset else None,
+        "lane_heading_error_abs_max_rad": max(abs_heading) if abs_heading else None,
+        "steering_rate_p95_rad_s": _percentile([abs(v) for v in steering_rate], 95.0),
+        "steering_rate_max_abs_rad_s": max(map(abs, steering_rate)) if steering_rate else None,
+        "ego_speed_mean_mps": (sum(velocity_clean) / len(velocity_clean)) if velocity_clean else None,
+        "accel_p95_abs_mps2": _percentile([abs(v) for v in accel_from_odom], 95.0),
+        "jerk_p95_abs_mps3": _percentile([abs(v) for v in jerk_from_odom], 95.0),
+        "lead_id_switches_count": _count_transitions(lead_id),
+        "lead_gap_mean_m": (sum(lead_gap_clean) / len(lead_gap_clean)) if lead_gap_clean else None,
+        "lead_speed_mean_mps": (sum(lead_speed_clean) / len(lead_speed_clean)) if lead_speed_clean else None,
+        "throttle_brake_simultaneous_count": sim_count,
+        "lane_invalid_transitions": _count_transitions(lane_valid, trigger=0.0),
+        "aeb_trigger_count": aeb_rising,
+        "safety_state_time_in_mrm_fraction": (mrm_samples / safety_total) if safety_total else None,
     }
 
 

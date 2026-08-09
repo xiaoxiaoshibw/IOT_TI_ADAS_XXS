@@ -18,12 +18,18 @@ from typing import Any
 import rclpy
 import tf2_geometry_msgs  # noqa: F401 - registers PoseStamped transforms with tf2
 from adas_msgs.msg import (
+    ActuationCommand,
     BehaviorState,
+    Control,
     GateStatus,
     GlobalRoute,
+    LaneState,
     McuStatus,
+    NavigationStatus,
+    SafetyStatus,
     SteeringReport,
     Trajectory,
+    TrackedObjectArray,
 )
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
@@ -60,6 +66,20 @@ FIELDS = (
     "speed_error",
     "behavior_state",
     "control_source",
+    "lead_id",
+    "lead_gap_m",
+    "lead_speed_mps",
+    "nav_state",
+    "nav_distance_to_goal_m",
+    "safety_state",
+    "safety_fault_count",
+    "gate_longitudinal_accel_mps2",
+    "lane_valid",
+    "lane_lateral_offset_m",
+    "lane_heading_error_rad",
+    "lane_curvature",
+    "throttle",
+    "brake",
     "mcu_state",
     "mcu_active_source",
     "heartbeat_age",
@@ -103,6 +123,12 @@ class HilDataLogger(Node):
         self.behavior: BehaviorState | None = None
         self.gate: GateStatus | None = None
         self.mcu: McuStatus | None = None
+        self.objects: TrackedObjectArray | None = None
+        self.nav_status: NavigationStatus | None = None
+        self.safety_status: SafetyStatus | None = None
+        self.gate_cmd: Control | None = None
+        self.actuation: ActuationCommand | None = None
+        self.lane_state: LaneState | None = None
         self.route_cursor = 0
         self.tf_buffer = Buffer(node=self)
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -118,6 +144,15 @@ class HilDataLogger(Node):
         self.create_subscription(BehaviorState, "/adas/planning/behavior", self._behavior, reliable_qos())
         self.create_subscription(GateStatus, "/adas/control/gate/status", self._gate, reliable_qos(True))
         self.create_subscription(McuStatus, "/adas/mcu/status", self._mcu, reliable_qos())
+        # Commit 1a — additional topics required for the validation plan:
+        # lead selection (objects), navigation status, safety state, gate
+        # longitudinal output, throttle/brake actuation.
+        self.create_subscription(TrackedObjectArray, "/adas/perception/objects", self._objects, sensor_qos())
+        self.create_subscription(NavigationStatus, "/adas/navigation/status", self._nav_status, reliable_qos(True))
+        self.create_subscription(SafetyStatus, "/adas/system/safety_status", self._safety_status, reliable_qos(True))
+        self.create_subscription(Control, "/adas/control/gate/control_cmd", self._gate_cmd, reliable_qos())
+        self.create_subscription(ActuationCommand, "/adas/vehicle/actuation_cmd", self._actuation, reliable_qos())
+        self.create_subscription(LaneState, "/adas/perception/lane_state", self._lane_state, sensor_qos())
         self.create_timer(1.0 / rate_hz, self._sample)
 
     def _store(self, name: str, value: Any) -> None:
@@ -146,6 +181,24 @@ class HilDataLogger(Node):
 
     def _mcu(self, msg: McuStatus) -> None:
         self._store("mcu", msg)
+
+    def _objects(self, msg: TrackedObjectArray) -> None:
+        self._store("objects", msg)
+
+    def _nav_status(self, msg: NavigationStatus) -> None:
+        self._store("nav_status", msg)
+
+    def _safety_status(self, msg: SafetyStatus) -> None:
+        self._store("safety_status", msg)
+
+    def _gate_cmd(self, msg: Control) -> None:
+        self._store("gate_cmd", msg)
+
+    def _actuation(self, msg: ActuationCommand) -> None:
+        self._store("actuation", msg)
+
+    def _lane_state(self, msg: LaneState) -> None:
+        self._store("lane_state", msg)
 
     @staticmethod
     def _blank_row() -> dict[str, Any]:
@@ -226,6 +279,31 @@ class HilDataLogger(Node):
             row["behavior_state"] = int(self.behavior.state)
         if self.gate is not None:
             row["control_source"] = int(self.gate.selected_source)
+        if self.objects is not None and int(self.objects.primary_lead_id) >= 0:
+            row["lead_id"] = int(self.objects.primary_lead_id)
+            row["lead_gap_m"] = f"{float(self.objects.primary_lead_gap_m):.3f}"
+            row["lead_speed_mps"] = f"{float(self.objects.primary_lead_speed_mps):.3f}"
+        if self.nav_status is not None:
+            row["nav_state"] = int(self.nav_status.state)
+            row["nav_distance_to_goal_m"] = (
+                f"{float(self.nav_status.remaining_distance_m):.3f}"
+            )
+        if self.safety_status is not None:
+            row["safety_state"] = int(self.safety_status.overall)
+            row["safety_fault_count"] = len(self.safety_status.failed_components)
+        if self.gate_cmd is not None:
+            row["gate_longitudinal_accel_mps2"] = (
+                f"{float(self.gate_cmd.longitudinal.acceleration_mps2):.3f}"
+            )
+        # `lane_valid` and lane measurements come from /adas/perception/lane_state.
+        if self.lane_state is not None:
+            row["lane_valid"] = int(bool(self.lane_state.valid))
+            row["lane_lateral_offset_m"] = f"{float(self.lane_state.lateral_offset):.4f}"
+            row["lane_heading_error_rad"] = f"{float(self.lane_state.heading_error):.4f}"
+            row["lane_curvature"] = f"{float(self.lane_state.curvature):.6f}"
+        if self.actuation is not None:
+            row["throttle"] = f"{float(self.actuation.throttle):.4f}"
+            row["brake"] = f"{float(self.actuation.brake):.4f}"
         if self.mcu is not None:
             row.update(
                 mcu_state=int(self.mcu.system_state),
