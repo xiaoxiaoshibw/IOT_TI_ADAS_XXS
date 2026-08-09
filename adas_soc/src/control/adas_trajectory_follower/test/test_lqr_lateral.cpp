@@ -113,3 +113,20 @@ TEST(LqrLateral, GainSchedulingMonotonicBehavior) {
   const auto cmd_fast = fast.run(input_on(traj, 10.0, -0.5, 0.0, 25.0));
   EXPECT_GT(cmd_slow.steering_tire_angle_rad, cmd_fast.steering_tire_angle_rad);
 }
+
+TEST(LqrLateralValidation, ZeroGridStepRejected) {
+  ct::LqrLateralParams params;
+  params.v_grid_step = 0.0;
+  EXPECT_THROW({ ct::LqrLateral lqr(params); }, std::invalid_argument);
+}
+
+TEST(LqrLateralValidation, ZeroWheelbaseRejected) {
+  ct::LqrLateralParams params;
+  params.wheelbase_m = 0.0;
+  EXPECT_THROW({ ct::LqrLateral lqr(params); }, std::invalid_argument);
+}
+
+TEST(LqrLateralValidation, ValidParametersConstructSuccessfully) {
+  ct::LqrLateralParams params;
+  EXPECT_NO_THROW({ ct::LqrLateral lqr(params); });
+}

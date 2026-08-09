@@ -52,6 +52,7 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("lqr.q_yaw", 1.0);
     declare_parameter<double>("lqr.r_steer", 30.0);
     declare_parameter<double>("lqr.max_steer_rad", 0.6);
+    declare_parameter<double>("lqr.v_grid_step", 1.0);
     declare_parameter<double>("lqr.preview_s", 0.1);
     declare_parameter<std::string>("longitudinal_controller_mode", "pid");
     declare_parameter<double>("pid.kp", 1.0);
@@ -231,8 +232,10 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
       lq.q_yaw = get_parameter("lqr.q_yaw").as_double();
       lq.r_steer = get_parameter("lqr.r_steer").as_double();
       lq.max_steer_rad = get_parameter("lqr.max_steer_rad").as_double();
+      lq.v_grid_step = get_parameter("lqr.v_grid_step").as_double();
       lq.preview_s = get_parameter("lqr.preview_s").as_double();
       common::require_positive("lqr.wheelbase_m", lq.wheelbase_m);
+      common::require_positive("lqr.v_grid_step", lq.v_grid_step);
       common::require_positive("lqr.q_lat", lq.q_lat);
       common::require_positive("lqr.q_yaw", lq.q_yaw);
       common::require_positive("lqr.r_steer", lq.r_steer);

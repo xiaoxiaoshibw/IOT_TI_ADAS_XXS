@@ -13,12 +13,15 @@
       max_lookahead_m: 20.0
       max_steer_rad: 0.6
       # Commit 4 — mirror of SoC yaml.
-      adaptive:
+    adaptive:
         base_speed_coeff: 0.7
         base_speed_offset_m: 2.0
         curve_gain: 4.0
         curve_factor_min: 0.6
         max_lookahead_high_m: 12.0
+    lqr:
+      wheelbase_m: 2.7  # m
+      v_grid_step: 1.0  # m/s
     pid:
       # Commit 6c — mirror of SoC yaml.
       kp: 0.8

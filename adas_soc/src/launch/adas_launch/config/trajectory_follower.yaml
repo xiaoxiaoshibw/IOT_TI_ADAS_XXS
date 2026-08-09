@@ -15,12 +15,15 @@
       max_steer_rad: 0.6
       # Commit 4 — 自适应前视：base × curve_factor 让高速直道保持 ~12 m、
       # 紧弯压到 7-9 m。验收稳定后再评估 curve_gain/curve_factor_min。
-      adaptive:
+    adaptive:
         base_speed_coeff: 0.7
         base_speed_offset_m: 2.0
         curve_gain: 4.0
         curve_factor_min: 0.6
         max_lookahead_high_m: 12.0
+    lqr:
+      wheelbase_m: 2.7  # m
+      v_grid_step: 1.0  # m/s
     pid:
       # Commit 6c — 收敛性更紧的 PID：kp 0.8, ki 0.15, preview 0.6
       kp: 0.8

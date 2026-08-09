@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include "adas_common/geometry.hpp"
+#include "adas_common/parameter_validation.hpp"
 
 namespace adas::control {
 
@@ -59,6 +60,11 @@ Vec3 mat_vec(const Mat3& a, const Vec3& v) {
 }  // namespace
 
 LqrLateral::LqrLateral(const LqrLateralParams& params) : params_(params) {
+  common::require_positive("wheelbase_m", params_.wheelbase_m);
+  common::require_positive("v_grid_step", params_.v_grid_step);
+  if (params_.v_grid_max < params_.v_grid_min) {
+    throw std::invalid_argument("v_grid_max must be >= v_grid_min");
+  }
   for (double v = params_.v_grid_min; v <= params_.v_grid_max + 1e-9;
        v += params_.v_grid_step) {
     Gain g{};
