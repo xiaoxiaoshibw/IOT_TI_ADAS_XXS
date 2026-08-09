@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
 project(adas_mqtt_bridge)
 
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -22,11 +25,13 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
-# 安装 config 文件
-install(DIRECTORY
-  config/
-  DESTINATION share/${PROJECT_NAME}/config
-)
+# 安装 config 文件（该可选 IoT 配置不影响 PC SIL）
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config")
+  install(DIRECTORY
+    config/
+    DESTINATION share/${PROJECT_NAME}/config
+  )
+endif()
 
 # 安装测试
 if(BUILD_TESTING)
