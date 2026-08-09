@@ -288,6 +288,10 @@ def navigation_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     steering_rate = _time_derivative(steering, times)
     accel_from_odom = _time_derivative(velocity, times)
     jerk_from_odom = _time_derivative(accel_from_odom, times)
+    # Commit 7 — LQR A/B：影子控制器的指令 steer rate（与主栈实际 steering
+    # 对比时注意：影子不驱动车辆，这是"指令平滑度"对比而非实际横向误差）。
+    shadow_steer = _column(samples, "shadow_steer_rad")
+    shadow_steer_rate = _time_derivative(shadow_steer, times)
 
     # throttle/brake simultaneous — a sign of PID oscillation. Use a small
     # band so quiet idle cells don't count.
@@ -316,6 +320,8 @@ def navigation_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "lane_heading_error_abs_max_rad": max(abs_heading) if abs_heading else None,
         "steering_rate_p95_rad_s": _percentile([abs(v) for v in steering_rate], 95.0),
         "steering_rate_max_abs_rad_s": max(map(abs, steering_rate)) if steering_rate else None,
+        "shadow_steer_rate_p95_rad_s": _percentile([abs(v) for v in shadow_steer_rate], 95.0),
+        "shadow_steer_rate_max_abs_rad_s": max(map(abs, shadow_steer_rate)) if shadow_steer_rate else None,
         "ego_speed_mean_mps": (sum(velocity_clean) / len(velocity_clean)) if velocity_clean else None,
         "accel_p95_abs_mps2": _percentile([abs(v) for v in accel_from_odom], 95.0),
         "jerk_p95_abs_mps3": _percentile([abs(v) for v in jerk_from_odom], 95.0),

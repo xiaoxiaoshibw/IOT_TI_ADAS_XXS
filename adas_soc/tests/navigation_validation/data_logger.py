@@ -85,6 +85,10 @@ FIELDS = (
     "heartbeat_age",
     "crc_error",
     "can_drop",
+    # Commit 7 — 可选 LQR 影子控制器捕获（A/B 对比）。只有传入
+    # --shadow-control-topic 时才会填充；否则整列为空（分析侧视为 None）。
+    "shadow_steer_rad",
+    "shadow_longitudinal_accel_mps2",
 )
 
 
@@ -107,7 +111,8 @@ def reliable_qos(transient: bool = False) -> QoSProfile:
 
 
 class HilDataLogger(Node):
-    def __init__(self, output: Path, rate_hz: float, duration_s: float | None) -> None:
+    def __init__(self, output: Path, rate_hz: float, duration_s: float | None,
+                 shadow_control_topic: str | None = None) -> None:
         super().__init__("phase3_hil_data_logger")
         self.output = output
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +132,7 @@ class HilDataLogger(Node):
         self.nav_status: NavigationStatus | None = None
         self.safety_status: SafetyStatus | None = None
         self.gate_cmd: Control | None = None
+        self.shadow_cmd: Control | None = None
         self.actuation: ActuationCommand | None = None
         self.lane_state: LaneState | None = None
         self.route_cursor = 0
@@ -151,6 +157,11 @@ class HilDataLogger(Node):
         self.create_subscription(NavigationStatus, "/adas/navigation/status", self._nav_status, reliable_qos(True))
         self.create_subscription(SafetyStatus, "/adas/system/safety_status", self._safety_status, reliable_qos(True))
         self.create_subscription(Control, "/adas/control/gate/control_cmd", self._gate_cmd, reliable_qos())
+        # Commit 7 — LQR A/B：可选订阅影子控制器的输出（如
+        # /lqr/adas/control/trajectory_follower/control_cmd），用于对比
+        # 两个横向控制器的指令质量（steer rate）。不传则整列留空。
+        if shadow_control_topic:
+            self.create_subscription(Control, shadow_control_topic, self._shadow_cmd, reliable_qos())
         self.create_subscription(ActuationCommand, "/adas/vehicle/actuation_cmd", self._actuation, reliable_qos())
         self.create_subscription(LaneState, "/adas/perception/lane_state", self._lane_state, sensor_qos())
         self.create_timer(1.0 / rate_hz, self._sample)
@@ -193,6 +204,9 @@ class HilDataLogger(Node):
 
     def _gate_cmd(self, msg: Control) -> None:
         self._store("gate_cmd", msg)
+
+    def _shadow_cmd(self, msg: Control) -> None:
+        self._store("shadow_cmd", msg)
 
     def _actuation(self, msg: ActuationCommand) -> None:
         self._store("actuation", msg)
@@ -295,6 +309,13 @@ class HilDataLogger(Node):
             row["gate_longitudinal_accel_mps2"] = (
                 f"{float(self.gate_cmd.longitudinal.acceleration_mps2):.3f}"
             )
+        if self.shadow_cmd is not None:
+            row["shadow_steer_rad"] = (
+                f"{float(self.shadow_cmd.lateral.steering_tire_angle_rad):.7f}"
+            )
+            row["shadow_longitudinal_accel_mps2"] = (
+                f"{float(self.shadow_cmd.longitudinal.acceleration_mps2):.3f}"
+            )
         # `lane_valid` and lane measurements come from /adas/perception/lane_state.
         if self.lane_state is not None:
             row["lane_valid"] = int(bool(self.lane_state.valid))
@@ -346,6 +367,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--duration", type=float, default=None)
+    parser.add_argument(
+        "--shadow-control-topic", default="",
+        help="Commit 7 A/B: optional second Control topic to log (e.g. "
+             "/lqr/adas/control/trajectory_follower/control_cmd) into "
+             "shadow_steer_rad / shadow_longitudinal_accel_mps2 columns",
+    )
     args = parser.parse_args()
     if args.rate <= 0.0 or args.duration is not None and args.duration <= 0.0:
         parser.error("rate and duration must be positive")
@@ -357,7 +384,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     rclpy.init()
-    node = HilDataLogger(args.output, args.rate, args.duration)
+    node = HilDataLogger(
+        args.output, args.rate, args.duration,
+        shadow_control_topic=(args.shadow_control_topic or None),
+    )
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
