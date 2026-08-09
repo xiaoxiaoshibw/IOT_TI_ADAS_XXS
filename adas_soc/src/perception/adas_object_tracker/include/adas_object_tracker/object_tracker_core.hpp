@@ -46,8 +46,6 @@ struct TrackerParams {
   int confirm_frames{3};            // 新候选至少连续 N 帧合格才允许抢占
   double gain_m{4.0};               // 新候选只有比当前主车近 ≥ gain_m 才允许抢
   int retain_frames_on_lost{3};     // 主车短暂丢失后保留 N 帧其最后已知 gap/speed
-  double prediction_horizon_s{1.5};  // 横向预测前瞻时长（只用于远距离目标限定）
-  double prediction_max_s_m{20.0};  // 横向预测弧长上限（避免远距离外推爆炸）
 };
 
 struct TrackerOutput {

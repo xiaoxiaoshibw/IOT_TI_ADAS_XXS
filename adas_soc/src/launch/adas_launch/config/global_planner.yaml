@@ -9,3 +9,20 @@ global_planner:
     deviation_check_rate_hz: 5.0
     replan_threshold_m: 5.25
     replan_cooldown_s: 10.0
+    route_geometry:
+      sample_spacing_m: 2.0
+      min_point_spacing_m: 0.05
+      max_connection_distance_m: 3.0
+      max_connection_heading_jump_rad: 1.2
+      lane_change_min_length_m: 10.0
+      lane_change_min_lateral_m: 1.0
+      lane_change_max_lateral_m: 6.0
+      lane_change_max_heading_difference_rad: 0.35
+    route_validation:
+      max_adjacent_gap_m: 3.0
+      min_point_spacing_m: 0.05
+      max_heading_jump_rad: 1.2
+      max_reverse_progress_m: 0.5
+      maximum_duplicate_ratio: 0.1
+      minimum_route_length_m: 0.1
+      min_route_points: 2

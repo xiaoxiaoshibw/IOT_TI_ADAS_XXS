@@ -9,9 +9,6 @@ namespace adas::control {
 
 struct PurePursuitParams {
   double wheelbase_m{2.7};
-  // 历史保留：早期单一公式 lookahead = gain * v。
-  // Commit 4 起默认不再使用；自适应公式见下面的 adaptive.* 与 compute_lookahead()。
-  double lookahead_gain_s{0.8};
   double min_lookahead_m{3.0};
   double max_lookahead_m{20.0};
   double max_steer_rad{0.6};

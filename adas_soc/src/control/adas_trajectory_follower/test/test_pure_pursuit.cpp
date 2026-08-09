@@ -165,7 +165,6 @@ ac::Trajectory s_wiggle(double v) {
 ct::PurePursuitParams default_adaptive() {
   ct::PurePursuitParams p;
   // 历史 keep，不影响自适应公式
-  p.lookahead_gain_s = 0.8;
   p.min_lookahead_m = 3.0;
   p.max_lookahead_m = 20.0;
   p.base_speed_coeff = 0.7;

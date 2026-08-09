@@ -34,8 +34,6 @@ class ObjectTrackerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<int>("confirm_frames", 3);
     declare_parameter<double>("gain_m", 4.0);
     declare_parameter<int>("retain_frames_on_lost", 3);
-    declare_parameter<double>("prediction_horizon_s", 1.5);
-    declare_parameter<double>("prediction_max_s_m", 20.0);
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
@@ -48,8 +46,6 @@ class ObjectTrackerNode : public rclcpp_lifecycle::LifecycleNode {
       params_.confirm_frames = get_parameter("confirm_frames").as_int();
       params_.gain_m = get_parameter("gain_m").as_double();
       params_.retain_frames_on_lost = get_parameter("retain_frames_on_lost").as_int();
-      params_.prediction_horizon_s = get_parameter("prediction_horizon_s").as_double();
-      params_.prediction_max_s_m = get_parameter("prediction_max_s_m").as_double();
       expected_rate_hz_ = get_parameter("expected_rate_hz").as_double();
       input_timeout_s_ = get_parameter("input_timeout_s").as_double();
       validate_parameters();

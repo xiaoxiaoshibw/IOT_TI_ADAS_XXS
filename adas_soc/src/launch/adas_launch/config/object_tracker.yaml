@@ -12,5 +12,3 @@
     confirm_frames: 3
     gain_m: 4.0
     retain_frames_on_lost: 3
-    prediction_horizon_s: 1.5
-    prediction_max_s_m: 20.0

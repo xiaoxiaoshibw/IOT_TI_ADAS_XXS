@@ -35,12 +35,10 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("odom_timeout_s", 0.15);
     declare_parameter<std::string>("lateral_controller_mode", "pure_pursuit");
     declare_parameter<double>("pure_pursuit.wheelbase_m", 2.7);
-    declare_parameter<double>("pure_pursuit.lookahead_gain_s", 0.8);
     declare_parameter<double>("pure_pursuit.min_lookahead_m", 3.0);
     declare_parameter<double>("pure_pursuit.max_lookahead_m", 20.0);
     declare_parameter<double>("pure_pursuit.max_steer_rad", 0.6);
     // Commit 4 — 自适应前视参数（自适应公式见 pure_pursuit_lateral.cpp）。
-    // 历史 lookahead_gain_s 在 run() 中已被自适应公式替代，但保留以兼容。
     declare_parameter<double>("pure_pursuit.adaptive.base_speed_coeff", 0.7);
     declare_parameter<double>("pure_pursuit.adaptive.base_speed_offset_m", 2.0);
     declare_parameter<double>("pure_pursuit.adaptive.curve_gain", 4.0);
@@ -184,7 +182,6 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     if (lateral_mode_ == "pure_pursuit") {
       PurePursuitParams pp;
       pp.wheelbase_m = get_parameter("pure_pursuit.wheelbase_m").as_double();
-      pp.lookahead_gain_s = get_parameter("pure_pursuit.lookahead_gain_s").as_double();
       pp.min_lookahead_m = get_parameter("pure_pursuit.min_lookahead_m").as_double();
       pp.max_lookahead_m = get_parameter("pure_pursuit.max_lookahead_m").as_double();
       pp.max_steer_rad = get_parameter("pure_pursuit.max_steer_rad").as_double();
@@ -200,7 +197,6 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
       pp.max_lookahead_high_m =
           get_parameter("pure_pursuit.adaptive.max_lookahead_high_m").as_double();
       common::require_positive("pure_pursuit.wheelbase_m", pp.wheelbase_m);
-      common::require_nonnegative("pure_pursuit.lookahead_gain_s", pp.lookahead_gain_s);
       common::require_positive("pure_pursuit.min_lookahead_m", pp.min_lookahead_m);
       common::require_positive("pure_pursuit.max_lookahead_m", pp.max_lookahead_m);
       if (pp.max_lookahead_m < pp.min_lookahead_m) {

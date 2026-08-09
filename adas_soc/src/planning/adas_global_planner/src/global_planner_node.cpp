@@ -72,8 +72,71 @@ class GlobalPlannerNode : public rclcpp::Node {
         !std::isfinite(replan_threshold_m_) || replan_threshold_m_ <= 0.0 ||
         !std::isfinite(deviation_check_rate_hz_) || deviation_check_rate_hz_ <= 0.0 ||
         !std::isfinite(replan_cooldown_s_) || replan_cooldown_s_ < 0.0) {
-      throw std::invalid_argument("invalid global planner replan parameters");
+        throw std::invalid_argument("invalid global planner replan parameters");
     }
+    route_geometry_.sample_spacing_m =
+        declare_parameter("route_geometry.sample_spacing_m", 2.0);
+    route_geometry_.min_point_spacing_m =
+        declare_parameter("route_geometry.min_point_spacing_m", 0.05);
+    route_geometry_.max_connection_distance_m =
+        declare_parameter("route_geometry.max_connection_distance_m", 3.0);
+    route_geometry_.max_connection_heading_jump_rad =
+        declare_parameter("route_geometry.max_connection_heading_jump_rad", 1.2);
+    route_geometry_.lane_change_min_length_m =
+        declare_parameter("route_geometry.lane_change_min_length_m", 10.0);
+    route_geometry_.lane_change_min_lateral_m =
+        declare_parameter("route_geometry.lane_change_min_lateral_m", 1.0);
+    route_geometry_.lane_change_max_lateral_m =
+        declare_parameter("route_geometry.lane_change_max_lateral_m", 6.0);
+    route_geometry_.lane_change_max_heading_difference_rad =
+        declare_parameter("route_geometry.lane_change_max_heading_difference_rad", 0.35);
+    route_validation_.max_adjacent_gap_m =
+        declare_parameter("route_validation.max_adjacent_gap_m", 3.0);
+    route_validation_.min_point_spacing_m =
+        declare_parameter("route_validation.min_point_spacing_m", 0.05);
+    route_validation_.max_heading_jump_rad =
+        declare_parameter("route_validation.max_heading_jump_rad", 1.2);
+    route_validation_.max_reverse_progress_m =
+        declare_parameter("route_validation.max_reverse_progress_m", 0.5);
+    route_validation_.maximum_duplicate_ratio =
+        declare_parameter("route_validation.maximum_duplicate_ratio", 0.1);
+    route_validation_.minimum_route_length_m =
+        declare_parameter("route_validation.minimum_route_length_m", 0.1);
+    const auto min_route_points =
+        declare_parameter<int>("route_validation.min_route_points", 2);
+    if (!std::isfinite(route_geometry_.sample_spacing_m) ||
+        route_geometry_.sample_spacing_m <= 0.0 ||
+        !std::isfinite(route_geometry_.min_point_spacing_m) ||
+        route_geometry_.min_point_spacing_m <= 0.0 ||
+        !std::isfinite(route_geometry_.max_connection_distance_m) ||
+        route_geometry_.max_connection_distance_m <= 0.0 ||
+        !std::isfinite(route_geometry_.max_connection_heading_jump_rad) ||
+        route_geometry_.max_connection_heading_jump_rad <= 0.0 ||
+        !std::isfinite(route_geometry_.lane_change_min_length_m) ||
+        route_geometry_.lane_change_min_length_m <= 0.0 ||
+        !std::isfinite(route_geometry_.lane_change_min_lateral_m) ||
+        route_geometry_.lane_change_min_lateral_m < 0.0 ||
+        !std::isfinite(route_geometry_.lane_change_max_lateral_m) ||
+        route_geometry_.lane_change_max_lateral_m <
+            route_geometry_.lane_change_min_lateral_m ||
+        !std::isfinite(route_geometry_.lane_change_max_heading_difference_rad) ||
+        route_geometry_.lane_change_max_heading_difference_rad <= 0.0 ||
+        !std::isfinite(route_validation_.max_adjacent_gap_m) ||
+        route_validation_.max_adjacent_gap_m <= 0.0 ||
+        !std::isfinite(route_validation_.min_point_spacing_m) ||
+        route_validation_.min_point_spacing_m <= 0.0 ||
+        !std::isfinite(route_validation_.max_heading_jump_rad) ||
+        route_validation_.max_heading_jump_rad <= 0.0 ||
+        !std::isfinite(route_validation_.max_reverse_progress_m) ||
+        route_validation_.max_reverse_progress_m < 0.0 ||
+        !std::isfinite(route_validation_.maximum_duplicate_ratio) ||
+        route_validation_.maximum_duplicate_ratio < 0.0 ||
+        route_validation_.maximum_duplicate_ratio > 1.0 ||
+        !std::isfinite(route_validation_.minimum_route_length_m) ||
+        route_validation_.minimum_route_length_m <= 0.0 || min_route_points < 2) {
+      throw std::invalid_argument("invalid route geometry/validation parameters");
+    }
+    route_validation_.min_route_points = static_cast<std::size_t>(min_route_points);
     replan_policy_ = std::make_unique<ReplanPolicy>(replan_threshold_m_, replan_cooldown_s_);
     planner_ = std::make_unique<GlobalPlannerCore>(cost);
 
@@ -260,7 +323,7 @@ class GlobalPlannerNode : public rclcpp::Node {
     // 弯道前突然打满方向。先裁剪起终点、按前向投影连接 successor，再做
     // 路线完整性校验；校验失败时保持安全停车，不发布一条可能撞墙的路线。
     const auto semantic = build_semantic_route(
-        candidate, current.x, current.y, target.x, target.y);
+        candidate, current.x, current.y, target.x, target.y, route_geometry_);
     if (!semantic.valid) {
       if (is_replan && previous_route.valid) {
         active_route_ = previous_route;
@@ -275,7 +338,7 @@ class GlobalPlannerNode : public rclcpp::Node {
                      "route geometry invalid: " + semantic.failure_reason);
       return;
     }
-    const auto validation = validate_route(semantic.points);
+    const auto validation = validate_route(semantic.points, route_validation_);
     if (!validation.valid) {
       if (is_replan && previous_route.valid) {
         active_route_ = previous_route;
@@ -342,6 +405,8 @@ class GlobalPlannerNode : public rclcpp::Node {
   bool arrived_{false};
   bool plan_when_localized_{false};
   std::unique_ptr<ReplanPolicy> replan_policy_;
+  RouteGeometryConfig route_geometry_;
+  RouteValidationConfig route_validation_;
   std::string map_id_;
   std::string map_hash_;
   std::string goal_id_;

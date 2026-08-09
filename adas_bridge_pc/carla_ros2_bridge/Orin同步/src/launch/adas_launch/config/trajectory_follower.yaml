@@ -8,7 +8,6 @@
     longitudinal_controller_mode: pid
     pure_pursuit:
       wheelbase_m: 2.7
-      lookahead_gain_s: 0.8
       min_lookahead_m: 3.0
       max_lookahead_m: 20.0
       max_steer_rad: 0.6
