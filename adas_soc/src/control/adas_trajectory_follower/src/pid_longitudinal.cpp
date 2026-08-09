@@ -13,7 +13,7 @@ namespace ac = adas::common;
 PidLongitudinal::PidLongitudinal(const PidLongitudinalParams& params)
     : params_(params),
       pid_({params.kp, params.ki, params.kd}, -params.max_decel_mps2, params.max_accel_mps2,
-           -params.integral_limit, params.integral_limit) {}
+           -params.integral_limit, params.integral_limit, params.integrator_freeze_band_mps) {}
 
 void PidLongitudinal::reset() {
   pid_.reset();

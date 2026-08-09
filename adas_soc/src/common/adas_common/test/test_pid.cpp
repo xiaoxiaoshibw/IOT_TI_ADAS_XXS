@@ -48,3 +48,34 @@ TEST(Pid, ZeroDtReturnsLastOutput) {
   const double a = pid.update(1.0, 0.02);
   EXPECT_NEAR(pid.update(99.0, 0.0), a, 1e-12);
 }
+
+// === Commit 6b: 积分冻结带 (|error| < freeze_band 时跳过积分) =================
+
+TEST(Pid, FreezeBandSkipsIntegration) {
+  // freeze_band=0.5, ki=10.0：持续 |error|=0.1（小于 band）应不累计积分。
+  ac::Pid pid({0.0, 10.0, 0.0}, -10.0, 10.0, -100.0, 100.0, 0.5);
+  for (int i = 0; i < 1000; ++i) {
+    pid.update(0.1, 0.01);
+  }
+  EXPECT_NEAR(pid.integral(), 0.0, 1e-9);
+}
+
+TEST(Pid, FreezeBandAllowsLargeErrorIntegration) {
+  // 同一 PID，|error|=1.0（> 0.5）应正常累计积分。ki=10, out_max=10 →
+  // 抗饱和把 integral 钳在 ≈ out_max/ki = 1.0（实际 0.99，因刚好到达 out_max
+  // 那一拍回退一次 dt）。
+  ac::Pid pid({0.0, 10.0, 0.0}, -10.0, 10.0, -100.0, 100.0, 0.5);
+  for (int i = 0; i < 1000; ++i) {
+    pid.update(1.0, 0.01);
+  }
+  EXPECT_NEAR(pid.integral(), 0.99, 1e-6);
+}
+
+TEST(Pid, ZeroFreezeBandDisablesFreezing) {
+  // 默认 freeze_band=0 → 行为与 Commit 6b 前一致：小误差也累计
+  ac::Pid pid({0.0, 10.0, 0.0}, -10.0, 10.0, -100.0, 100.0, 0.0);
+  for (int i = 0; i < 100; ++i) {
+    pid.update(0.1, 0.01);
+  }
+  EXPECT_NEAR(pid.integral(), 0.1, 1e-6);
+}

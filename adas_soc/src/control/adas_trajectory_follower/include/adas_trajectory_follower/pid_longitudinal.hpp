@@ -22,6 +22,9 @@ struct PidLongitudinalParams {
   double start_speed_mps{0.8};       // v_ref 高于此值 → 退出 STOPPED
   double stop_hold_accel_mps2{-1.5}; // STOPPED 态恒定驻车制动
   double preview_time_s{0.4};        // 速度参考取前视点（减少纯滞后）
+  // Commit 6b — 积分冻结带：|error| < 此值时跳过积分累加，避免稳态抖动累积。
+  // 0 表示禁用冻结（兼容旧行为）。
+  double integrator_freeze_band_mps{0.5};
 };
 
 class PidLongitudinal : public LongitudinalControllerBase {
