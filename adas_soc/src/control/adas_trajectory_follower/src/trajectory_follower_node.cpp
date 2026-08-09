@@ -11,6 +11,7 @@
 #include "adas_msgs/msg/control.hpp"
 #include "adas_msgs/msg/steering_report.hpp"
 #include "adas_msgs/msg/trajectory.hpp"
+#include "adas_msgs/msg/tracked_object_array.hpp"  // generated header (C++ name lowercased)
 #include "adas_trajectory_follower/lqr_lateral.hpp"
 #include "adas_trajectory_follower/pid_longitudinal.hpp"
 #include "adas_trajectory_follower/pure_pursuit_lateral.hpp"
@@ -38,6 +39,13 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("pure_pursuit.min_lookahead_m", 3.0);
     declare_parameter<double>("pure_pursuit.max_lookahead_m", 20.0);
     declare_parameter<double>("pure_pursuit.max_steer_rad", 0.6);
+    // Commit 4 — 自适应前视参数（自适应公式见 pure_pursuit_lateral.cpp）。
+    // 历史 lookahead_gain_s 在 run() 中已被自适应公式替代，但保留以兼容。
+    declare_parameter<double>("pure_pursuit.adaptive.base_speed_coeff", 0.7);
+    declare_parameter<double>("pure_pursuit.adaptive.base_speed_offset_m", 2.0);
+    declare_parameter<double>("pure_pursuit.adaptive.curve_gain", 4.0);
+    declare_parameter<double>("pure_pursuit.adaptive.curve_factor_min", 0.6);
+    declare_parameter<double>("pure_pursuit.adaptive.max_lookahead_high_m", 12.0);
     declare_parameter<double>("lqr.wheelbase_m", 2.7);
     declare_parameter<double>("lqr.steer_tau_s", 0.2);
     declare_parameter<double>("lqr.q_lat", 1.0);
@@ -56,6 +64,8 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("pid.start_speed_mps", 0.8);
     declare_parameter<double>("pid.stop_hold_accel_mps2", -1.5);
     declare_parameter<double>("pid.preview_time_s", 0.4);
+    // Commit 6b — 积分冻结带（|error| < 此值跳过积分更新）
+    declare_parameter<double>("pid.integrator_freeze_band_mps", 0.5);
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
@@ -82,7 +92,27 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
           });
       sub_steer_ = create_subscription<adas_msgs::msg::SteeringReport>(
           "/adas/vehicle/steering_report", sensor_qos,
-          [this](adas_msgs::msg::SteeringReport::ConstSharedPtr msg) { steer_ = msg; });
+          [this](adas_msgs::msg::SteeringReport::ConstSharedPtr msg) {
+            steer_ = msg;
+            // Commit 4 — 把当前真实转角送入 Pure Pursuit 内部 last_steer_。
+            // 第一条 SteeringReport 到来后即播种；之后不影响（幂等）。
+            if (lateral_) {
+              auto* pp = dynamic_cast<PurePursuitLateral*>(lateral_.get());
+              if (pp != nullptr) {
+                pp->seed_from_steering_report(
+                    static_cast<double>(msg->steering_tire_angle_rad));
+              }
+            }
+          });
+      // Commit 5 — 订阅 /adas/perception/objects 跟踪主前车 id 变化。
+      // primary_lead_id 切换时重置 PID 积分（避免不同 lead 的积分状态串车）。
+      sub_objects_ = create_subscription<adas_msgs::msg::TrackedObjectArray>(
+          "/adas/perception/objects", sensor_qos,
+          [this](adas_msgs::msg::TrackedObjectArray::ConstSharedPtr msg) {
+            objects_ = msg;
+            objects_rx_time_ = std::chrono::steady_clock::now();
+            objects_received_ = true;
+          });
       pub_cmd_ = create_publisher<adas_msgs::msg::Control>(
           "/adas/control/trajectory_follower/control_cmd", rclcpp::QoS(1).reliable());
       timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / rate_hz_),
@@ -157,6 +187,17 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
       pp.min_lookahead_m = get_parameter("pure_pursuit.min_lookahead_m").as_double();
       pp.max_lookahead_m = get_parameter("pure_pursuit.max_lookahead_m").as_double();
       pp.max_steer_rad = get_parameter("pure_pursuit.max_steer_rad").as_double();
+      // Commit 4 — 自适应前视参数
+      pp.base_speed_coeff =
+          get_parameter("pure_pursuit.adaptive.base_speed_coeff").as_double();
+      pp.base_speed_offset_m =
+          get_parameter("pure_pursuit.adaptive.base_speed_offset_m").as_double();
+      pp.curve_gain =
+          get_parameter("pure_pursuit.adaptive.curve_gain").as_double();
+      pp.curve_factor_min =
+          get_parameter("pure_pursuit.adaptive.curve_factor_min").as_double();
+      pp.max_lookahead_high_m =
+          get_parameter("pure_pursuit.adaptive.max_lookahead_high_m").as_double();
       common::require_positive("pure_pursuit.wheelbase_m", pp.wheelbase_m);
       common::require_nonnegative("pure_pursuit.lookahead_gain_s", pp.lookahead_gain_s);
       common::require_positive("pure_pursuit.min_lookahead_m", pp.min_lookahead_m);
@@ -165,6 +206,21 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
         throw std::invalid_argument("pure_pursuit.max_lookahead_m must be >= min_lookahead_m");
       }
       common::require_positive("pure_pursuit.max_steer_rad", pp.max_steer_rad);
+      common::require_nonnegative("pure_pursuit.adaptive.base_speed_coeff",
+                                  pp.base_speed_coeff);
+      common::require_nonnegative("pure_pursuit.adaptive.base_speed_offset_m",
+                                  pp.base_speed_offset_m);
+      common::require_nonnegative("pure_pursuit.adaptive.curve_gain", pp.curve_gain);
+      if (pp.curve_factor_min <= 0.0 || pp.curve_factor_min > 1.0) {
+        throw std::invalid_argument(
+            "pure_pursuit.adaptive.curve_factor_min must be in (0, 1]");
+      }
+      common::require_positive("pure_pursuit.adaptive.max_lookahead_high_m",
+                               pp.max_lookahead_high_m);
+      if (pp.max_lookahead_high_m < pp.min_lookahead_m) {
+        throw std::invalid_argument(
+            "pure_pursuit.adaptive.max_lookahead_high_m must be >= min_lookahead_m");
+      }
       lateral_ = std::make_unique<PurePursuitLateral>(pp);
     } else if (lateral_mode_ == "lqr") {
       LqrLateralParams lq;
@@ -202,6 +258,7 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     pl.start_speed_mps = get_parameter("pid.start_speed_mps").as_double();
     pl.stop_hold_accel_mps2 = get_parameter("pid.stop_hold_accel_mps2").as_double();
     pl.preview_time_s = get_parameter("pid.preview_time_s").as_double();
+    pl.integrator_freeze_band_mps = get_parameter("pid.integrator_freeze_band_mps").as_double();
     common::require_nonnegative("pid.kp", pl.kp);
     common::require_nonnegative("pid.ki", pl.ki);
     common::require_nonnegative("pid.kd", pl.kd);
@@ -218,6 +275,8 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
       throw std::invalid_argument("pid.stop_hold_accel_mps2 must be negative");
     }
     common::require_nonnegative("pid.preview_time_s", pl.preview_time_s);
+    common::require_nonnegative("pid.integrator_freeze_band_mps",
+                                pl.integrator_freeze_band_mps);
     longitudinal_ = std::make_unique<PidLongitudinal>(pl);
   }
 
@@ -274,6 +333,17 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     input.state.yaw_rate_rps = odom_->twist.twist.angular.z;
     input.steering_angle_rad = steer_ ? steer_->steering_tire_angle_rad : 0.0;
     input.dt = cycle_dt;
+    // Commit 5 — 主前车 id 切换时重置 PID 积分（lead A 累积的积分不应泄漏给 lead B）。
+    // 仅在 primary_lead_id 实际变化时 reset，sticky retain 期内的"主车 id 不变"
+    // 不会触发 reset。
+    if (objects_ && fresh(objects_rx_time_, objects_received_, trajectory_timeout_s_)) {
+      const int cur_lead = objects_->primary_lead_id;
+      // 首次进入（last=-1）不触发 reset；后续变化则 reset。
+      if (last_primary_lead_id_ != -1 && cur_lead != last_primary_lead_id_) {
+        if (longitudinal_) longitudinal_->reset();
+      }
+      last_primary_lead_id_ = cur_lead;
+    }
     const auto lateral = lateral_->run(input);
     const auto longitudinal = longitudinal_->run(input);
     output_valid_ = std::isfinite(lateral.steering_tire_angle_rad) &&
@@ -357,11 +427,14 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
     sub_traj_.reset();
     sub_odom_.reset();
     sub_steer_.reset();
+    sub_objects_.reset();
     lateral_.reset();
     longitudinal_.reset();
     trajectory_.clear();
     odom_.reset();
     steer_.reset();
+    objects_.reset();
+    last_primary_lead_id_ = -1;
   }
 
   double rate_hz_{50.0};
@@ -388,9 +461,15 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
   bool odom_received_{false};
   nav_msgs::msg::Odometry::ConstSharedPtr odom_;
   adas_msgs::msg::SteeringReport::ConstSharedPtr steer_;
+  // Commit 5 — 主前车 id 变化时重置 PID 积分（避免不同 lead 间的累积误差串车）。
+  adas_msgs::msg::TrackedObjectArray::ConstSharedPtr objects_;
+  std::chrono::steady_clock::time_point objects_rx_time_{};
+  bool objects_received_{false};
+  int last_primary_lead_id_{-1};
   rclcpp::Subscription<adas_msgs::msg::Trajectory>::SharedPtr sub_traj_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Subscription<adas_msgs::msg::SteeringReport>::SharedPtr sub_steer_;
+  rclcpp::Subscription<adas_msgs::msg::TrackedObjectArray>::SharedPtr sub_objects_;
   rclcpp_lifecycle::LifecyclePublisher<adas_msgs::msg::Control>::SharedPtr pub_cmd_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
