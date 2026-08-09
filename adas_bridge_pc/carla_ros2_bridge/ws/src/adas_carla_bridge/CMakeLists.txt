@@ -48,6 +48,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_can_protocol_cpp adas_carla_can_protocol)
   ament_add_pytest_test(test_can_protocol_py test/test_can_protocol.py)
   ament_add_pytest_test(test_bridge_safety test/test_bridge_safety.py)
+  ament_add_pytest_test(test_carla_world_reference test/test_carla_world_reference.py)
   ament_add_pytest_test(test_map_export test/test_map_export.py)
 endif()
 

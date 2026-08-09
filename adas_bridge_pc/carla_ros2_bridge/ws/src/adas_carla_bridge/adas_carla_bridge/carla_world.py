@@ -31,8 +31,18 @@ WALKER_BLUEPRINT = 'walker.pedestrian.*'
 CLASS_CAR = 1
 CLASS_PEDESTRIAN = 3
 
-# 曲率估计的前视弧长 [m]
-CURVATURE_LOOKAHEAD_M = 8.0
+# 曲率估计的前视弧长 [m]。
+# 决策：导航场景下若车辆仍在直道、但 next(CURVATURE_LOOKAHEAD_M) 已跨入弯道，
+# _ref_curvature 会提前报告非零曲率；trajectory_planner 把它当成整段 120 m
+# 轨迹的常曲率外推，纯跟踪（lookahead≈12 m @ 15 m/s）便在到达几何转弯点之前
+# 提前打方向——用户报告的"还没到转弯点就提前转弯"即由此放大。
+# 2 m 把前视收紧到"接近自车"：仅当车辆即将到达或已在弯内时曲率才非零，
+# 平滑性由 trajectory_planner 与 pure_pursuit 的 lookahead 自然保证。
+# 该常量仅影响 CARLA 模式；SIL (adas_sim_vehicle) 与 HIL (真实感知) 不依赖此值。
+CURVATURE_LOOKAHEAD_M = 2.0
+REF_BRANCH_MAX_HEADING_ERROR_RAD = math.radians(45.0)
+LANE_INVALID_HEADING_ERROR_RAD = math.radians(45.0)
+LANE_INVALID_LATERAL_OFFSET_M = 1.5
 
 
 def _clamp(v, lo, hi):
@@ -54,6 +64,33 @@ def _speed(actor):
 
 def _xy_distance(a, b):
     return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def _waypoint_yaw(wp):
+    return math.radians(float(wp.transform.rotation.yaw))
+
+
+def _select_forward_waypoint(candidates, ego_loc, ego_yaw, ref_yaw):
+    """Choose a junction successor without jumping onto a crossing lane."""
+    aligned = []
+    for candidate in candidates:
+        yaw = _waypoint_yaw(candidate)
+        ego_error = abs(_norm_angle(yaw - ego_yaw))
+        ref_error = abs(_norm_angle(yaw - ref_yaw))
+        if (ego_error <= REF_BRANCH_MAX_HEADING_ERROR_RAD and
+                ref_error <= REF_BRANCH_MAX_HEADING_ERROR_RAD):
+            distance_sq = (
+                (candidate.transform.location.x - ego_loc.x) ** 2 +
+                (candidate.transform.location.y - ego_loc.y) ** 2)
+            aligned.append((distance_sq + 4.0 * ego_error * ego_error,
+                            candidate))
+    return min(aligned, key=lambda item: item[0])[1] if aligned else None
+
+
+def _lane_reference_valid(lateral_offset, heading_error):
+    return not (
+        abs(heading_error) > LANE_INVALID_HEADING_ERROR_RAD and
+        abs(lateral_offset) > LANE_INVALID_LATERAL_OFFSET_M)
 
 
 class CarlaWorld:
@@ -251,7 +288,9 @@ class CarlaWorld:
 
     # ── 参考线推进：沿初始车道中心线按纵向投影前移 ──
 
-    def _advance_ref(self, ego_loc):
+    def _advance_ref(self, ego_tf):
+        ego_loc = ego_tf.location
+        ego_yaw = math.radians(float(ego_tf.rotation.yaw))
         wp = self._ref_wp
         for _ in range(6):
             f = wp.transform.get_forward_vector()
@@ -263,12 +302,16 @@ class CarlaWorld:
             nxts = wp.next(min(max(s, 0.5), 5.0))
             if not nxts:
                 break
-            wp = min(nxts, key=lambda w:
-                     (w.transform.location.x - ego_loc.x) ** 2
-                     + (w.transform.location.y - ego_loc.y) ** 2)
+            nxt = _select_forward_waypoint(
+                nxts, ego_loc, ego_yaw, _waypoint_yaw(wp))
+            if nxt is None:
+                break
+            wp = nxt
         if _xy_distance(ego_loc, wp.transform.location) > 20.0:
             nearest = self._driving_waypoint(ego_loc, project_to_road=True)
-            if nearest is not None:
+            if (nearest is not None and
+                    abs(_norm_angle(_waypoint_yaw(nearest) - ego_yaw)) <=
+                    REF_BRANCH_MAX_HEADING_ERROR_RAD):
                 wp = nearest
         self._ref_wp = wp
         return wp
@@ -320,7 +363,7 @@ class CarlaWorld:
 
     def sense(self):
         ego_tf = self.ego.get_transform()
-        ref_wp = self._advance_ref(ego_tf.location)
+        ref_wp = self._advance_ref(ego_tf)
 
         yaw_c = math.radians(float(ego_tf.rotation.yaw))
         road_yaw_c = math.radians(float(ref_wp.transform.rotation.yaw))
@@ -329,6 +372,8 @@ class CarlaWorld:
         dx = ego_tf.location.x - ref_wp.transform.location.x
         dy = ego_tf.location.y - ref_wp.transform.location.y
         lat_left = -(-math.sin(road_yaw_c) * dx + math.cos(road_yaw_c) * dy)
+        heading_error = _norm_angle(-(yaw_c - road_yaw_c))
+        lane_valid = _lane_reference_valid(lat_left, heading_error)
 
         ang = self.ego.get_angular_velocity()   # deg/s，左手系
 
@@ -342,10 +387,10 @@ class CarlaWorld:
                 'steer_rad': self._steering_tire_angle(),
             },
             'lane': {
-                'valid': True,
+                'valid': lane_valid,
                 'lateral_offset': lat_left,
-                'heading_error': _norm_angle(-(yaw_c - road_yaw_c)),
-                'curvature': self._ref_curvature(ref_wp),
+                'heading_error': heading_error,
+                'curvature': self._ref_curvature(ref_wp) if lane_valid else 0.0,
                 'lane_width': float(ref_wp.lane_width),
             },
             'objects': [],
