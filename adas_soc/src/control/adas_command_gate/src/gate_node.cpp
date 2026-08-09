@@ -32,6 +32,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
       : LifecycleNode("command_gate", options) {
     declare_parameter<double>("rate_hz", 50.0);
     declare_parameter<double>("follower_timeout_s", 0.2);
+    declare_parameter<double>("aeb_stale_timeout_s", 0.1);
+    declare_parameter<double>("odom_stale_timeout_s", 0.15);
     declare_parameter<double>("stop_decel_mps2", 2.5);
     declare_parameter<double>("steer_decay_tau_s", 1.0);
     declare_parameter<std::vector<double>>("filter.speed_points_mps",
@@ -48,6 +50,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
     try {
       rate_hz_ = get_parameter("rate_hz").as_double();
       params_.follower_timeout_s = get_parameter("follower_timeout_s").as_double();
+      params_.aeb_stale_timeout_s = get_parameter("aeb_stale_timeout_s").as_double();
+      params_.odom_stale_timeout_s = get_parameter("odom_stale_timeout_s").as_double();
       params_.stop_decel_mps2 = get_parameter("stop_decel_mps2").as_double();
       params_.steer_decay_tau_s = get_parameter("steer_decay_tau_s").as_double();
       params_.speed_points_mps = get_parameter("filter.speed_points_mps").as_double_array();
@@ -107,7 +111,10 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
           });
       sub_odom_ = create_subscription<nav_msgs::msg::Odometry>(
           "/adas/localization/kinematic_state", sensor_qos,
-          [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) { odom_ = msg; });
+          [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+            odom_ = msg;
+            odom_rx_time_ = now();
+          });
       pub_cmd_ = create_publisher<adas_msgs::msg::Control>(
           "/adas/control/gate/control_cmd", rclcpp::QoS(1).reliable());
       pub_status_ = create_publisher<adas_msgs::msg::GateStatus>(
@@ -205,6 +212,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
   void validate_parameters() const {
     common::require_timeout_exceeds_period("follower_timeout_s", params_.follower_timeout_s,
                                            "rate_hz", rate_hz_);
+    common::require_positive("aeb_stale_timeout_s", params_.aeb_stale_timeout_s);
+    common::require_positive("odom_stale_timeout_s", params_.odom_stale_timeout_s);
     common::require_positive("stop_decel_mps2", params_.stop_decel_mps2);
     common::require_nonnegative("steer_decay_tau_s", params_.steer_decay_tau_s);
     common::require_positive("filter.max_accel_mps2", params_.max_accel_mps2);
@@ -218,6 +227,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
     in.now_s = now().seconds();
     in.dt = cycle_time_.tick();
     in.ego_speed_mps = odom_ ? odom_->twist.twist.linear.x : 0.0;
+    in.odom_received = static_cast<bool>(odom_);
+    in.odom_stamp_s = odom_ ? odom_rx_time_.seconds() : -1e9;
     if (follower_cmd_) {
       in.follower_received = true;
       in.follower_stamp_s = follower_rx_time_.seconds();
@@ -232,6 +243,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
     if (aeb_status_ && aeb_cmd_ &&
         aeb_status_->state == adas_msgs::msg::AebStatus::STATE_EMERGENCY) {
       in.aeb_emergency = true;
+      in.aeb_received = true;
+      in.aeb_stamp_s = std::min(aeb_status_rx_time_.seconds(), aeb_cmd_rx_time_.seconds());
       in.aeb_cmd.longitudinal.velocity_mps = aeb_cmd_->longitudinal.velocity_mps;
       in.aeb_cmd.longitudinal.acceleration_mps2 = aeb_cmd_->longitudinal.acceleration_mps2;
     }
@@ -284,6 +297,8 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
     in.now_s = now().seconds();
     in.dt = 1.0 / std::max(rate_hz_, 1.0);
     in.ego_speed_mps = odom_ ? odom_->twist.twist.linear.x : 0.0;
+    in.odom_received = static_cast<bool>(odom_);
+    in.odom_stamp_s = odom_ ? odom_rx_time_.seconds() : -1e9;
     in.force_builtin_stop = true;
     auto decision = core_->update(in);
     decision.reason = reason;
@@ -354,6 +369,7 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
     follower_rx_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     aeb_status_rx_time_ = follower_rx_time_;
     aeb_cmd_rx_time_ = follower_rx_time_;
+    odom_rx_time_ = follower_rx_time_;
     output_count_ = 0U;
     status_decimator_ = 0;
     fallback_active_ = true;
@@ -408,6 +424,7 @@ class CommandGateNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Time aeb_cmd_rx_time_{0, 0, RCL_ROS_TIME};
   adas_msgs::msg::SafetyStatus::ConstSharedPtr safety_;
   nav_msgs::msg::Odometry::ConstSharedPtr odom_;
+  rclcpp::Time odom_rx_time_{0, 0, RCL_ROS_TIME};
   rclcpp::Subscription<adas_msgs::msg::Control>::SharedPtr sub_follower_;
   rclcpp::Subscription<adas_msgs::msg::AebStatus>::SharedPtr sub_aeb_status_;
   rclcpp::Subscription<adas_msgs::msg::Control>::SharedPtr sub_aeb_cmd_;

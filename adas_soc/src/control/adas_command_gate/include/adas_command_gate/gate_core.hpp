@@ -19,6 +19,8 @@ enum class GateSource { kFollower = 0, kAeb = 1, kBuiltinStop = 2 };
 
 struct GateParams {
   double follower_timeout_s{0.2};
+  double aeb_stale_timeout_s{0.1};
+  double odom_stale_timeout_s{0.15};
   // builtin_stop 行为
   double stop_decel_mps2{2.5};       // 舒适停车减速度（MRM_COMFORT）
   double steer_decay_tau_s{1.0};     // 停车期间转角向 0 衰减时间常数
@@ -42,7 +44,12 @@ struct GateInputs {
   common::ControlData follower_cmd;
   // aeb 源（M3 接入；未接入时保持 false）
   bool aeb_emergency{false};
+  bool aeb_received{false};
+  double aeb_stamp_s{-1e9};
   common::ControlData aeb_cmd;
+  // odometry freshness gates speed-dependent steering limits
+  bool odom_received{false};
+  double odom_stamp_s{-1e9};
   // 系统请求
   bool mrm_stop_requested{false};
   bool navigation_planned_stop{false};
@@ -68,6 +75,9 @@ class GateCore {
   // 输出侧滤波状态（跨源连续——切源不突跳的关键）
   double last_steer_{0.0};
   double last_accel_{0.0};
+  double last_aeb_stamp_{-1e9};
+
+  bool process_aeb_override(const GateInputs& in, GateDecision* decision);
 };
 
 }  // namespace adas::control

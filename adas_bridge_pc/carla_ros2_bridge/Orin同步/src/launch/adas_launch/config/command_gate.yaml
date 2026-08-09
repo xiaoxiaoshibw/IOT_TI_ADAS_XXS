@@ -4,6 +4,8 @@
   ros__parameters:
     rate_hz: 50.0
     follower_timeout_s: 0.2
+    aeb_stale_timeout_s: 0.1
+    odom_stale_timeout_s: 0.15
     stop_decel_mps2: 2.5
     steer_decay_tau_s: 1.0
     filter:

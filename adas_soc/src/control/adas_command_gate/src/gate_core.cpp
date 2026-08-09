@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace adas::control {
 
@@ -11,7 +12,32 @@ namespace ac = adas::common;
 GateCore::GateCore(const GateParams& params)
     : params_(params),
       steer_lim_(params.speed_points_mps, params.steer_lim_rad),
-      steer_rate_lim_(params.speed_points_mps, params.steer_rate_lim_rps) {}
+      steer_rate_lim_(params.speed_points_mps, params.steer_rate_lim_rps) {
+  if (!std::isfinite(params_.aeb_stale_timeout_s) || params_.aeb_stale_timeout_s <= 0.0 ||
+      !std::isfinite(params_.odom_stale_timeout_s) || params_.odom_stale_timeout_s <= 0.0) {
+    throw std::invalid_argument("AEB and odometry stale timeouts must be > 0");
+  }
+}
+
+bool GateCore::process_aeb_override(const GateInputs& in, GateDecision* decision) {
+  if (in.aeb_received && std::isfinite(in.aeb_stamp_s)) {
+    // Do not let an older replayed frame move the tracked receive time
+    // backwards.  This keeps the freshness check deterministic in SIL.
+    last_aeb_stamp_ = std::max(last_aeb_stamp_, in.aeb_stamp_s);
+  }
+  const double aeb_age_s = in.now_s - last_aeb_stamp_;
+  const bool aeb_fresh = in.aeb_received && std::isfinite(aeb_age_s) && aeb_age_s >= 0.0 &&
+                         aeb_age_s <= params_.aeb_stale_timeout_s;
+  if (!in.aeb_emergency || !aeb_fresh ||
+      in.aeb_cmd.longitudinal.acceleration_mps2 >=
+          decision->cmd.longitudinal.acceleration_mps2) {
+    return false;
+  }
+  decision->cmd.longitudinal = in.aeb_cmd.longitudinal;
+  decision->source = GateSource::kAeb;
+  decision->reason = "aeb_emergency_override";
+  return true;
+}
 
 GateDecision GateCore::update(const GateInputs& in) {
   GateDecision d;
@@ -48,25 +74,27 @@ GateDecision GateCore::update(const GateInputs& in) {
   }
 
   // ── 2. AEB 紧急纵向覆盖：制动只增不减，横向保持当前源 ──
-  bool emergency_braking = false;
-  if (in.aeb_emergency &&
-      in.aeb_cmd.longitudinal.acceleration_mps2 < d.cmd.longitudinal.acceleration_mps2) {
-    d.cmd.longitudinal = in.aeb_cmd.longitudinal;
-    d.source = GateSource::kAeb;
-    d.reason = "aeb_emergency_override";
-    emergency_braking = true;
-  }
+  const bool emergency_braking = process_aeb_override(in, &d);
 
   // ── 3. 滤波限幅 ──
   bool limited = false;
   // 3a. 速度相关转角限幅
-  const double steer_lim = steer_lim_(in.ego_speed_mps);
+  const bool odom_fresh = in.odom_received && std::isfinite(in.odom_stamp_s) &&
+                          in.now_s >= in.odom_stamp_s &&
+                          (in.now_s - in.odom_stamp_s) <= params_.odom_stale_timeout_s;
+  const double conservative_steer_lim =
+      *std::min_element(params_.steer_lim_rad.begin(), params_.steer_lim_rad.end());
+  const double conservative_steer_rate_lim =
+      *std::min_element(params_.steer_rate_lim_rps.begin(), params_.steer_rate_lim_rps.end());
+  const double steer_lim = odom_fresh ? steer_lim_(in.ego_speed_mps) : conservative_steer_lim;
   double steer = std::clamp(d.cmd.lateral.steering_tire_angle_rad, -steer_lim, steer_lim);
   if (steer != d.cmd.lateral.steering_tire_angle_rad) {
     limited = true;
   }
   // 3b. 转角速率限幅（相对上一输出帧——跨源连续，切源不突跳）
-  const double max_dsteer = steer_rate_lim_(in.ego_speed_mps) * in.dt;
+  const double steer_rate_lim = odom_fresh ? steer_rate_lim_(in.ego_speed_mps)
+                                           : conservative_steer_rate_lim;
+  const double max_dsteer = steer_rate_lim * in.dt;
   const double dsteer = std::clamp(steer - last_steer_, -max_dsteer, max_dsteer);
   if (std::fabs(dsteer - (steer - last_steer_)) > 1e-12) {
     limited = true;
