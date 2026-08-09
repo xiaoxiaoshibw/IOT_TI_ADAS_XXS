@@ -133,3 +133,68 @@ TEST(BehaviorCore, PassedLeadTriggersReturnAndFinish) {
   in.ego_lateral_m = 0.3;
   EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
 }
+
+ap::MapSignLite stop_sign(double distance_m) {
+  return {ap::MapSignType::kStopSign, distance_m, false, 1};
+}
+
+ap::MapSignLite traffic_light(double distance_m, bool red) {
+  return {ap::MapSignType::kTrafficLight, distance_m, red, 1};
+}
+
+ap::MapSignLite junction(double distance_m) {
+  return {ap::MapSignType::kJunction, distance_m, false, 1};
+}
+
+TEST(BehaviorCoreSigns, StopSignFarAwayDoesNotTrigger) {
+  ap::BehaviorCore core((ap::BehaviorParams()));
+  ap::BehaviorInput in;
+  in.map_signs = {stop_sign(30.0)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}
+
+TEST(BehaviorCoreSigns, StopSignNearEntersApproach) {
+  ap::BehaviorCore core((ap::BehaviorParams()));
+  ap::BehaviorInput in;
+  in.map_signs = {stop_sign(10.0)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kApproachingStop);
+}
+
+TEST(BehaviorCoreSigns, StopSignWaitsTwoSecondsThenResumes) {
+  ap::BehaviorParams params;
+  params.stop_sign_stop_duration_s = 2.0;
+  ap::BehaviorCore core(params);
+  ap::BehaviorInput in;
+  in.now_s = 0.0;
+  in.map_signs = {stop_sign(10.0)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kApproachingStop);
+  in.map_signs = {stop_sign(0.0)};
+  in.now_s = 1.0;
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kStoppingAtStop);
+  in.now_s = 3.0;
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}
+
+TEST(BehaviorCoreSigns, GreenLightExitsWaiting) {
+  ap::BehaviorCore core((ap::BehaviorParams()));
+  ap::BehaviorInput in;
+  in.map_signs = {traffic_light(20.0, true)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kWaitingAtLight);
+  in.map_signs = {traffic_light(20.0, false)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}
+
+TEST(BehaviorCoreSigns, JunctionTransitionsThroughEnteringState) {
+  ap::BehaviorCore core((ap::BehaviorParams()));
+  ap::BehaviorInput in;
+  in.map_signs = {junction(10.0)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kEnteringJunction);
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}
+
+TEST(BehaviorCoreSigns, TrafficLightFarAwayDoesNotTrigger) {
+  ap::BehaviorCore core((ap::BehaviorParams()));
+  ap::BehaviorInput in;
+  in.map_signs = {traffic_light(40.0, true)};
+  EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}

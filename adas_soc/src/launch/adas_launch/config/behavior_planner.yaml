@@ -6,4 +6,8 @@
     follow_enter_range_m: 80.0
     follow_exit_range_m: 95.0
     exit_hysteresis_frames: 5
+    stop_sign_approach_m: 15.0
+    stop_sign_stop_duration_s: 2.0
+    traffic_light_approach_m: 30.0
+    junction_approach_m: 30.0
     input_timeout_s: 0.6

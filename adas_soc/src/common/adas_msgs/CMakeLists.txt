@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ActuationCommand.msg"
   "msg/SteeringReport.msg"
   "msg/BehaviorState.msg"
+  "msg/MapSign.msg"
   "msg/AebStatus.msg"
   "msg/GateStatus.msg"
   "msg/Heartbeat.msg"
