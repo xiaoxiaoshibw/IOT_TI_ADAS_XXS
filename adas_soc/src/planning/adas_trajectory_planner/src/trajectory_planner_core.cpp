@@ -154,26 +154,62 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
 
   std::vector<double> ds(count, 0.0);
   std::vector<double> station(count, 0.0);
-  std::vector<double> curvature(count, 0.0);
-  const auto yaw_delta = [](double from, double to) {
-    return std::atan2(std::sin(to - from), std::cos(to - from));
-  };
   for (std::size_t i = 1U; i < count; ++i) {
     ds[i] = std::max(0.01, ac::distance2d(route[i].x, route[i].y,
                                            route[i - 1U].x, route[i - 1U].y));
     station[i] = station[i - 1U] + ds[i];
   }
+
+  // Commit 3 — yaw unwrap pass. 逐点累计 yaw 增量，避免 ±π 跨界后
+  // atan2(sin, cos) 把整段曲率符号翻转。原始 yaw 序列来自 map 中心线采样，
+  // CARLA 的 2 m 步长偶尔跨过整圈时尤其重要。
+  std::vector<double> yaw_unwrap(count, 0.0);
+  yaw_unwrap[0U] = route[0U].yaw;
+  for (std::size_t i = 1U; i < count; ++i) {
+    const double delta = std::atan2(std::sin(route[i].yaw - route[i - 1U].yaw),
+                                    std::cos(route[i].yaw - route[i - 1U].yaw));
+    yaw_unwrap[i] = yaw_unwrap[i - 1U] + delta;
+  }
+
+  // 中央差分曲率（基于解包后的 yaw）
+  std::vector<double> curvature(count, 0.0);
   for (std::size_t i = 0U; i < count; ++i) {
     if (i == 0U) {
-      curvature[i] = yaw_delta(route[0U].yaw, route[1U].yaw) / ds[1U];
+      curvature[i] = (yaw_unwrap[1U] - yaw_unwrap[0U]) / ds[1U];
     } else if (i + 1U == count) {
-      curvature[i] = yaw_delta(route[i - 1U].yaw, route[i].yaw) / ds[i];
+      curvature[i] = (yaw_unwrap[i] - yaw_unwrap[i - 1U]) / ds[i];
     } else {
       const double span = ds[i] + ds[i + 1U];
-      curvature[i] = yaw_delta(route[i - 1U].yaw, route[i + 1U].yaw) / span;
+      curvature[i] = (yaw_unwrap[i + 1U] - yaw_unwrap[i - 1U]) / span;
     }
     if (!std::isfinite(curvature[i])) curvature[i] = 0.0;
   }
+
+  // 5 点加权平滑 (1-2-4-2-1)/10。边缘透传。锐化 2 m 步长带来的非物理尖峰：
+  // 单点突变被 ±2 点平均掉，整段弯道曲率更接近真实几何。
+  std::vector<double> curvature_smooth(count, 0.0);
+  for (std::size_t i = 0U; i < count; ++i) {
+    if (i < 2U || i + 2U >= count) {
+      curvature_smooth[i] = curvature[i];
+      continue;
+    }
+    curvature_smooth[i] = (curvature[i - 2U] + 2.0 * curvature[i - 1U] +
+                           4.0 * curvature[i] + 2.0 * curvature[i + 1U] +
+                           curvature[i + 2U]) /
+                          10.0;
+  }
+
+  // 在平滑后的曲率上计算限速，使用前方 8-15 m 的弯道包络
+  // （不是只看当前点），避免单点异常把整段速度压到零。
+  // envelope_m 在 yaml 中可调，默认 12 m（中央值）。
+  const double envelope_m = std::clamp(
+      params_.global_route_curvature_envelope_m, 8.0, 15.0);
+  const double ds_avg = (count > 1U && station.back() > 0.0)
+                            ? station.back() / static_cast<double>(count - 1U)
+                            : 1.0;
+  const std::size_t lookahead_pts =
+      std::max<std::size_t>(1U, static_cast<std::size_t>(
+                                     std::round(envelope_m / std::max(ds_avg, 1e-3))));
 
   std::vector<double> cap(count, cruise);
   for (std::size_t i = 0U; i < count; ++i) {
@@ -184,8 +220,15 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
     const double stop_cap = stop_at_route_end
                                 ? std::sqrt(2.0 * max_decel * remaining)
                                 : cruise;
-    const double curve_cap = std::sqrt(max_lat_accel / std::max(std::fabs(curvature[i]),
-                                                                 1e-6));
+    // Envelope-based curve cap: 包络前方 lookahead_pts 点的最大 |k|，
+    // 然后 v = sqrt(max_lat_accel / max_k)。
+    const std::size_t cap_end = std::min(count, i + 1U + lookahead_pts);
+    double max_abs_k = 0.0;
+    for (std::size_t j = i; j < cap_end; ++j) {
+      max_abs_k = std::max(max_abs_k, std::fabs(curvature_smooth[j]));
+    }
+    const double curve_cap =
+        std::sqrt(max_lat_accel / std::max(max_abs_k, 1e-6));
     cap[i] = std::min({cruise, stop_cap, curve_cap});
     // Commit 2 — 4th cap: lead-vehicle. 当 lead.present 时把巡航剖面压到
     // v_lead ≤ cap_curve：包络随前车共移，路线长 ≥ 短时距时不至于到门口才减速。
@@ -220,11 +263,26 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
     speed[i] = std::min(cap[i], accel_reachable);
   }
 
+  // Commit 3 — acceleration-continuity post-pass. 按 max_decel * ds 约束
+  // 段间加速度跳跃，避免相邻轨迹点从 15 m/s 突然掉到 3 m/s 的跃变
+  // （PID 会把这种跃变当作阶跃干扰而起跳）。双向限幅（不只是减速侧）。
+  for (std::size_t i = 1U; i < count; ++i) {
+    const double max_dv = std::sqrt(speed[i - 1U] * speed[i - 1U] +
+                                    2.0 * max_decel * ds[i]) -
+                          speed[i - 1U];
+    const double dv = speed[i] - speed[i - 1U];
+    if (dv > max_dv) {
+      speed[i] = speed[i - 1U] + max_dv;
+    } else if (dv < -max_dv) {
+      speed[i] = speed[i - 1U] - max_dv;
+    }
+  }
+
   result.reserve(count);
   double elapsed = 0.0;
   for (std::size_t i = 0U; i < count; ++i) {
     auto point = route[i];
-    point.curvature = curvature[i];
+    point.curvature = curvature_smooth[i];
     point.velocity_mps = speed[i];
     point.time_from_start_s = elapsed;
     if (i > 0U) {

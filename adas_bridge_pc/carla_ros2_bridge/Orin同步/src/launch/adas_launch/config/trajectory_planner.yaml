@@ -13,7 +13,9 @@
     max_length_m: 120.0
     step_m: 1.0
     cruise_speed_mps: 15.0
-    max_lat_accel_mps2: 2.5
+    max_lat_accel_mps2: 2.0
+    # Commit 3 — mirror of SoC yaml.
+    global_route.curvature_envelope_m: 12.0
     max_accel_mps2: 1.5
     max_decel_mps2: 2.0
     follow_time_gap_s: 1.1

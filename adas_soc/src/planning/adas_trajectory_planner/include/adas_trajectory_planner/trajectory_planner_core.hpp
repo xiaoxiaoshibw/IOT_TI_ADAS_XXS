@@ -26,6 +26,10 @@ struct PlannerParams {
   // 解耦——路线规划跟随前车更早减速，停车时距更保守，避免在目的地前才察觉。
   double global_route_follow_time_gap_s{1.4};
   double global_route_follow_standstill_m{4.0};
+  // Commit 3 — 弯道曲率前视包络（米）。curve_cap 取前方 [8, 15] m 内最大 |k|，
+  // 避免单点曲率异常把整段速度压到零；该参数是 [8, 15] 区间内的具体值，
+  // 12 是中央默认值（用户验收后再评估 10 或 14）。
+  double global_route_curvature_envelope_m{12.0};
   // 变道（M4）：五次多项式横移过渡
   double lane_change_time_s{3.0};  // 过渡时长（长度 = v × 时长，有下限）
   double lane_change_min_len_m{25.0};
