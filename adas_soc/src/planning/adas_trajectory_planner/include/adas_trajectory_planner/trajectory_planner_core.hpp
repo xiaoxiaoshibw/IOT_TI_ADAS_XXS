@@ -19,6 +19,9 @@ struct PlannerParams {
   double max_lat_accel_mps2{2.5};  // 弯道限速：v = sqrt(a_lat_max / |k|)
   double max_accel_mps2{1.5};      // 剖面纵向加速上限
   double max_decel_mps2{2.0};      // 剖面纵向减速上限（舒适值，非 AEB）
+  // Commit 6a — 段间速度变化率的"舒适"上限。比 max_accel/mps2 更保守，
+  // 是对前馈加速度的"软上限"，避免轨迹给出 0.5 m/s² → 3 m/s² 的阶跃式跳变。
+  double accel_rate_limit{1.5};    // 单段最大 |dv|/(ds/v) [m/s²]
   // 跟车（ACC）逼近曲线参数：稳态时距 ≈ time_gap + standstill/v
   double follow_time_gap_s{1.1};   // 恒定时距
   double follow_standstill_m{4.0}; // 静止安全距离（停在前车后方此距离）

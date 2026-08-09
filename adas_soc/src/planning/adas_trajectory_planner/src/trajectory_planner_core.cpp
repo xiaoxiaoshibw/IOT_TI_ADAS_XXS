@@ -130,6 +130,24 @@ common::Trajectory TrajectoryPlannerCore::plan(const common::KinematicState& ego
     px += std::cos(yaw) * ds;
     py += std::sin(yaw) * ds;
   }
+
+  // Commit 6a — 单段速度变化率软上限（仅对加速度方向夹紧）。减速方向
+  // 保持 max_decel_mps2 的运动学上限，否则静止前车/终点停车剖面会
+  // 因为"舒适限速"而停不住。max_dv_pos = accel_rate_limit * ds / v_prev。
+  const double accel_rate = std::max(params_.accel_rate_limit, 1e-3);
+  for (std::size_t i = 1; i < traj.size(); ++i) {
+    const double v_prev = traj[i - 1].velocity_mps;
+    const double v_curr = traj[i].velocity_mps;
+    const double ds = std::hypot(traj[i].x - traj[i - 1].x,
+                                  traj[i].y - traj[i - 1].y);
+    if (ds < 1e-6) continue;
+    const double max_dv_pos = accel_rate * ds / std::max(v_prev, 0.5);
+    if (v_curr > v_prev + max_dv_pos) {
+      traj[i].velocity_mps = v_prev + max_dv_pos;
+      traj[i].acceleration_mps2 = (traj[i].velocity_mps * traj[i].velocity_mps -
+                                   v_prev * v_prev) / (2.0 * ds);
+    }
+  }
   return traj;
 }
 
@@ -293,6 +311,21 @@ common::Trajectory TrajectoryPlannerCore::plan_global_route(
       point.time_from_start_s = elapsed;
     }
     result.push_back(point);
+  }
+
+  // Commit 6a — 单段速度变化率软上限（仅加速方向夹紧，减速交给 max_decel）。
+  // 在 Commit 3 的 backward pass + continuity post-pass 之后再做一次软夹紧。
+  const double accel_rate = std::max(params_.accel_rate_limit, 1e-3);
+  for (std::size_t i = 1U; i < result.size(); ++i) {
+    const double v_prev = result[i - 1U].velocity_mps;
+    const double v_curr = result[i].velocity_mps;
+    if (ds[i] < 1e-6) continue;
+    const double max_dv_pos = accel_rate * ds[i] / std::max(v_prev, 0.5);
+    if (v_curr > v_prev + max_dv_pos) {
+      result[i].velocity_mps = v_prev + max_dv_pos;
+      result[i].acceleration_mps2 = (result[i].velocity_mps * result[i].velocity_mps -
+                                    v_prev * v_prev) / (2.0 * ds[i]);
+    }
   }
   return result;
 }
