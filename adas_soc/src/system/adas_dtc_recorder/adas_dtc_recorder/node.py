@@ -79,9 +79,12 @@ class DtcRecorderNode(Node):
                 continue
             code = self.by_source[source]["code"]
             observed.add(code)
+            freeze = self.freeze_frame(status)
             if status.level >= DiagnosticStatus.WARN:
-                self.store.observe(code, now, self.freeze_frame(status))
+                self.store.observe(code, now, freeze)
+                self.store.record(now, status.name, freeze)
             else:
+                self.store.record(now, status.name, freeze)
                 self.store.clear(code, now)
         self.seen_in_cycle.update(observed)
 
@@ -112,7 +115,9 @@ class DtcRecorderNode(Node):
         for bit, code in self.mcu_faults:
             if message.fault_code & (1 << bit):
                 self.store.observe(code, now, freeze)
+                self.store.record(now, "/adas/mcu/status", freeze)
             else:
+                self.store.record(now, "/adas/mcu/status", freeze)
                 self.store.clear(code, now)
 
     def flush_and_publish(self):

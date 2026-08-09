@@ -74,3 +74,41 @@ def test_corrupt_file_does_not_prevent_startup(tmp_path):
     store.observe("DTC-1", 1.0, {})
     store.flush()
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_freeze_frame_contains_pre_trigger_data(tmp_path):
+    store = DtcStore(tmp_path / "dtc.json", CATALOG)
+    store.record(1.0, "/adas/odom", {"speed_mps": 3.0})
+    store.record(2.0, "/adas/odom", {"speed_mps": 4.0})
+    store.observe("DTC-1", 3.0, {"speed_mps": 5.0})
+    frames = store.records["DTC-1"]["first_freeze_frame"]["pre_trigger_frames"]
+    assert [frame["payload"]["speed_mps"] for frame in frames] == [3.0, 4.0]
+
+
+def test_empty_pre_trigger_buffer_is_empty_list(tmp_path):
+    store = DtcStore(tmp_path / "dtc.json", CATALOG)
+    store.observe("DTC-1", 1.0, {})
+    assert store.records["DTC-1"]["first_freeze_frame"]["pre_trigger_frames"] == []
+
+
+def test_pre_trigger_buffer_discards_oldest_frames(tmp_path):
+    store = DtcStore(tmp_path / "dtc.json", CATALOG, pre_trigger_size=64)
+    for index in range(65):
+        store.record(float(index), "/adas/test", {"index": index})
+    assert len(store.pre_trigger_buffer) == 64
+    assert store.pre_trigger_buffer[0]["payload"]["index"] == 1
+
+
+def test_high_severity_records_are_not_evicted(tmp_path):
+    catalog = [{"code": f"W-{i}", "name": "warning", "source": f"w{i}",
+                "severity": "WARNING", "safety_action": "WARN", "latched": False}
+               for i in range(128)]
+    catalog.append({"code": "LOCKED", "name": "locked", "source": "locked",
+                    "severity": "LOCKED", "safety_action": "FAULT_LOCK", "latched": True})
+    store = DtcStore(tmp_path / "dtc.json", catalog)
+    for index in range(128):
+        store.observe(f"W-{index}", float(index), {})
+    store.observe("LOCKED", 128.0, {})
+    codes = {record["code"] for record in store.snapshot()["records"]}
+    assert "LOCKED" in codes
+    assert len(codes) == 129
