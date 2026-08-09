@@ -4,6 +4,9 @@ project(adas_launch)
 find_package(ament_cmake REQUIRED)
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../adas_mcu/tools/mcu_sil_runner.py
+  DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)

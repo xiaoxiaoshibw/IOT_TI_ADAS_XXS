@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <linux/can.h>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -17,9 +18,6 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <linux/can.h>
-#include <linux/can/raw.h>
-#include <net/if.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/ioctl.h>
@@ -30,6 +28,7 @@
 
 #include "adas_can_gateway/feedback_monitor.hpp"
 #include "adas_can_gateway/canalystii.hpp"
+#include "adas_can_gateway/can_simulator.hpp"
 #include "adas_can_gateway/hil_session_manager.hpp"
 #include "adas_can_gateway/protocol.hpp"
 #include "adas_can_gateway/startup_gate.hpp"
@@ -124,47 +123,6 @@ bool finite_control(const adas_msgs::msg::Control& command) {
          std::isfinite(command.longitudinal.acceleration_mps2);
 }
 
-int open_socketcan(const std::string& interface_name) {
-  const int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-  if (fd < 0) throw std::runtime_error("SocketCAN socket failed: " +
-                                      std::string(std::strerror(errno)));
-
-  ifreq request{};
-  std::strncpy(request.ifr_name, interface_name.c_str(), IFNAMSIZ - 1U);
-  if (ioctl(fd, SIOCGIFINDEX, &request) < 0) {
-    const std::string error = std::strerror(errno);
-    close(fd);
-    throw std::runtime_error("SocketCAN interface " + interface_name +
-                             " unavailable: " + error);
-  }
-
-  const can_filter filters[] = {
-      {kMcuControlId, CAN_SFF_MASK}, {kMcuHeartbeatId, CAN_SFF_MASK},
-      {kMcuDiagId, CAN_SFF_MASK}, {kMcuE2eDiagId, CAN_SFF_MASK},
-      {adas::can_protocol::kCanIdMcuSessionStatus, CAN_SFF_MASK}};
-  if (setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, filters, sizeof(filters)) < 0) {
-    const std::string error = std::strerror(errno);
-    close(fd);
-    throw std::runtime_error("SocketCAN filter failed: " + error);
-  }
-  const int flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-    const std::string error = std::strerror(errno);
-    close(fd);
-    throw std::runtime_error("SocketCAN nonblocking mode failed: " + error);
-  }
-
-  sockaddr_can address{};
-  address.can_family = AF_CAN;
-  address.can_ifindex = request.ifr_ifindex;
-  if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-    const std::string error = std::strerror(errno);
-    close(fd);
-    throw std::runtime_error("SocketCAN bind failed: " + error);
-  }
-  return fd;
-}
-
 }  // namespace
 
 class CanGatewayNode final : public rclcpp::Node {
@@ -232,8 +190,8 @@ class CanGatewayNode final : public rclcpp::Node {
     }
     feedback_monitor_ = std::make_unique<FeedbackMonitor>(monitor_config);
 
-    if (transport_ == "socketcan") {
-      socket_fd_ = open_socketcan(interface_name_);
+    if (transport_ == "socketcan" || transport_ == "sim") {
+      sim_can_ = std::make_unique<SimCanInterface>(interface_name_);
     } else if (transport_ == "canalystii") {
       if (canalyst_device_index_ < 0 || canalyst_channel_ < 0 || canalyst_channel_ > 1 ||
           canalyst_bitrate_ <= 0) {
@@ -244,7 +202,7 @@ class CanGatewayNode final : public rclcpp::Node {
       canalyst_device_->init_channel(canalyst_channel_,
                                      static_cast<std::uint32_t>(canalyst_bitrate_));
     } else {
-      throw std::invalid_argument("transport must be 'canalystii' or 'socketcan'");
+      throw std::invalid_argument("transport must be 'canalystii', 'socketcan', or 'sim'");
     }
     sub_control_ = create_subscription<adas_msgs::msg::Control>(
         "/adas/control/gate/control_cmd", rclcpp::QoS(1).reliable(),
@@ -339,7 +297,6 @@ class CanGatewayNode final : public rclcpp::Node {
       canalyst_device_->stop(canalyst_channel_);
       canalyst_device_->close();
     }
-    if (socket_fd_ >= 0) close(socket_fd_);
   }
 
  private:
@@ -463,11 +420,9 @@ class CanGatewayNode final : public rclcpp::Node {
         return false;
       }
     }
-    can_frame raw{};
-    raw.can_id = frame.id;
-    raw.can_dlc = 8U;
-    std::copy(frame.data.begin(), frame.data.end(), raw.data);
-    if (write(socket_fd_, &raw, sizeof(raw)) != static_cast<ssize_t>(sizeof(raw))) {
+    try {
+      sim_can_->send(frame);
+    } catch (const std::exception&) {
       ++tx_error_count_;
       return false;
     }
@@ -596,22 +551,12 @@ class CanGatewayNode final : public rclcpp::Node {
       }
       return;
     }
-    for (int count = 0; count < 32; ++count) {
-      can_frame raw{};
-      const ssize_t size = read(socket_fd_, &raw, sizeof(raw));
-      if (size < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-      if (size != static_cast<ssize_t>(sizeof(raw))) {
-        ++rx_io_error_count_;
-        break;
+    try {
+      for (const auto& frame : sim_can_->receive()) {
+        process_received_frame(frame);
       }
-      if ((raw.can_id & (CAN_EFF_FLAG | CAN_RTR_FLAG | CAN_ERR_FLAG)) != 0U ||
-          raw.can_dlc != 8U) {
-        ++rx_dlc_error_count_;
-        continue;
-      }
-      Frame frame{raw.can_id & CAN_SFF_MASK, {}};
-      std::copy_n(raw.data, 8U, frame.data.begin());
-      process_received_frame(frame);
+    } catch (const std::exception&) {
+      ++rx_io_error_count_;
     }
   }
 
@@ -972,9 +917,12 @@ receive();
     }
     status.summary(level, summary);
     status.add("transport", transport_);
-    status.add("can_interface", transport_ == "socketcan" ? interface_name_ : "USB CANalyst-II");
-    status.add("can_link", transport_ == "socketcan"
-                              ? "SocketCAN (Orin HIL: PEAK PCAN-USB can1)"
+    const bool socketcan_transport = transport_ == "socketcan" || transport_ == "sim";
+    status.add("can_interface", socketcan_transport ? interface_name_ : "USB CANalyst-II");
+    status.add("can_link", socketcan_transport
+                              ? (transport_ == "sim"
+                                     ? "SocketCAN vcan (MCU SIL)"
+                                     : "SocketCAN (Orin HIL: PEAK PCAN-USB can1)")
                               : "USB CANalyst-II (debug fallback)");
     status.add("canalyst_channel", transport_ == "canalystii" ? canalyst_channel_ + 1 : 0);
     status.add("single_primary_source", true);
@@ -1035,7 +983,7 @@ receive();
     }
   }
 
-  int socket_fd_{-1};
+  std::unique_ptr<SimCanInterface> sim_can_;
   std::unique_ptr<canalystii::Device> canalyst_device_;
   std::string transport_;
   std::string interface_name_;

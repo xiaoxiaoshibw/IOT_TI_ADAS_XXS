@@ -1,9 +1,10 @@
 """SIL 全栈公共 launch：Lifecycle 状态确认驱动的安全启动链。"""
 
 import os
+import sys
 
-from ament_index_python.packages import get_package_share_directory
-from launch.actions import EmitEvent, LogInfo, RegisterEventHandler
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from launch.actions import EmitEvent, ExecuteProcess, LogInfo, RegisterEventHandler
 from launch.event_handlers import OnProcessStart
 from launch.events import Shutdown, matches_action
 from launch_ros.actions import LifecycleNode, Node
@@ -37,7 +38,8 @@ def _lifecycle_node(package, executable, name, scenario_files):
     )
 
 
-def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False):
+def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False,
+               include_mcu=False):
     """返回节点与事件处理器；每个节点 Active 后才配置下一个节点。
 
     sim_extra_params：场景 overlay yaml 文件名列表——追加到**所有节点**的参数表
@@ -46,6 +48,7 @@ def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False
     include_sim：False = 不起 sim_vehicle（CARLA/HIL 模式——感知话题与执行
     回路由外部桥提供，如 IOT_TI carla_ros2_bridge）。
     include_navigation：启动地图全局规划节点；CARLA 点到点导航模式启用。
+    include_mcu：启动 vcan0 网关与 MCU host runner，执行 MCU-in-the-loop SIL。
     """
     scenario_files = list(sim_extra_params or [])
     lifecycle_names = [
@@ -90,6 +93,22 @@ def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False
             name='sim_vehicle',
             output='screen',
             parameters=sim_params,
+        ))
+    if include_mcu:
+        actions.append(Node(
+            package='adas_can_gateway',
+            executable='can_gateway_node',
+            name='can_gateway',
+            output='screen',
+            parameters=[_config('can_sim.yaml')],
+        ))
+        runner = os.path.join(
+            get_package_prefix('adas_launch'), 'lib', 'adas_launch',
+            'mcu_sil_runner.py')
+        actions.append(ExecuteProcess(
+            cmd=[sys.executable, runner, '--interface', 'vcan0'],
+            name='mcu_sil_runner',
+            output='screen',
         ))
     for index, node in enumerate(lifecycle_nodes):
         name = lifecycle_names[index]

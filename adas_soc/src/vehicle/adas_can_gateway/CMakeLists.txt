@@ -15,7 +15,10 @@ find_package(std_srvs REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 
-add_library(${PROJECT_NAME}_protocol src/protocol.cpp src/hil_session_manager.cpp)
+add_library(${PROJECT_NAME}_protocol
+  src/protocol.cpp
+  src/hil_session_manager.cpp
+  src/can_simulator.cpp)
 target_include_directories(${PROJECT_NAME}_protocol PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:include>")

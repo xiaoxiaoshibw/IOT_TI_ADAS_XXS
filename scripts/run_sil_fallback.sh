@@ -4,6 +4,7 @@
 # 例：
 #   ./scripts/run_sil_fallback.sh --build --check
 #   ./scripts/run_sil_fallback.sh --scenario aeb
+#   ./scripts/run_sil_fallback.sh --scenario acc --mcu --check
 #
 # 默认启动基准 SIL 并保持运行，Ctrl-C 正常收尾。--check 会启动、检查
 # 关键话题心跳和执行输出，再自动退出，适合赛前验收/现场快速确认。
@@ -18,6 +19,7 @@ ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
 BUILD=0
 CHECK=0
 HOST_TESTS=0
+MCU=0
 SCENARIO="baseline"
 DURATION=0
 READY_TIMEOUT="${SIL_READY_TIMEOUT:-45}"
@@ -29,6 +31,8 @@ usage() {
 选项：
   --build                 重新构建 adas_soc（首次运行会自动构建）
   --host-tests            先运行 adas_mcu 的 GCC 主机回归测试
+  --mcu                   启用 vcan0 + MCU host-in-the-loop runner
+  --no-mcu                显式回退到无 MCU 的原 SIL 链路
   --check                 启动后检查关键话题/执行流，完成后自动退出
   --scenario NAME         baseline|acc|aeb|overtake|redundant|lqr
   --duration SEC          运行指定秒数后退出；默认 0 表示持续运行
@@ -43,6 +47,8 @@ while (($#)); do
   case "$1" in
     --build) BUILD=1 ;;
     --host-tests) HOST_TESTS=1 ;;
+    --mcu) MCU=1 ;;
+    --no-mcu) MCU=0 ;;
     --check) CHECK=1 ;;
     --scenario)
       (($# >= 2)) || { echo "--scenario 缺少参数" >&2; exit 2; }
@@ -65,14 +71,18 @@ done
 [[ "${READY_TIMEOUT}" =~ ^[0-9]+$ ]] || { echo "SIL_READY_TIMEOUT 必须是非负整数" >&2; exit 2; }
 
 case "${SCENARIO}" in
-  baseline)  LAUNCH_FILE="sil.launch.py" ;;
-  acc)       LAUNCH_FILE="sil_acc.launch.py" ;;
-  aeb)       LAUNCH_FILE="sil_aeb.launch.py" ;;
-  overtake)  LAUNCH_FILE="sil_overtake.launch.py" ;;
-  redundant) LAUNCH_FILE="sil_redundant.launch.py" ;;
-  lqr)       LAUNCH_FILE="sil_lqr.launch.py" ;;
+  baseline)  LAUNCH_FILE="sil.launch.py"; SCENARIO_OVERLAY="" ;;
+  acc)       LAUNCH_FILE="sil_acc.launch.py"; SCENARIO_OVERLAY="acc_scenario.yaml" ;;
+  aeb)       LAUNCH_FILE="sil_aeb.launch.py"; SCENARIO_OVERLAY="aeb_scenario.yaml" ;;
+  overtake)  LAUNCH_FILE="sil_overtake.launch.py"; SCENARIO_OVERLAY="overtake_scenario.yaml" ;;
+  redundant) LAUNCH_FILE="sil_redundant.launch.py"; SCENARIO_OVERLAY="redundant_scenario.yaml" ;;
+  lqr)       LAUNCH_FILE="sil_lqr.launch.py"; SCENARIO_OVERLAY="lqr_scenario.yaml" ;;
   *) echo "不支持的场景：${SCENARIO}" >&2; exit 2 ;;
 esac
+
+if (( MCU )); then
+  LAUNCH_FILE="sil_mcu.launch.py"
+fi
 
 if (( CHECK && DURATION == 0 )); then
   DURATION=8
@@ -101,9 +111,38 @@ source_workspace() {
   set -u
 }
 
+ensure_vcan() {
+  command -v ip >/dev/null 2>&1 || {
+    echo "启用 --mcu 需要 iproute2（ip 命令）" >&2
+    return 1
+  }
+  if ip link show vcan0 >/dev/null 2>&1; then
+    ip link show vcan0 | grep -q '<[^>]*UP' && return 0
+  else
+    command -v modprobe >/dev/null 2>&1 || {
+      echo "找不到 modprobe，无法创建 vcan0" >&2
+      return 1
+    }
+    modprobe vcan 2>/dev/null || {
+      echo "无法加载 vcan 内核模块；请先准备 vcan0 或授予 CAP_NET_ADMIN" >&2
+      return 1
+    }
+    ip link add dev vcan0 type vcan 2>/dev/null || {
+      echo "无法创建 vcan0；请先准备 vcan0 或授予 CAP_NET_ADMIN" >&2
+      return 1
+    }
+  fi
+  ip link set vcan0 up
+}
+
 if (( HOST_TESTS )); then
   echo "=== MCU host SIL tests ==="
   bash "${ROOT}/adas_mcu/tests/run_host_tests.sh"
+fi
+
+if (( MCU )); then
+  echo "=== prepare vcan0 for MCU SIL ==="
+  ensure_vcan
 fi
 
 if (( BUILD )) || [[ ! -f "${SOC_WS}/install/setup.bash" ]]; then
@@ -136,9 +175,13 @@ trap 'exit 130' INT TERM
 trap 'status=$?; stop_launch; exit "${status}"' EXIT
 
 echo "=== start SIL ==="
-echo "scenario=${SCENARIO} launch=${LAUNCH_FILE} ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+echo "scenario=${SCENARIO} launch=${LAUNCH_FILE} mcu=${MCU} ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 echo "log=${LAUNCH_LOG}"
-setsid ros2 launch adas_launch "${LAUNCH_FILE}" >"${LAUNCH_LOG}" 2>&1 &
+launch_cmd=(ros2 launch adas_launch "${LAUNCH_FILE}")
+if (( MCU )); then
+  launch_cmd+=("scenario:=${SCENARIO_OVERLAY}")
+fi
+setsid "${launch_cmd[@]}" >"${LAUNCH_LOG}" 2>&1 &
 LAUNCH_PID=$!
 
 required_topics=(
@@ -153,6 +196,9 @@ if [[ "${SCENARIO}" == redundant ]]; then
   )
 else
   required_topics+=(/adas/control/gate/status)
+fi
+if (( MCU )); then
+  required_topics+=(/adas/mcu/status /adas/mcu/actuation_feedback)
 fi
 
 echo "=== wait SIL topics (${READY_TIMEOUT}s) ==="
@@ -199,6 +245,32 @@ if (( CHECK )); then
     exit 1
   }
   echo "actuation_cmd heartbeat: PASS"
+
+  if (( MCU )); then
+    echo "=== verify MCU reaches ACTIVE within 10s ==="
+    mcu_active=0
+    for _ in {1..10}; do
+      mcu_status="$(timeout 2 ros2 topic echo /adas/mcu/status --once 2>/dev/null || true)"
+      if grep -Eq 'system_state: 2([[:space:]]|$)' <<<"${mcu_status}"; then
+        mcu_active=1
+        break
+      fi
+      sleep 1
+    done
+    (( mcu_active )) || {
+      echo "MCU SIL 未在 10s 内进入 ACTIVE，日志尾部：" >&2
+      tail -80 "${LAUNCH_LOG}" >&2 || true
+      exit 1
+    }
+    echo "MCU INIT/STANDBY/ACTIVE: PASS"
+    feedback_hz="$(timeout 6 ros2 topic hz /adas/mcu/actuation_feedback 2>&1 || true)"
+    grep -q "average rate" <<<"${feedback_hz}" || {
+      echo "MCU 执行反馈没有形成稳定心跳" >&2
+      echo "${feedback_hz}" >&2
+      exit 1
+    }
+    echo "MCU control feedback heartbeat (<100ms path): PASS"
+  fi
 fi
 
 if (( DURATION > 0 )); then
