@@ -27,6 +27,17 @@ class SafetyMonitorNodeShellTest : public ::testing::Test {
   }
 };
 
+TEST(SafetyMonitorDiagnostics, MatchesComponentBoundaryOnly) {
+  EXPECT_TRUE(adas::system::diagnostic_name_matches_component(
+      "vehicle_interface: runtime", "vehicle_interface"));
+  EXPECT_TRUE(adas::system::diagnostic_name_matches_component(
+      "vehicle_interface/runtime", "vehicle_interface"));
+  EXPECT_FALSE(adas::system::diagnostic_name_matches_component(
+      "vehicle_interface_sim: runtime", "vehicle_interface"));
+  EXPECT_FALSE(adas::system::diagnostic_name_matches_component(
+      "prefix_vehicle_interface: runtime", "vehicle_interface"));
+}
+
 TEST_F(SafetyMonitorNodeShellTest, ConfigureActivateAndCleanupResources) {
   auto node = std::make_shared<adas::system::SafetyMonitorNode>(rclcpp::NodeOptions());
 

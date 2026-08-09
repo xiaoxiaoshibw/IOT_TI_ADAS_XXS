@@ -23,6 +23,18 @@
 
 namespace adas::system {
 
+bool diagnostic_name_matches_component(const std::string& name,
+                                       const std::string& component) {
+  if (name == component) return true;
+  if (name.size() <= component.size()) return false;
+  if (name.compare(0, component.size(), component) != 0) return false;
+  // diagnostic_updater emits "component: task"; composed nodes may use
+  // "component/task".  Both are component boundaries, unlike substring
+  // matches such as "vehicle_interface_sim".
+  const char separator = name[component.size()];
+  return separator == ':' || separator == '/';
+}
+
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
 struct DiagnosticHealth {
@@ -199,7 +211,7 @@ class SafetyMonitorNode : public rclcpp_lifecycle::LifecycleNode {
 
   std::string component_from_name(const std::string& name) const {
     for (const auto& component : monitored_components_) {
-      if (name.find(component) != std::string::npos) return component;
+      if (diagnostic_name_matches_component(name, component)) return component;
     }
     return {};
   }

@@ -15,6 +15,15 @@ from adas_msgs.msg import ActuationCommand, GateStatus, McuStatus, SafetyStatus
 from .store import DtcStore
 
 
+def diagnostic_name_matches_source(name, source):
+    """Match a diagnostic source only at a component-name boundary."""
+    if name == source:
+        return True
+    if not name.startswith(source) or len(name) <= len(source):
+        return False
+    return name[len(source)] in (":", "/")
+
+
 class DtcRecorderNode(Node):
     def __init__(self):
         super().__init__("dtc_recorder")
@@ -66,7 +75,7 @@ class DtcRecorderNode(Node):
 
     def source_from_name(self, name):
         for source in self.by_source:
-            if source in name:
+            if diagnostic_name_matches_source(name, source):
                 return source
         return None
 
