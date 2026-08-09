@@ -133,4 +133,110 @@ common::Trajectory TrajectoryPlannerCore::plan(const common::KinematicState& ego
   return traj;
 }
 
+common::Trajectory TrajectoryPlannerCore::plan_global_route(
+    const common::KinematicState& ego, const common::Trajectory& route,
+    double cruise_speed_mps, double goal_stop_distance_m,
+    bool stop_at_route_end, const LeadInfo& lead) const {
+  common::Trajectory result;
+  if (route.size() < 2U) return result;
+
+  const double cruise = std::max(0.0, cruise_speed_mps);
+  const double max_decel = std::max(params_.max_decel_mps2, 1e-3);
+  const double max_lat_accel = std::max(params_.max_lat_accel_mps2, 1e-3);
+  const std::size_t count = route.size();
+
+  // Commit 2 — lead-vehicle pre-cap inputs (computed once outside the loop).
+  const double v_lead = lead.present ? std::max(0.0, lead.speed_mps) : 0.0;
+  // t_est proxy: assume ego's current speed all the way through. Actual
+  // realized t_est will be similar or larger whenego slows for bends, so the
+  // lead co-move shrinks and the cap relaxes — the correct physical direction.
+  const double t_est_denom = std::max(ego.velocity_mps, 0.5);
+
+  std::vector<double> ds(count, 0.0);
+  std::vector<double> station(count, 0.0);
+  std::vector<double> curvature(count, 0.0);
+  const auto yaw_delta = [](double from, double to) {
+    return std::atan2(std::sin(to - from), std::cos(to - from));
+  };
+  for (std::size_t i = 1U; i < count; ++i) {
+    ds[i] = std::max(0.01, ac::distance2d(route[i].x, route[i].y,
+                                           route[i - 1U].x, route[i - 1U].y));
+    station[i] = station[i - 1U] + ds[i];
+  }
+  for (std::size_t i = 0U; i < count; ++i) {
+    if (i == 0U) {
+      curvature[i] = yaw_delta(route[0U].yaw, route[1U].yaw) / ds[1U];
+    } else if (i + 1U == count) {
+      curvature[i] = yaw_delta(route[i - 1U].yaw, route[i].yaw) / ds[i];
+    } else {
+      const double span = ds[i] + ds[i + 1U];
+      curvature[i] = yaw_delta(route[i - 1U].yaw, route[i + 1U].yaw) / span;
+    }
+    if (!std::isfinite(curvature[i])) curvature[i] = 0.0;
+  }
+
+  std::vector<double> cap(count, cruise);
+  for (std::size_t i = 0U; i < count; ++i) {
+    const double remaining = stop_at_route_end
+                                 ? std::max(0.0, station.back() - station[i] -
+                                                     std::max(0.0, goal_stop_distance_m))
+                                 : 0.0;
+    const double stop_cap = stop_at_route_end
+                                ? std::sqrt(2.0 * max_decel * remaining)
+                                : cruise;
+    const double curve_cap = std::sqrt(max_lat_accel / std::max(std::fabs(curvature[i]),
+                                                                 1e-6));
+    cap[i] = std::min({cruise, stop_cap, curve_cap});
+    // Commit 2 — 4th cap: lead-vehicle. 当 lead.present 时把巡航剖面压到
+    // v_lead ≤ cap_curve：包络随前车共移，路线长 ≥ 短时距时不至于到门口才减速。
+    if (lead.present && lead.gap_m > 0.0) {
+      const double t_est = station[i] / t_est_denom;
+      const double follow_dist = lead.gap_m + v_lead * t_est -
+                                 params_.global_route_follow_standstill_m -
+                                 params_.global_route_follow_time_gap_s * v_lead -
+                                 station[i];
+      const double v2 = v_lead * v_lead + 2.0 * max_decel * follow_dist;
+      const double lead_cap_local = v2 > 0.0 ? std::sqrt(v2) : 0.0;
+      // 不能超过前车实速——物理上到达前车速度后无法再跟随
+      const double lead_cap = std::min(lead_cap_local, v_lead);
+      cap[i] = std::min(cap[i], lead_cap);
+    }
+  }
+
+  // Backward pass makes the vehicle slow down before, rather than inside, a
+  // bend. A forward-only profile sees the low speed cap too late by one
+  // sample and is especially unsafe with the 2 m CARLA map sampling.
+  for (std::size_t i = count - 1U; i > 0U; --i) {
+    const double reachable = std::sqrt(cap[i] * cap[i] + 2.0 * max_decel * ds[i]);
+    cap[i - 1U] = std::min(cap[i - 1U], reachable);
+  }
+
+  std::vector<double> speed(count, 0.0);
+  speed[0] = std::min(std::max(0.0, ego.velocity_mps), cap[0]);
+  for (std::size_t i = 1U; i < count; ++i) {
+    const double accel_reachable =
+        std::sqrt(speed[i - 1U] * speed[i - 1U] +
+                  2.0 * std::max(params_.max_accel_mps2, 1e-3) * ds[i]);
+    speed[i] = std::min(cap[i], accel_reachable);
+  }
+
+  result.reserve(count);
+  double elapsed = 0.0;
+  for (std::size_t i = 0U; i < count; ++i) {
+    auto point = route[i];
+    point.curvature = curvature[i];
+    point.velocity_mps = speed[i];
+    point.time_from_start_s = elapsed;
+    if (i > 0U) {
+      point.acceleration_mps2 =
+          (speed[i] * speed[i] - speed[i - 1U] * speed[i - 1U]) /
+          (2.0 * ds[i]);
+      elapsed += ds[i] / std::max(0.5 * (speed[i] + speed[i - 1U]), 0.1);
+      point.time_from_start_s = elapsed;
+    }
+    result.push_back(point);
+  }
+  return result;
+}
+
 }  // namespace adas::planning

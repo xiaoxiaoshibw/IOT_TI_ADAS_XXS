@@ -5,6 +5,10 @@
     input_timeout_s: 0.3
     global_route.enabled: true
     global_route.goal_stop_distance_m: 1.5
+    # Commit 2 — global-route-specific ACC params (route plan() path only;
+    # the lane-state plan() branch keeps follow_time_gap_s/follow_standstill_m).
+    global_route.lead_time_gap_s: 1.4
+    global_route.lead_standstill_m: 4.0
     horizon_s: 8.0
     min_length_m: 30.0
     max_length_m: 120.0

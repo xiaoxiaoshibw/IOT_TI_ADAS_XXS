@@ -46,6 +46,13 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     // 参考线；没有导航路径时仍使用原有 lane_state 重建路径，保证 ACC/AEB/SIL 不变。
     declare_parameter<bool>("global_route.enabled", true);
     declare_parameter<double>("global_route.goal_stop_distance_m", 1.5);
+    // Commit 2 — global-route-specific ACC params. Distinct from the
+    // lane-state plan() defaults (follow_time_gap_s/standstill_m) because the
+    // route's horizon is longer and the curve-aware profile allows earlier,
+    // smoother lead-vehicle deceleration. The lane-state plan() path keeps
+    // its 1.1 s/4 m defaults untouched.
+    declare_parameter<double>("global_route.lead_time_gap_s", 1.4);
+    declare_parameter<double>("global_route.lead_standstill_m", 4.0);
     // 20 Hz bounds the behavior->trajectory scheduler wait to 50 ms while
     // behavior decisions remain at 10 Hz. The core is O(horizon/step) and is
     // intentionally much lighter than perception or CARLA processing.
@@ -167,6 +174,10 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     params_.max_decel_mps2 = get_parameter("max_decel_mps2").as_double();
     params_.follow_time_gap_s = get_parameter("follow_time_gap_s").as_double();
     params_.follow_standstill_m = get_parameter("follow_standstill_m").as_double();
+    params_.global_route_follow_time_gap_s =
+        get_parameter("global_route.lead_time_gap_s").as_double();
+    params_.global_route_follow_standstill_m =
+        get_parameter("global_route.lead_standstill_m").as_double();
     params_.lane_change_time_s = get_parameter("lane_change_time_s").as_double();
     params_.lane_change_min_len_m = get_parameter("lane_change_min_len_m").as_double();
     params_.lane_width_m = get_parameter("lane_width_m").as_double();
@@ -191,6 +202,10 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     common::require_positive("max_decel_mps2", params_.max_decel_mps2);
     common::require_positive("follow_time_gap_s", params_.follow_time_gap_s);
     common::require_nonnegative("follow_standstill_m", params_.follow_standstill_m);
+    common::require_positive("global_route.lead_time_gap_s",
+                             params_.global_route_follow_time_gap_s);
+    common::require_nonnegative("global_route.lead_standstill_m",
+                                params_.global_route_follow_standstill_m);
     common::require_positive("lane_width_m", params_.lane_width_m);
     common::require_timeout_exceeds_period("input_timeout_s", input_timeout_s_, "rate_hz",
                                            rate_hz_);
@@ -247,7 +262,7 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     const auto trajectory = global_route_enabled_ && global_route_ &&
                                     global_route_->poses.size() >= 2U
-                                ? plan_global_route(ego, cruise_override)
+                                ? plan_global_route(ego, lane, cruise_override, lead)
                                 : core_->plan(ego, lane, lead, cruise_override, target_lane);
     if (trajectory.empty()) {
       output_valid_ = false;
@@ -278,9 +293,13 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
   }
 
   common::Trajectory plan_global_route(const common::KinematicState& ego,
-                                       double cruise_override_mps) const {
-    // 路线来自 CARLA OpenDRIVE，和 bridge 发布的 odometry 同为 map 坐标。每拍从
-    // 最近路径点向前截取滚动视界；因此点击目标后不需要在 PC 与 Orin 之间再传控制量。
+                                       const common::LaneStateData& lane,
+                                       double cruise_override_mps,
+                                       const LeadInfo& lead) const {
+    // Commit 2 — 把 node 内的内联实现委托给 core::plan_global_route（lead 沿
+    // 路由做跟车共移 cap，详见 core 实现）。node 仅负责从 nav_msgs/Path 截取
+    // 滚动视界内的 pose 序列 + 转换 yaw。core 负责 cruise ∩ curve ∩ stop
+    // ∩ lead 四重 cap、backward pass、forward pass。
     const auto& poses = global_route_->poses;
     std::size_t nearest = 0U;
     double nearest_d2 = std::numeric_limits<double>::infinity();
@@ -294,13 +313,9 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
       }
     }
 
-    common::Trajectory trajectory;
-    trajectory.reserve(poses.size() - nearest);
-    const double cruise = std::max(
-        0.0, cruise_override_mps >= 0.0 ? cruise_override_mps : params_.cruise_speed_mps);
+    common::Trajectory route;
+    route.reserve(poses.size() - nearest);
     double covered_m = 0.0;
-    double elapsed_s = 0.0;
-    double previous_v = std::max(0.0, ego.velocity_mps);
     for (std::size_t i = nearest; i < poses.size(); ++i) {
       if (i > nearest) {
         const auto& before = poses[i - 1U].pose.position;
@@ -308,43 +323,23 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
         covered_m += std::hypot(current.x - before.x, current.y - before.y);
         if (covered_m > params_.max_length_m) break;
       }
-      double remaining_m = 0.0;
-      for (std::size_t j = i + 1U; j < poses.size(); ++j) {
-        const auto& before = poses[j - 1U].pose.position;
-        const auto& current = poses[j].pose.position;
-        remaining_m += std::hypot(current.x - before.x, current.y - before.y);
-      }
-      const double braking_distance = std::max(0.0, remaining_m -
-                                                       global_route_goal_stop_distance_m_);
-      const double stop_cap = std::sqrt(2.0 * params_.max_decel_mps2 * braking_distance);
-      const double target_v = std::min(cruise, stop_cap);
       common::TrajPoint point;
       point.x = poses[i].pose.position.x;
       point.y = poses[i].pose.position.y;
       point.yaw = 2.0 * std::atan2(poses[i].pose.orientation.z,
                                    poses[i].pose.orientation.w);
-      point.velocity_mps = target_v;
-      point.time_from_start_s = elapsed_s;
-      if (!trajectory.empty()) {
-        const double ds = std::max(0.01, std::hypot(point.x - trajectory.back().x,
-                                                     point.y - trajectory.back().y));
-        point.acceleration_mps2 = (target_v * target_v - previous_v * previous_v) / (2.0 * ds);
-        point.curvature = (point.yaw - trajectory.back().yaw) / ds;
-        elapsed_s += ds / std::max(0.5 * (previous_v + target_v), 0.1);
-        point.time_from_start_s = elapsed_s;
-      }
-      previous_v = target_v;
-      trajectory.push_back(point);
+      route.push_back(point);
     }
-    // 靠近终点时路径只剩一个点：补一个零速点，让纵向控制器稳定停车而不是回退到巡航。
-    if (trajectory.size() == 1U) {
-      auto stop = trajectory.front();
-      stop.velocity_mps = 0.0;
-      stop.acceleration_mps2 = -params_.max_decel_mps2;
-      stop.time_from_start_s += 0.1;
-      trajectory.push_back(stop);
-    }
-    return trajectory;
+    if (route.size() < 2U) return {};
+    // The route is normally a rolling horizon. Only apply the terminal stop
+    // profile when this window actually reaches the user-selected goal.
+    const bool reaches_goal = nearest + route.size() == poses.size();
+    (void)lane;  // 当前 core::plan_global_route 暂不依赖 lane；保留接口以备
+                  // 后续把 error_curvature 等车道信号也接入路线 cap。
+    const double cruise = std::max(
+        0.0, cruise_override_mps >= 0.0 ? cruise_override_mps : params_.cruise_speed_mps);
+    return core_->plan_global_route(ego, route, cruise,
+                                    global_route_goal_stop_distance_m_, reaches_goal, lead);
   }
 
   void produce_diagnostics(diagnostic_updater::DiagnosticStatusWrapper& stat) {
