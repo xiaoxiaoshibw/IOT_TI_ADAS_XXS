@@ -286,6 +286,24 @@ class TrajectoryFollowerNode : public rclcpp_lifecycle::LifecycleNode {
   void on_trajectory(adas_msgs::msg::Trajectory::ConstSharedPtr msg) {
     trajectory_rx_time_ = std::chrono::steady_clock::now();
     trajectory_received_ = true;
+    for (const auto& point : msg->points) {
+      const auto& position = point.pose.position;
+      const auto& orientation = point.pose.orientation;
+      const double time_from_start = rclcpp::Duration(point.time_from_start).seconds();
+      if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+          !std::isfinite(position.z) || !std::isfinite(orientation.z) ||
+          !std::isfinite(orientation.w) ||
+          !std::isfinite(point.longitudinal_velocity_mps) ||
+          !std::isfinite(point.acceleration_mps2) ||
+          !std::isfinite(point.curvature) || !std::isfinite(time_from_start)) {
+        trajectory_.clear();
+        inputs_valid_ = false;
+        output_valid_ = false;
+        last_error_ = "trajectory contains non-finite point";
+        last_error_time_ = now();
+        return;
+      }
+    }
     trajectory_.clear();
     trajectory_.reserve(msg->points.size());
     for (const auto& point : msg->points) {

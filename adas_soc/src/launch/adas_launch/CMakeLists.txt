@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.16)
 project(adas_launch)
 
 find_package(ament_cmake REQUIRED)
+find_package(adas_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+
+add_executable(fault_injection_runner test/fault_injection_runner.cpp)
+ament_target_dependencies(fault_injection_runner adas_msgs nav_msgs rclcpp)
+install(TARGETS fault_injection_runner DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
