@@ -16,7 +16,38 @@ source "$ROS_SETUP"
 set -u
 
 if (( BUILD )) || [[ ! -f "$ROOT/adas_soc/install/setup.bash" ]]; then
-  (cd "$ROOT/adas_soc" && colcon build --symlink-install --event-handlers console_direct+)
+  # ament_cmake_python cannot replace an old real package directory with the
+  # symlink required by --symlink-install. This path is generated build output
+  # only; remove exactly that stale artifact, never a source/install tree.
+  stale_python_link="$ROOT/adas_soc/build/adas_msgs/ament_cmake_python/adas_msgs/adas_msgs"
+  if [[ -d "$stale_python_link" && ! -L "$stale_python_link" ]]; then
+    cmake -E remove_directory "$stale_python_link"
+  fi
+  build_run="$ROOT/logs/local_three_machine/$(date +%Y%m%d_%H%M%S)_build_$$"
+  mkdir -p "$build_run"
+  set +e
+  (cd "$ROOT/adas_soc" && colcon build --symlink-install \
+    --event-handlers console_direct+) 2>&1 | tee "$build_run/build.log"
+  build_rc=${PIPESTATUS[0]}
+  set -e
+  if (( build_rc != 0 )); then
+    BUILD_RUN="$build_run" BUILD_RC="$build_rc" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+run = Path(os.environ['BUILD_RUN'])
+report = {
+    'schema_version': 1, 'overall': 'FAIL', 'failed_stage': 'build',
+    'checks': [{'name': 'Build', 'status': 'FAIL',
+                'detail': 'colcon exited %s; see build.log' % os.environ['BUILD_RC']}],
+    'log_dir': str(run), 'ros_domain_id': '145', 'can_interface': 'vcan0',
+}
+(run / 'report.json').write_text(
+    json.dumps(report, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "Build failed; report=$build_run/report.json" >&2
+    exit "$build_rc"
+  fi
 fi
 set +u
 # shellcheck disable=SC1091
