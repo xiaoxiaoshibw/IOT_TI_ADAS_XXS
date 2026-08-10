@@ -36,11 +36,18 @@ def parse_args():
 def process_snapshot():
     result = subprocess.run(['ps', '-eo', 'pid=,args='], text=True,
                             stdout=subprocess.PIPE, check=True)
-    own = os.getpid()
+    ignored = {os.getpid()}
+    parent = os.getppid()
+    while parent > 1 and parent not in ignored:
+        ignored.add(parent)
+        try:
+            parent = int(Path('/proc/%d/stat' % parent).read_text().split()[3])
+        except (OSError, ValueError, IndexError):
+            break
     matches = []
     for line in result.stdout.splitlines():
         fields = line.strip().split(maxsplit=1)
-        if len(fields) != 2 or int(fields[0]) == own:
+        if len(fields) != 2 or int(fields[0]) in ignored:
             continue
         if any(pattern in fields[1] for pattern in CRITICAL_PATTERNS):
             # Ignore the shell/editor command that happens to contain source text.
@@ -385,8 +392,10 @@ def main():
         run.add_check('Runtime', False, str(error))
         return 1
     finally:
-        if not args.keep_running:
-            run.cleanup()
+        # --keep-running means stay in the foreground after checks; it never
+        # transfers ownership. Ctrl-C, timeout, launch failure and normal exit
+        # must all tear down exactly the process groups created by this run.
+        run.cleanup()
 
 
 if __name__ == '__main__':
