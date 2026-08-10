@@ -20,6 +20,7 @@ CANID_FAULT_INJECT = 0x301
 CANID_FAULT_RESPONSE = 0x302
 MCU_FEEDBACK_IDS = (CANID_MCU_CONTROL, CANID_MCU_HEARTBEAT,
                     CANID_MCU_DIAG, CANID_MCU_E2E_DIAG)
+CAN_RECEIVE_IDS = MCU_FEEDBACK_IDS + (CANID_FAULT_RESPONSE,)
 CAN_SFF_MASK = 0x7FF
 CAN_EFF_FLAG = 0x80000000
 CAN_RTR_FLAG = 0x40000000
@@ -37,10 +38,10 @@ CAN_FILTER = struct.Struct('=II')
 
 
 def socketcan_feedback_filters():
-    """Return exact Linux CAN_RAW filters for MCU standard data frames."""
+    """Return exact Linux CAN_RAW filters for MCU feedback and fault ack."""
     mask = CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG
     return b''.join(CAN_FILTER.pack(can_id, mask)
-                    for can_id in MCU_FEEDBACK_IDS)
+                    for can_id in CAN_RECEIVE_IDS)
 
 
 def crc8(data):
@@ -69,6 +70,19 @@ def encode_fault_injection(command, parameter, sequence):
     data[5] = sequence
     data[7] = frame_crc(CANID_FAULT_INJECT, data)
     return bytes(data)
+
+
+def decode_fault_response(data):
+    """Validate and decode authoritative CAN v3 0x302 response."""
+    data = bytes(data)
+    if len(data) != 8:
+        raise ValueError('invalid_fault_response_dlc')
+    if data[7] != frame_crc(CANID_FAULT_RESPONSE, data):
+        raise ValueError('invalid_fault_response_crc')
+    return {'command': data[0], 'parameter': data[1],
+            'system_state': data[2], 'fault_level': data[3],
+            'alive': data[4], 'sequence': data[5],
+            'fault_code_low': data[6]}
 
 
 def decode_frame(can_id, data):
@@ -219,6 +233,8 @@ class SocketCanReceiver:
         self.socket.bind((interface,))
         self.socket.settimeout(0.2)
         self.stop_event = threading.Event()
+        self.fault_condition = threading.Condition()
+        self.fault_response = None
         self.thread = threading.Thread(target=self._run, name='socketcan-rx', daemon=True)
         self.thread.start()
 
@@ -234,7 +250,17 @@ class SocketCanReceiver:
                     if can_id & 0xE0000000 or dlc != 8:
                         self.guard.feed(0, b'')
                         continue
-                    self.guard.feed(can_id & 0x7FF, data)
+                    can_id &= 0x7FF
+                    if can_id == CANID_FAULT_RESPONSE:
+                        try:
+                            response = decode_fault_response(data)
+                        except ValueError:
+                            continue
+                        with self.fault_condition:
+                            self.fault_response = response
+                            self.fault_condition.notify_all()
+                    else:
+                        self.guard.feed(can_id, data)
             except socket.timeout:
                 continue
             except OSError:
@@ -245,7 +271,17 @@ class SocketCanReceiver:
 
     def send_fault_injection(self, command, parameter, sequence):
         data = encode_fault_injection(command, parameter, sequence)
-        self.socket.send(CAN_FRAME.pack(CANID_FAULT_INJECT, 8, data))
+        with self.fault_condition:
+            self.fault_response = None
+            self.socket.send(CAN_FRAME.pack(CANID_FAULT_INJECT, 8, data))
+            matched = self.fault_condition.wait_for(
+                lambda: self.fault_response is not None and
+                self.fault_response['command'] == command and
+                self.fault_response['parameter'] == parameter,
+                timeout=1.0)
+            if not matched:
+                raise TimeoutError('MCU 0x302 response timeout')
+            return dict(self.fault_response)
 
     def close(self):
         self.stop_event.set()
@@ -280,12 +316,14 @@ class CanalystReceiver:
         else:
             self._can_module = None
         filters = [{'can_id': can_id, 'can_mask': CAN_SFF_MASK,
-                    'extended': False} for can_id in MCU_FEEDBACK_IDS]
+                    'extended': False} for can_id in CAN_RECEIVE_IDS]
         self.guard = McuFeedbackGuard(feedback_timeout_s=feedback_timeout_s)
         self.bus = bus_factory(
             interface='canalystii', device=device, channel=channel,
             bitrate=bitrate, can_filters=filters, rx_queue_size=4096)
         self.stop_event = threading.Event()
+        self.fault_condition = threading.Condition()
+        self.fault_response = None
         self.thread = threading.Thread(
             target=self._run, name='canalystii-rx', daemon=True)
         self.thread.start()
@@ -299,10 +337,19 @@ class CanalystReceiver:
                         break
                     if (message.is_extended_id or message.is_remote_frame or
                             message.dlc != 8 or
-                            message.arbitration_id not in MCU_FEEDBACK_IDS):
+                            message.arbitration_id not in CAN_RECEIVE_IDS):
                         self.guard.feed(0, b'')
                         continue
-                    self.guard.feed(message.arbitration_id, message.data)
+                    if message.arbitration_id == CANID_FAULT_RESPONSE:
+                        try:
+                            response = decode_fault_response(message.data)
+                        except ValueError:
+                            continue
+                        with self.fault_condition:
+                            self.fault_response = response
+                            self.fault_condition.notify_all()
+                    else:
+                        self.guard.feed(message.arbitration_id, message.data)
             except Exception:
                 self.guard.feed(0, b'')
                 break
@@ -321,7 +368,17 @@ class CanalystReceiver:
             message = type('CanMessage', (), {
                 'arbitration_id': CANID_FAULT_INJECT,
                 'is_extended_id': False, 'data': data, 'dlc': 8})()
-        self.bus.send(message)
+        with self.fault_condition:
+            self.fault_response = None
+            self.bus.send(message)
+            matched = self.fault_condition.wait_for(
+                lambda: self.fault_response is not None and
+                self.fault_response['command'] == command and
+                self.fault_response['parameter'] == parameter,
+                timeout=1.0)
+            if not matched:
+                raise TimeoutError('MCU 0x302 response timeout')
+            return dict(self.fault_response)
 
     def close(self):
         self.stop_event.set()

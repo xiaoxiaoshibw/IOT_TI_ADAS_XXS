@@ -211,10 +211,12 @@ class CarlaBridgeNode(Node):
             if self._can_receiver is None:
                 raise RuntimeError('CAN transport is not active for this bridge')
             self._fault_sequence = (self._fault_sequence + 1) & 0xFF
-            self._can_receiver.send_fault_injection(
+            response = self._can_receiver.send_fault_injection(
                 command, parameter, self._fault_sequence)
             accepted = True
-            detail = '0x301 transport send completed'
+            detail = ('MCU 0x302 ack: state=%d fault_level=%d seq=%d'
+                      % (response['system_state'], response['fault_level'],
+                         response['sequence']))
         except (ValueError, TypeError, RuntimeError, OSError) as error:
             detail = str(error)
         ack = String()

@@ -4,10 +4,11 @@ import time
 from types import SimpleNamespace
 
 from adas_carla_bridge.can_protocol import (
-    CAN_EFF_FLAG, CAN_FILTER, CAN_RTR_FLAG, CAN_SFF_MASK, CanalystReceiver,
-    CANID_FAULT_INJECT, CANID_MCU_CONTROL, CANID_MCU_E2E_DIAG,
-    CANID_MCU_HEARTBEAT, crc8, encode_fault_injection, frame_crc,
-    MCU_FEEDBACK_IDS, McuFeedbackGuard, PROTOCOL_VERSION, sequence_forward,
+    CAN_EFF_FLAG, CAN_FILTER, CAN_RECEIVE_IDS, CAN_RTR_FLAG, CAN_SFF_MASK,
+    CanalystReceiver, CANID_FAULT_INJECT, CANID_FAULT_RESPONSE,
+    CANID_MCU_CONTROL, CANID_MCU_E2E_DIAG, CANID_MCU_HEARTBEAT, crc8,
+    decode_fault_response, encode_fault_injection, frame_crc,
+    McuFeedbackGuard, PROTOCOL_VERSION, sequence_forward,
     socketcan_feedback_filters,
 )
 
@@ -43,12 +44,25 @@ def test_fault_injection_rejects_values_outside_wire_width():
             pass
 
 
-def test_socketcan_filters_accept_only_exact_mcu_standard_data_ids():
+def test_fault_response_requires_crc_and_exposes_mcu_state():
+    payload = finish(CANID_FAULT_RESPONSE, [7, 0, 4, 2, 9, 12, 0x40, 0])
+    response = decode_fault_response(payload)
+    assert response == {'command': 7, 'parameter': 0, 'system_state': 4,
+                        'fault_level': 2, 'alive': 9, 'sequence': 12,
+                        'fault_code_low': 0x40}
+    try:
+        decode_fault_response(bytes(8))
+        assert False
+    except ValueError:
+        pass
+
+
+def test_socketcan_filters_accept_only_feedback_and_fault_ack_ids():
     encoded = socketcan_feedback_filters()
-    assert len(encoded) == len(MCU_FEEDBACK_IDS) * CAN_FILTER.size
+    assert len(encoded) == len(CAN_RECEIVE_IDS) * CAN_FILTER.size
     filters = [CAN_FILTER.unpack_from(encoded, offset)
                for offset in range(0, len(encoded), CAN_FILTER.size)]
-    assert [can_id for can_id, _ in filters] == list(MCU_FEEDBACK_IDS)
+    assert [can_id for can_id, _ in filters] == list(CAN_RECEIVE_IDS)
     expected_mask = CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG
     assert all(mask == expected_mask for _, mask in filters)
 
@@ -109,16 +123,28 @@ def test_guard_rejects_wrong_crc_and_protocol_version():
 
 
 class FakeCanalystBus:
-    def __init__(self, messages, **kwargs):
+    def __init__(self, messages, auto_ack=False, **kwargs):
         self.messages = deque(messages)
+        self.auto_ack = auto_ack
         self.kwargs = kwargs
         self.closed = False
+        self.sent = []
 
     def recv(self, timeout):
         if self.messages:
             return self.messages.popleft()
         time.sleep(min(timeout, 0.001))
         return None
+
+    def send(self, message):
+        self.sent.append(message)
+        if self.auto_ack:
+            command, parameter = message.data[:2]
+            self.messages.append(SimpleNamespace(
+                arbitration_id=CANID_FAULT_RESPONSE,
+                data=finish(CANID_FAULT_RESPONSE,
+                            [command, parameter, 3, 1, 4, 8, 0, 0]),
+                dlc=8, is_extended_id=False, is_remote_frame=False))
 
     def shutdown(self):
         self.closed = True
@@ -162,6 +188,25 @@ def test_canalyst_receiver_configures_backend_and_feeds_guard():
         assert captured['channel'] == 1
         assert captured['bitrate'] == 500000
         assert [item['can_id'] for item in captured['can_filters']] == \
-            list(MCU_FEEDBACK_IDS)
+            list(CAN_RECEIVE_IDS)
+    finally:
+        receiver.close()
+
+
+def test_canalyst_fault_request_waits_for_matching_mcu_ack():
+    bus = None
+
+    def factory(**kwargs):
+        nonlocal bus
+        bus = FakeCanalystBus([], auto_ack=True, **kwargs)
+        return bus
+
+    receiver = CanalystReceiver(bus_factory=factory)
+    try:
+        response = receiver.send_fault_injection(7, 0, 22)
+        assert response['command'] == 7
+        assert response['system_state'] == 3
+        assert response['sequence'] == 8
+        assert bus.sent[0].arbitration_id == CANID_FAULT_INJECT
     finally:
         receiver.close()
