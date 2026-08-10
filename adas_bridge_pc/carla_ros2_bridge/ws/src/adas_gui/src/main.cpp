@@ -13,6 +13,7 @@
 #include "fa.hpp"
 #include "main_window.hpp"
 #include "ros_bridge.hpp"
+#include "single_instance.hpp"
 #include "theme.hpp"
 
 namespace {
@@ -68,6 +69,11 @@ void apply_cjk_font(QApplication& application) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  adas::gui::SingleInstanceLock gui_lock(adas::gui::gui_lock_path());
+  if (!gui_lock.tryLock()) {
+    std::cerr << "adas_gui: another GUI instance is already running" << std::endl;
+    return 2;
+  }
   // 必须在 rclcpp::init 之前：固化 HIL 直连 DDS 口径（CycloneDDS + 绑直连网卡
   // + 单播 Orin），保证无论经 start_gui.sh 还是裸 `ros2 run`/桌面图标启动都能
   // 收到 Orin 的 /adas/mcu/* 等 HIL 遥测。已 export 的变量优先，不被覆盖。
@@ -133,7 +139,8 @@ int main(int argc, char** argv) {
       const int delay_ms = 1500;
       QTimer::singleShot(delay_ms, &application, [&window, screenshot_path]() {
         const QPixmap pix = window.grab();
-        if (pix.save(screenshot_path, "PNG")) {
+        const bool saved = pix.save(screenshot_path, "PNG");
+        if (saved) {
           std::cout << "[screenshot] saved " << screenshot_path.toStdString()
                     << " (" << pix.width() << "x" << pix.height() << ")"
                     << std::endl;
@@ -141,7 +148,11 @@ int main(int argc, char** argv) {
           std::cerr << "[screenshot] save failed: " << screenshot_path.toStdString()
                     << std::endl;
         }
-        QApplication::quit();
+        // Under a live high-rate DDS graph, Qt/rclcpp teardown can race after
+        // the offscreen artifact is already complete. Screenshot mode owns no
+        // child process or persistent write, so close through the same
+        // crash-safe path used by SIGTERM and let the OS release DDS/GUI fds.
+        std::_Exit(saved ? 0 : 1);
       });
     } else {
       window.show();
