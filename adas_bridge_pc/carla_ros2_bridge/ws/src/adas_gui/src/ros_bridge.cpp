@@ -315,6 +315,15 @@ QString RosBridge::requestGoal(double world_x, double world_y) {
 }
 
 QString RosBridge::requestCancel(const QString& goal_id) {
+  // Phase 2 hardening：空 goal_id 防御。空字符串意味着"未选中目标",
+  // 不应下发到 service（service 端可能误处理为"取消任何目标"）。
+  if (goal_id.isEmpty()) {
+    const QString op = QStringLiteral("navigation.cancel");
+    emit navigationRequestChanged(QString(), op,
+                                  static_cast<int>(RequestState::Failed),
+                                  QStringLiteral("目标 ID 为空,无需取消（无活跃目标）"));
+    return {};
+  }
   const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
   const QString operation = QStringLiteral("navigation.cancel");
   if (!requests_.begin(operation, id, QDateTime::currentMSecsSinceEpoch(), 5000)) {

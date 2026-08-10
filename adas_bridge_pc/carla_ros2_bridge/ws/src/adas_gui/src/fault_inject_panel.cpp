@@ -99,6 +99,8 @@ BusyButton* FaultInjectPanel::makeButton(const QString& text,
   button->setToolTip(tooltip);
   button->setMinimumHeight(34);
   button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  // Phase 2 hardening：注册到 all_buttons_,请求在飞行时统一禁用/启用。
+  all_buttons_.append(button);
   connect(button, &QPushButton::clicked, this,
           [this, button, command, text, severity]() {
             requestInjection(button, command, text, severity);
@@ -109,7 +111,14 @@ BusyButton* FaultInjectPanel::makeButton(const QString& text,
 void FaultInjectPanel::requestInjection(BusyButton* button, int command,
                                         const QString& label,
                                         ConfirmSeverity severity) {
-  if (pending_button_ != nullptr) return;
+  if (pending_button_ != nullptr) {
+    // 已经有请求在飞行：禁用其他按钮,而不是静默丢弃第二次点击。
+    logEvent(QStringLiteral(
+        "! 拒绝重复点击：上一条 cmd=%1（request_id=%2）尚未收到 ack,等待响应中")
+                 .arg(button == pending_button_ ? command : -1)
+                 .arg(pending_request_id_));
+    return;
+  }
   const QString action = QStringLiteral("下发 %1（命令 %2）").arg(label).arg(command);
   const QString impact = command == 0
       ? QStringLiteral("将清除 MCU 可恢复故障状态。")
@@ -123,10 +132,16 @@ void FaultInjectPanel::requestInjection(BusyButton* button, int command,
   button->setBusy(true, QStringLiteral("等待确认"),
                   QStringLiteral("请求处理中，收到 ack 或超时后可重试"));
   pending_button_ = button;
+  // Phase 2 hardening：禁用其他 9 个按钮,而不是允许它们堆积 silent-drop。
+  setAllButtonsEnabled(false);
+  // busy=true 的按钮自身也要禁用,避免用户重复点击同一按钮造成 race。
+  button->setEnabled(false);
   const QString request_id = callback_ ? callback_(command, 0, label) : QString();
   if (request_id.isEmpty()) {
     button->setBusy(false);
+    button->setEnabled(true);
     pending_button_ = nullptr;
+    setAllButtonsEnabled(true);
     logEvent(QStringLiteral("! 请求未发送：已有请求进行中或接口不可用"));
     return;
   }
@@ -142,9 +157,21 @@ void FaultInjectPanel::onRequestChanged(const QString& request_id, int state,
   logEvent(QStringLiteral("%1 %2 — %3")
                .arg(ok ? QStringLiteral("✓ 已确认") : QStringLiteral("! 失败"),
                     request_id, detail));
-  if (pending_button_) pending_button_->setBusy(false);
+  if (pending_button_) {
+    pending_button_->setBusy(false);
+    pending_button_->setEnabled(true);
+  }
   pending_button_ = nullptr;
   pending_request_id_.clear();
+  setAllButtonsEnabled(true);
+}
+
+void FaultInjectPanel::setAllButtonsEnabled(bool enabled) {
+  // pending_button_ 自身保持 disabled(busy 可视化),其余按钮统一启用/禁用。
+  for (auto* btn : all_buttons_) {
+    if (btn == pending_button_) continue;
+    btn->setEnabled(enabled);
+  }
 }
 
 void FaultInjectPanel::logEvent(const QString& line) {

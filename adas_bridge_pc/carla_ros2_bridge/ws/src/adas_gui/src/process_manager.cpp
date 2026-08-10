@@ -135,6 +135,17 @@ ProcessManager::ProcessManager(QObject* parent)
   green_light_timer_.setInterval(500);
   connect(&green_light_timer_, &QTimer::timeout, this,
           &ProcessManager::check_green_light);
+  // Phase 2 hardening：烧录超时 timer — 若 dslite 180s 内未结束,强制 SIGKILL。
+  connect(&flash_timeout_timer_, &QTimer::timeout, this, [this]() {
+    if (!orin_.busy()) return;
+    emit logLine(QStringLiteral("MCU"),
+                 QStringLiteral("! 烧录超时（180s）：SIGKILL dslite 进程组"));
+    // 注意：dslite 原子性会被破坏,MCU 可能 brick。GUI 必须显式告诉用户。
+    emit flashFinished(false,
+                       QStringLiteral("烧录 180s 超时,已 SIGKILL dslite;"
+                                      "若 MCU 仍未响应需手动硬件复位"));
+    orin_.kill();  // 强制 kill 进程组
+  });
   connect(&bridge_, &ManagedProcess::stateChanged, this,
           [this](ProcState state, const QString& detail) {
             if (state != ProcState::Stopped) external_bridge_ = false;
@@ -648,7 +659,16 @@ void ProcessManager::flashMcuFirmware(const QString& firmware_path) {
   if (result != 0) {
     emit flashFinished(false,
                        QStringLiteral("烧录进程启动被拒绝：rc=%1").arg(result));
+    return;
   }
+  // Phase 2 hardening：烧录不挂超时。若 dslite 中途卡死,GUI 会永远卡在 busy。
+  // dslite 是原子操作,不能 SIGTERM 中途打断(可能 brick 芯片),所以
+  // 超时后只能整个进程组 SIGKILL,并显式告知用户失败原因。
+  flash_timeout_timer_.setSingleShot(true);
+  flash_timeout_timer_.setInterval(180000);  // 180s
+  flash_timeout_timer_.start();
+  emit logLine(QStringLiteral("MCU"),
+               QStringLiteral("烧录超时已设置为 180s,超时后将 SIGKILL dslite 进程组"));
 }
 
 void ProcessManager::stopBridge() {
@@ -715,7 +735,15 @@ void ProcessManager::start_release_stack(const LaunchConfig& config,
 }
 
 void ProcessManager::stop_release_stack(const QString& script) {
-  if (stop_helper_.state() != QProcess::NotRunning) return;
+  if (stop_helper_.state() != QProcess::NotRunning) {
+    // Phase 2 hardening：用户连点"停止完整系统"时给出显式反馈,
+    // 而非静默 return（之前是死按钮行为）。
+    emit logLine(QStringLiteral("停止"),
+                 QStringLiteral("停止请求已合并到进行中的停止流程,无需重复触发"));
+    emit stackProgress(QStringLiteral("stopping"),
+                       QStringLiteral("停止流程进行中,请等待结束"));
+    return;
+  }
   stop_output_buffer_.clear();
   stop_error_buffer_.clear();
   emit logLine(QStringLiteral("停止"), QStringLiteral("$ %1").arg(script));
@@ -858,6 +886,8 @@ void ProcessManager::on_orin_command_finished(OrinStackManager::Op op,
   // 立即返回 -1（被拒）。这里无脑转发：OrinStackManager 自身会处理
   // finished 信号并 set_busy(false)。
   if (op == OrinStackManager::Op::FlashMcu) {
+    // 烧录正常完成 / 失败 → 停掉超时 timer,避免 180s 后误触发 SIGKILL。
+    flash_timeout_timer_.stop();
     emit flashFinished(exit_code == 0, detail.isEmpty()
         ? (exit_code == 0 ? QStringLiteral("MCU 固件烧录完成")
                           : QStringLiteral("MCU 固件烧录失败：exit=%1").arg(exit_code))

@@ -213,6 +213,8 @@ class ProcessManager : public QObject {
   GreenLightCheck green_light_check_;
   QTimer green_light_timer_;
   qint64 green_light_started_ms_{-1};
+  // Phase 2 hardening：烧录超时定时器（180s 兜底,防止 dslite 卡死 GUI）。
+  QTimer flash_timeout_timer_;
 };
 
 }  // namespace adas::gui

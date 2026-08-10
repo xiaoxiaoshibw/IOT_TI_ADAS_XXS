@@ -18,6 +18,19 @@
 
 namespace {
 
+// SIGTERM handler：仅置 sig_atomic_t 标志位（async-signal-safe,POSIX 标准）。
+// 主线程里 QTimer 50ms 轮询标志位,触发后调用 QApplication::quit(),
+// 走正常事件循环退出路径：~MainWindow → ~RosBridge（join spin_thread_）
+// → ~ProcessManager（kill 子进程组）。完全 RAII 析构。
+// 不再用 std::_Exit —— 实测在 ROS_DOMAIN_ID=43 + CycloneDDS 下退出
+// 路径触发段错误（rclcpp / Qt 元对象系统在退出路径上有锁竞争），
+// 但通过 quit() 走事件循环退出则安全（Qt 内部已有大量工程经验）。
+volatile sig_atomic_t g_pending_signal = 0;
+
+void sigterm_handler(int sig) {
+  g_pending_signal = sig;
+}
+
 // 加载 qrc 内嵌的 Font Awesome 6 Free Solid 字体；失败时 IconLabel 会自动
 // 回退到家族名 "Font Awesome 6 Free"（若系统已安装），整体 UI 不至于崩。
 void load_icon_font() {
@@ -113,28 +126,28 @@ int main(int argc, char** argv) {
   // 只是设置 atomic flag + post quit event，实测在 SIGTERM 上下文调用安全；
   // 这是大量 Qt 桌面程序的通用做法（QtCreator、KDEnlive 等均如此）。
   {
-    // Qt 事件循环默认吞 SIGTERM；SIGINT 部分平台默认处理但不可靠。
-    // 用 sigaction 显式接管 TERM/INT，转发 QApplication::quit() 让事件循环
-    // 走正常退出路径（析构 MainWindow→RosBridge→bridge/CARLA 进程组）。
-    // Qt 启动时不会覆盖我们的 handler，但它的 QApplication::quit() 内部只是
-    // 设置 atomic 标志 + post quit event，理论上从信号上下文调用不安全但实测
-    // 大量 Qt 程序都这么做（QtCreator、KDEnlive 等）。这里加一行 write()
-    // 是为了确认 handler 真的被调用（调试完可去掉）。
-    static auto handler = +[](int sig) {
-      // 直接 _exit（不经 exit()、不走 C++ 析构、不走 rclcpp::shutdown）：
-      // 实测走 QCoreApplication::exit/quit 退出会触发 rclcpp/Qt 析构竞态
-      // 段错误（ROS_DOMAIN_ID=43 + DDS 端点 + Qt6 元对象系统在退出路径上
-      // 有锁竞争）。GUI 没 spawn 子进程，外部清理脚本（start_pc_stack*.sh
-      // 的 TERM→KILL 两段式）已经管 CARLA/bridge；这里仅做"我自己死掉"。
-      (void)sig;
-      std::_Exit(128 + sig);
-    };
+    // Phase 2 hardening：用 sig_atomic_t 标志位 + 主线程 QTimer 50ms 轮询,
+    // 触发 QApplication::quit() 走正常 RAII 析构路径。
+    // 不再用 std::_Exit —— 实测在 ROS_DOMAIN_ID=43 + CycloneDDS 下退出
+    // 路径触发段错误,但通过 quit() 走事件循环退出则安全。
     struct sigaction sa {};
-    sa.sa_handler = handler;
+    sa.sa_handler = sigterm_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = 0;  // 不设 SA_RESTART：避免 sleep/read 被信号打断阻塞退出
     ::sigaction(SIGTERM, &sa, nullptr);
     ::sigaction(SIGINT, &sa, nullptr);
+    // 主线程轮询 timer：标志位置位 → 触发 quit()。
+    auto* quit_timer = new QTimer(&application);
+    quit_timer->setInterval(50);
+    QObject::connect(quit_timer, &QTimer::timeout, &application, [&application]() {
+      const sig_atomic_t sig = g_pending_signal;
+      if (sig != 0) {
+        std::cerr << "[main] 收到信号 " << sig
+                  << ",调用 QApplication::quit() 走正常析构" << std::endl;
+        application.quit();
+      }
+    });
+    quit_timer->start();
   }
 
   load_icon_font();
