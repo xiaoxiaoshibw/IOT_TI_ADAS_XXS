@@ -10,7 +10,10 @@
     trajectory_timeout_s: 1.0
     follower_cmd_timeout_s: 0.8
     gate_cmd_timeout_s: 0.8
-    # 与 SoC 配置保持一致；值为各通道正常超时的倍率，core 按严重度排序。
+    # The two thresholds are normalized by the core: the lower boundary
+    # enters WARN and the higher boundary enters MRM after confirmation.
+    # Values are multipliers of each channel's normal timeout.  The core
+    # orders them by severity, so the requested defaults remain 2x/1x.
     stale_warn_threshold_s: 2.0
     stale_mrm_threshold_s: 1.0
     confirm_frames_to_escalate: 3

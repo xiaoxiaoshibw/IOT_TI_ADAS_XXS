@@ -1,14 +1,16 @@
 // adas_behavior_planner 生命周期节点：既有行为状态机适配与运行诊断。
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
+#include <vector>
 
 #include "adas_behavior_planner/behavior_core.hpp"
-#include "adas_behavior_planner/navigation_activation.hpp"
 #include "adas_common/parameter_validation.hpp"
 #include "adas_common/timing_monitor.hpp"
 #include "adas_msgs/msg/behavior_state.hpp"
-#include "adas_msgs/msg/global_route.hpp"
 #include "adas_msgs/msg/lane_state.hpp"
+#include "adas_msgs/msg/map_sign.hpp"
 #include "adas_msgs/msg/safety_status.hpp"
 #include "adas_msgs/msg/tracked_object_array.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
@@ -43,12 +45,12 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("overtake.abort_lat_limit_m", 1.4);
     declare_parameter<int>("overtake.target_lane", -1);
     declare_parameter<double>("overtake.lane_width_m", 3.5);
+    declare_parameter<double>("stop_sign_approach_m", 15.0);
+    declare_parameter<double>("stop_sign_stop_duration_s", 2.0);
+    declare_parameter<double>("traffic_light_approach_m", 30.0);
+    declare_parameter<double>("junction_approach_m", 30.0);
     declare_parameter<double>("rate_hz", 10.0);
     declare_parameter<double>("input_timeout_s", 0.6);
-    // Legacy ACC/SIL launch files may still plan from lane_state alone.  The
-    // deployed navigation HIL profile explicitly enables this fail-closed
-    // requirement in can_hil.yaml.
-    declare_parameter<bool>("navigation.require_active_route", false);
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
@@ -75,22 +77,24 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
             lane_ = msg;
             lane_rx_time_ = now();
           });
+      sub_map_sign_ = create_subscription<adas_msgs::msg::MapSign>(
+          "/adas/map/sign", rclcpp::QoS(1).reliable().transient_local(),
+          [this](adas_msgs::msg::MapSign::ConstSharedPtr msg) {
+            const auto same_sign = [&msg](const auto& existing) {
+              return existing.lane_id == msg->lane_id && existing.type == msg->type &&
+                     std::hypot(existing.position.x - msg->position.x,
+                                existing.position.y - msg->position.y) < 0.5;
+            };
+            const auto it = std::find_if(map_signs_.begin(), map_signs_.end(), same_sign);
+            if (it == map_signs_.end()) {
+              map_signs_.push_back(*msg);
+            } else {
+              *it = *msg;
+            }
+          });
       sub_safety_ = create_subscription<adas_msgs::msg::SafetyStatus>(
           "/adas/system/safety_status", rclcpp::QoS(1).reliable().transient_local(),
           [this](adas_msgs::msg::SafetyStatus::ConstSharedPtr msg) { safety_ = msg; });
-      sub_navigation_route_ = create_subscription<adas_msgs::msg::GlobalRoute>(
-          "/adas/navigation/global_route",
-          rclcpp::QoS(1).reliable().transient_local(),
-          [this](adas_msgs::msg::GlobalRoute::ConstSharedPtr msg) {
-            navigation_route_observed_ = true;
-            navigation_route_valid_ =
-                msg->route_id != 0U &&
-                msg->status == adas_msgs::msg::GlobalRoute::STATUS_VALID &&
-                !msg->points.empty();
-            navigation_stop_requested_ = navigation_requires_stop(
-                navigation_require_active_route_, navigation_route_observed_,
-                navigation_route_valid_);
-          });
       pub_behavior_ = create_publisher<adas_msgs::msg::BehaviorState>(
           "/adas/planning/behavior", rclcpp::QoS(1).reliable());
       timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / rate_hz_),
@@ -117,10 +121,8 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     objects_.reset();
     odom_.reset();
     lane_.reset();
+    map_signs_.clear();
     safety_.reset();
-    navigation_route_observed_ = false;
-    navigation_route_valid_ = false;
-    navigation_stop_requested_ = navigation_require_active_route_;
     timing_.reset();
     output_count_ = 0U;
     output_enabled_ = true;
@@ -173,10 +175,14 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     params_.abort_lat_limit_m = get_parameter("overtake.abort_lat_limit_m").as_double();
     params_.target_lane = static_cast<int>(get_parameter("overtake.target_lane").as_int());
     params_.lane_width_m = get_parameter("overtake.lane_width_m").as_double();
+    params_.stop_sign_approach_m = get_parameter("stop_sign_approach_m").as_double();
+    params_.stop_sign_stop_duration_s =
+        get_parameter("stop_sign_stop_duration_s").as_double();
+    params_.traffic_light_approach_m =
+        get_parameter("traffic_light_approach_m").as_double();
+    params_.junction_approach_m = get_parameter("junction_approach_m").as_double();
     rate_hz_ = get_parameter("rate_hz").as_double();
     input_timeout_s_ = get_parameter("input_timeout_s").as_double();
-    navigation_require_active_route_ =
-        get_parameter("navigation.require_active_route").as_bool();
   }
 
   void validate_parameters() const {
@@ -191,6 +197,10 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     common::require_range("overtake.slow_ratio", params_.overtake_slow_ratio, 0.0, 1.0);
     common::require_positive("overtake.lane_width_m", params_.lane_width_m);
+    common::require_positive("stop_sign_approach_m", params_.stop_sign_approach_m);
+    common::require_positive("stop_sign_stop_duration_s", params_.stop_sign_stop_duration_s);
+    common::require_positive("traffic_light_approach_m", params_.traffic_light_approach_m);
+    common::require_positive("junction_approach_m", params_.junction_approach_m);
     common::require_timeout_exceeds_period("input_timeout_s", input_timeout_s_, "rate_hz",
                                            rate_hz_);
   }
@@ -214,6 +224,21 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     if (odom_) input.ego_speed_mps = odom_->twist.twist.linear.x;
     if (lane_) input.ego_lateral_m = lane_->lateral_offset;
+    input.now_s = now().seconds();
+    if (odom_) {
+      input.map_signs.reserve(map_signs_.size());
+      for (const auto& sign : map_signs_) {
+        MapSignLite converted;
+        converted.type = static_cast<MapSignType>(sign.type);
+        converted.distance_m = std::hypot(
+            sign.position.x - odom_->pose.pose.position.x,
+            sign.position.y - odom_->pose.pose.position.y);
+        converted.traffic_light_red =
+            sign.traffic_light_state == adas_msgs::msg::MapSign::LIGHT_RED;
+        converted.lane_id = sign.lane_id;
+        input.map_signs.push_back(converted);
+      }
+    }
     input.mrm_stop =
         safety_ && safety_->overall >= adas_msgs::msg::SafetyStatus::LEVEL_MRM_COMFORT;
     const auto previous = core_->state();
@@ -227,15 +252,9 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     last_object_count_ = input.objects.size();
     adas_msgs::msg::BehaviorState msg;
     msg.header.stamp = now();
-    msg.state = navigation_stop_requested_
-                    ? adas_msgs::msg::BehaviorState::STATE_STOPPING
-                    : static_cast<uint8_t>(output.state);
-    msg.target_speed_mps = navigation_stop_requested_
-                               ? 0.0F
-                               : static_cast<float>(output.target_speed_mps);
-    msg.target_lane = navigation_stop_requested_
-                          ? 0
-                          : static_cast<int8_t>(output.target_lane);
+    msg.state = static_cast<uint8_t>(output.state);
+    msg.target_speed_mps = static_cast<float>(output.target_speed_mps);
+    msg.target_lane = static_cast<int8_t>(output.target_lane);
     if (pub_behavior_ && pub_behavior_->is_activated()) {
       pub_behavior_->publish(msg);
       ++output_count_;
@@ -281,10 +300,6 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     stat.add("object_count", last_object_count_);
     stat.add("mrm_stop", safety_ && safety_->overall >=
                                   adas_msgs::msg::SafetyStatus::LEVEL_MRM_COMFORT);
-    stat.add("navigation_stop_requested", navigation_stop_requested_);
-    stat.add("navigation_require_active_route", navigation_require_active_route_);
-    stat.add("navigation_route_observed", navigation_route_observed_);
-    stat.add("navigation_route_valid", navigation_route_valid_);
     stat.add("output_count", output_count_);
     stat.add("processing_last_ms", timing.last_ms);
     stat.add("processing_average_ms", timing.average_ms);
@@ -303,8 +318,8 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     sub_objects_.reset();
     sub_odom_.reset();
     sub_lane_.reset();
+    sub_map_sign_.reset();
     sub_safety_.reset();
-    sub_navigation_route_.reset();
     core_.reset();
   }
 
@@ -316,10 +331,6 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
   common::TimingMonitor timing_;
   bool output_enabled_{false};
   bool parameters_valid_{false};
-  bool navigation_require_active_route_{false};
-  bool navigation_route_observed_{false};
-  bool navigation_route_valid_{false};
-  bool navigation_stop_requested_{false};
   std::size_t output_count_{0U};
   std::size_t last_object_count_{0U};
   BehaviorKind last_state_{BehaviorKind::kLaneFollow};
@@ -332,11 +343,12 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
   nav_msgs::msg::Odometry::ConstSharedPtr odom_;
   adas_msgs::msg::LaneState::ConstSharedPtr lane_;
   adas_msgs::msg::SafetyStatus::ConstSharedPtr safety_;
+  std::vector<adas_msgs::msg::MapSign> map_signs_;
   rclcpp::Subscription<adas_msgs::msg::TrackedObjectArray>::SharedPtr sub_objects_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Subscription<adas_msgs::msg::LaneState>::SharedPtr sub_lane_;
+  rclcpp::Subscription<adas_msgs::msg::MapSign>::SharedPtr sub_map_sign_;
   rclcpp::Subscription<adas_msgs::msg::SafetyStatus>::SharedPtr sub_safety_;
-  rclcpp::Subscription<adas_msgs::msg::GlobalRoute>::SharedPtr sub_navigation_route_;
   rclcpp_lifecycle::LifecyclePublisher<adas_msgs::msg::BehaviorState>::SharedPtr pub_behavior_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

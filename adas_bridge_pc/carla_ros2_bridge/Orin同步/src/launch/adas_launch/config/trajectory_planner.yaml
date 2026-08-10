@@ -5,7 +5,8 @@
     input_timeout_s: 0.3
     global_route.enabled: true
     global_route.goal_stop_distance_m: 1.5
-    # Commit 2 — global-route ACC params (mirror of SoC yaml).
+    # Commit 2 — global-route-specific ACC params (route plan() path only;
+    # the lane-state plan() branch keeps follow_time_gap_s/follow_standstill_m).
     global_route.lead_time_gap_s: 1.4
     global_route.lead_standstill_m: 4.0
     lateral_avoidance_enabled: false
@@ -15,7 +16,7 @@
     step_m: 1.0
     cruise_speed_mps: 15.0
     max_lat_accel_mps2: 2.0
-    # Commit 3 — mirror of SoC yaml.
+    # Commit 3 — 弯道包络米数（clamp [8, 15]）；12 是中央值，验收后再调。
     global_route.curvature_envelope_m: 12.0
     max_accel_mps2: 1.5
     max_decel_mps2: 2.0

@@ -52,10 +52,13 @@ safety_monitor:
       [vehicle_interface, command_gate, trajectory_follower, trajectory_planner,
        behavior_planner, object_tracker, aeb, can_gateway, resource_monitor]
 
+# CARLA ACC/LKA/AEB scenarios intentionally start without a navigation goal.
+# Do not turn that absence into a permanent empty trajectory. Once a route has
+# actually been observed, the planners still fail closed if it becomes invalid.
 behavior_planner:
   ros__parameters:
-    navigation.require_active_route: true
+    navigation.require_active_route: false
 
 trajectory_planner:
   ros__parameters:
-    global_route.require_active_route: true
+    global_route.require_active_route: false

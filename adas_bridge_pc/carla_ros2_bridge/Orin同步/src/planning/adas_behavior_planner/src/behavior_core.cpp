@@ -3,9 +3,18 @@
 
 #include <cmath>
 
+#include "adas_common/parameter_validation.hpp"
+
 namespace adas::planning {
 
-BehaviorCore::BehaviorCore(const BehaviorParams& params) : params_(params) {}
+BehaviorCore::BehaviorCore(const BehaviorParams& params) : params_(params) {
+  adas::common::require_positive("stop_sign_approach_m", params_.stop_sign_approach_m);
+  adas::common::require_positive("stop_sign_stop_duration_s",
+                                 params_.stop_sign_stop_duration_s);
+  adas::common::require_positive("traffic_light_approach_m",
+                                 params_.traffic_light_approach_m);
+  adas::common::require_positive("junction_approach_m", params_.junction_approach_m);
+}
 
 // 邻道（目标车道）清空校验：目标车道带内、纵向窗口 [-rear, front] 内无目标
 bool BehaviorCore::adjacent_lane_clear(const BehaviorInput& in) const {
@@ -27,6 +36,69 @@ BehaviorOutput BehaviorCore::update(const BehaviorInput& in) {
     exit_count_ = slow_count_ = clear_count_ = lost_count_ = 0;
   } else if (state_ == BehaviorKind::kStopping) {
     state_ = BehaviorKind::kLaneFollow;
+  }
+
+  const auto sign_near = [&in](MapSignType type, double approach_m, bool red_only) {
+    for (const auto& sign : in.map_signs) {
+      if (sign.type != type || sign.distance_m < 0.0 || sign.distance_m > approach_m ||
+          (red_only && !sign.traffic_light_red)) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  };
+  const bool stop_sign_near =
+      sign_near(MapSignType::kStopSign, params_.stop_sign_approach_m, false);
+  const bool red_light_near =
+      sign_near(MapSignType::kTrafficLight, params_.traffic_light_approach_m, true);
+  const bool junction_near =
+      sign_near(MapSignType::kJunction, params_.junction_approach_m, false);
+
+  // Road signs have priority over the normal follow/overtake FSM.  A stop
+  // line is considered reached at 1m; the explicit timer keeps the stop
+  // duration deterministic in both ROS time and unit tests.
+  if (state_ == BehaviorKind::kStoppingAtStop) {
+    if (!stop_sign_near || in.now_s - stop_start_s_ >= params_.stop_sign_stop_duration_s) {
+      state_ = BehaviorKind::kLaneFollow;
+    }
+  } else if (state_ == BehaviorKind::kApproachingStop) {
+    if (!stop_sign_near) {
+      state_ = BehaviorKind::kLaneFollow;
+    } else {
+      for (const auto& sign : in.map_signs) {
+        if (sign.type == MapSignType::kStopSign && sign.distance_m <= 1.0) {
+          state_ = BehaviorKind::kStoppingAtStop;
+          stop_start_s_ = in.now_s;
+          break;
+        }
+      }
+    }
+  } else if (state_ == BehaviorKind::kWaitingAtLight) {
+    if (!red_light_near) state_ = BehaviorKind::kLaneFollow;
+  } else if (state_ == BehaviorKind::kEnteringJunction) {
+    state_ = BehaviorKind::kLaneFollow;
+  } else if (stop_sign_near) {
+    state_ = BehaviorKind::kApproachingStop;
+  } else if (red_light_near) {
+    state_ = BehaviorKind::kWaitingAtLight;
+  } else if (junction_near) {
+    state_ = BehaviorKind::kEnteringJunction;
+  }
+
+  const bool sign_state = state_ == BehaviorKind::kApproachingStop ||
+                          state_ == BehaviorKind::kStoppingAtStop ||
+                          state_ == BehaviorKind::kWaitingAtLight ||
+                          state_ == BehaviorKind::kEnteringJunction;
+  if (sign_state) {
+    BehaviorOutput out;
+    out.state = state_;
+    out.target_speed_mps =
+        (state_ == BehaviorKind::kStoppingAtStop || state_ == BehaviorKind::kWaitingAtLight)
+            ? 0.0
+            : params_.cruise_speed_mps;
+    out.target_lane = 0;
+    return out;
   }
 
   const bool lead_slow = in.primary_lead_id >= 0 &&
@@ -125,6 +197,12 @@ BehaviorOutput BehaviorCore::update(const BehaviorInput& in) {
       break;
 
     case BehaviorKind::kStopping:
+      break;
+
+    case BehaviorKind::kApproachingStop:
+    case BehaviorKind::kStoppingAtStop:
+    case BehaviorKind::kWaitingAtLight:
+    case BehaviorKind::kEnteringJunction:
       break;
   }
 

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace adas::planning {
@@ -18,47 +19,6 @@ double point_segment_distance(double px, double py, const MapPoint& a, const Map
   if (denom <= 1e-12) return std::hypot(px - a.x, py - a.y);
   const double t = std::clamp(((px - a.x) * dx + (py - a.y) * dy) / denom, 0.0, 1.0);
   return std::hypot(px - (a.x + t * dx), py - (a.y + t * dy));
-}
-
-double station_on_polyline(const std::vector<MapPoint>& points, double x, double y) {
-  double accumulated = 0.0;
-  double best_station = 0.0;
-  double best_squared = std::numeric_limits<double>::infinity();
-  for (std::size_t index = 1U; index < points.size(); ++index) {
-    const auto& from = points[index - 1U];
-    const auto& to = points[index];
-    const double dx = to.x - from.x;
-    const double dy = to.y - from.y;
-    const double squared_length = dx * dx + dy * dy;
-    const double length = std::sqrt(squared_length);
-    const double fraction = squared_length > 1e-12
-                                ? std::clamp(((x - from.x) * dx +
-                                              (y - from.y) * dy) /
-                                                 squared_length,
-                                             0.0, 1.0)
-                                : 0.0;
-    const double projected_x = from.x + fraction * dx;
-    const double projected_y = from.y + fraction * dy;
-    const double squared = (x - projected_x) * (x - projected_x) +
-                           (y - projected_y) * (y - projected_y);
-    if (squared < best_squared) {
-      best_squared = squared;
-      best_station = accumulated + fraction * length;
-    }
-    accumulated += length;
-  }
-  return best_station;
-}
-
-bool polyline_order_matches_travel_yaw(const std::vector<MapPoint>& points) {
-  double score = 0.0;
-  for (std::size_t index = 1U; index < points.size(); ++index) {
-    const auto& from = points[index - 1U];
-    const auto& to = points[index];
-    score += (to.x - from.x) * std::cos(from.yaw) +
-             (to.y - from.y) * std::sin(from.yaw);
-  }
-  return score >= 0.0;
 }
 
 MapPoint lane_anchor(const LaneSegment& lane) {
@@ -156,14 +116,6 @@ double GlobalPlannerCore::transition_cost(const LaneSegment& destination,
 
 GlobalRoute GlobalPlannerCore::plan(const LaneGraph& graph, std::int64_t start_lane_id,
                                     std::int64_t goal_lane_id) const {
-  return plan_impl(graph, start_lane_id, goal_lane_id,
-                   std::numeric_limits<double>::infinity());
-}
-
-GlobalRoute GlobalPlannerCore::plan_impl(const LaneGraph& graph,
-                                         std::int64_t start_lane_id,
-                                         std::int64_t goal_lane_id,
-                                         double start_lane_remaining_m) const {
   GlobalRoute route;
   route.start_lane_id = start_lane_id;
   route.goal_lane_id = goal_lane_id;
@@ -190,12 +142,6 @@ GlobalRoute GlobalPlannerCore::plan_impl(const LaneGraph& graph,
     if (current.lane_id == goal_lane_id) break;
 
     for (const auto& edge : graph.outgoing(current.lane_id)) {
-      const bool lane_change = edge.maneuver == Maneuver::kLaneChangeLeft ||
-                               edge.maneuver == Maneuver::kLaneChangeRight;
-      if (current.lane_id == start_lane_id && lane_change &&
-          start_lane_remaining_m < cost_.lane_change_min_length_m) {
-        continue;
-      }
       const auto* next = graph.lane(edge.to);
       if (next == nullptr) continue;
       const double candidate = known->second + transition_cost(*next, edge);
@@ -257,13 +203,42 @@ GlobalRoute GlobalPlannerCore::plan(const LaneGraph& graph, double start_x, doub
     route.failure_reason = "start or goal is too far from a driving lane";
     return route;
   }
-  const auto* lane_value = graph.lane(start_lane);
-  const double station = station_on_polyline(lane_value->centerline, start_x, start_y);
-  const double length = polyline_length(lane_value->centerline);
-  const double remaining = polyline_order_matches_travel_yaw(lane_value->centerline)
-                               ? length - station
-                               : station;
-  return plan_impl(graph, start_lane, goal_lane, remaining);
+  return plan(graph, start_lane, goal_lane);
+}
+
+bool GlobalPlannerCore::replan(const LaneGraph& graph, const Pose& current,
+                               const Pose& goal, GlobalRoute& route) const {
+  if (!std::isfinite(current.x) || !std::isfinite(current.y) ||
+      !std::isfinite(goal.x) || !std::isfinite(goal.y)) {
+    route = GlobalRoute{};
+    route.failure_reason = "current or goal pose is not finite";
+    return false;
+  }
+  route = plan(graph, current.x, current.y, goal.x, goal.y);
+  return route.valid;
+}
+
+ReplanPolicy::ReplanPolicy(double threshold_m, double cooldown_s)
+    : threshold_m_(threshold_m), cooldown_s_(cooldown_s) {
+  if (!std::isfinite(threshold_m_) || threshold_m_ <= 0.0 ||
+      !std::isfinite(cooldown_s_) || cooldown_s_ < 0.0) {
+    throw std::invalid_argument("invalid replan policy parameters");
+  }
+}
+
+bool ReplanPolicy::request(double deviation_m, double now_s) {
+  if (!std::isfinite(deviation_m) || !std::isfinite(now_s) || deviation_m <= threshold_m_) {
+    return false;
+  }
+  if (attempted_ && now_s - last_attempt_s_ < cooldown_s_) return false;
+  attempted_ = true;
+  last_attempt_s_ = now_s;
+  return true;
+}
+
+void ReplanPolicy::reset() {
+  attempted_ = false;
+  last_attempt_s_ = 0.0;
 }
 
 }  // namespace adas::planning

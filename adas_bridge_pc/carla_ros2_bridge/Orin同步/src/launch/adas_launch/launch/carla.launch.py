@@ -6,7 +6,8 @@
 #       /adas/vehicle/steering_report       /adas/perception/objects_raw
 #   Orin Nano（本机，Humble）：ros2 launch adas_launch carla.launch.py
 #       栈的执行输出 /adas/vehicle/actuation_cmd 由桥订阅（调通模式），
-#       正式闭环改经 USB-CAN → F280025C → CANalyst-II → PC。
+#       正式闭环改经 Jetson Orin Nano PEAK PCAN-USB (SocketCAN can1) → F280025C → MCU CAN2
+#       （调试备源：USB CANalyst-II → MCU CAN2）。
 #
 # 两端 ROS_DOMAIN_ID 必须一致。
 import os

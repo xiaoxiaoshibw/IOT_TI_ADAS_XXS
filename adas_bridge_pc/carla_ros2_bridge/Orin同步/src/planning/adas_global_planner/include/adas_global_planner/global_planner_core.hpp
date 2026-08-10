@@ -14,6 +14,8 @@ struct MapPoint {
   double yaw{0.0};
 };
 
+using Pose = MapPoint;
+
 enum class Maneuver : std::uint8_t {
   kStraight = 0,
   kLeft = 1,
@@ -41,8 +43,6 @@ struct PlannerCost {
   double junction_penalty_m{2.0};
   double turn_penalty_m{1.0};
   double snap_max_distance_m{8.0};
-  double lane_change_min_length_m{10.0};
-  double lane_change_max_lateral_m{6.0};
 };
 
 struct RouteSegment {
@@ -87,13 +87,30 @@ class GlobalPlannerCore {
   GlobalRoute plan(const LaneGraph& graph, double start_x, double start_y,
                    double goal_x, double goal_y) const;
 
+  // Replan from the current pose to the original goal.  The output route is
+  // only replaced by the caller after this method returns true, allowing the
+  // node to retain a valid previous route on failure.
+  bool replan(const LaneGraph& graph, const Pose& current, const Pose& goal,
+              GlobalRoute& route) const;
+
  private:
-  GlobalRoute plan_impl(const LaneGraph& graph, std::int64_t start_lane_id,
-                        std::int64_t goal_lane_id,
-                        double start_lane_remaining_m) const;
   double transition_cost(const LaneSegment& destination,
                          const LaneConnection& connection) const;
   PlannerCost cost_;
+};
+
+class ReplanPolicy {
+ public:
+  ReplanPolicy(double threshold_m, double cooldown_s);
+
+  bool request(double deviation_m, double now_s);
+  void reset();
+
+ private:
+  double threshold_m_;
+  double cooldown_s_;
+  bool attempted_{false};
+  double last_attempt_s_{0.0};
 };
 
 double polyline_length(const std::vector<MapPoint>& points);

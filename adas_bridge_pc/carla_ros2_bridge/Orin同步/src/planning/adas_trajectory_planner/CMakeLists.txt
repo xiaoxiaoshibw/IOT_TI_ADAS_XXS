@@ -16,10 +16,6 @@ find_package(diagnostic_updater REQUIRED)
 find_package(adas_msgs REQUIRED)
 find_package(adas_common REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
 
 add_library(${PROJECT_NAME}_core src/trajectory_planner_core.cpp)
 set_target_properties(${PROJECT_NAME}_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -32,7 +28,7 @@ add_library(${PROJECT_NAME}_node SHARED src/trajectory_planner_node.cpp)
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 ament_target_dependencies(${PROJECT_NAME}_node
   rclcpp rclcpp_components rclcpp_lifecycle diagnostic_msgs diagnostic_updater
-  adas_msgs adas_common nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
+  adas_msgs adas_common nav_msgs)
 rclcpp_components_register_node(${PROJECT_NAME}_node
   PLUGIN "adas::planning::TrajectoryPlannerNode"
   EXECUTABLE trajectory_planner_node)

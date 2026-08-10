@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>adas_can_gateway</name>
+  <version>0.0.2</version>
+  <description>ADAS SoC 到 F280025C 的 CANalyst-II/SocketCAN 周期网关</description>
+  <maintainer email="dev@adas.local">adas</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>adas_msgs</depend>
+  <depend>diagnostic_updater</depend>
+  <depend>std_srvs</depend>
+  <build_depend>libusb-1.0-dev</build_depend>
+  <exec_depend>libusb-1.0-0</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

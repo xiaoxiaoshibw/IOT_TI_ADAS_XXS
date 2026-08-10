@@ -6,6 +6,8 @@
 #ifndef ADAS_TRAJECTORY_PLANNER__TRAJECTORY_PLANNER_CORE_HPP_
 #define ADAS_TRAJECTORY_PLANNER__TRAJECTORY_PLANNER_CORE_HPP_
 
+#include <vector>
+
 #include "adas_common/types.hpp"
 
 namespace adas::planning {
@@ -19,13 +21,25 @@ struct PlannerParams {
   double max_lat_accel_mps2{2.5};  // 弯道限速：v = sqrt(a_lat_max / |k|)
   double max_accel_mps2{1.5};      // 剖面纵向加速上限
   double max_decel_mps2{2.0};      // 剖面纵向减速上限（舒适值，非 AEB）
+  // Commit 6a — 段间速度变化率的"舒适"上限。比 max_accel/mps2 更保守，
+  // 是对前馈加速度的"软上限"，避免轨迹给出 0.5 m/s² → 3 m/s² 的阶跃式跳变。
+  double accel_rate_limit{1.5};    // 单段最大 |dv|/(ds/v) [m/s²]
   // 跟车（ACC）逼近曲线参数：稳态时距 ≈ time_gap + standstill/v
   double follow_time_gap_s{1.1};   // 恒定时距
   double follow_standstill_m{4.0}; // 静止安全距离（停在前车后方此距离）
+  // Commit 2 — 全局路线专属跟车参数：与 lane-state plan() 的 follow_*
+  // 解耦——路线规划跟随前车更早减速，停车时距更保守，避免在目的地前才察觉。
+  double global_route_follow_time_gap_s{1.4};
+  double global_route_follow_standstill_m{4.0};
+  // Commit 3 — 弯道曲率前视包络（米）。curve_cap 取前方 [8, 15] m 内最大 |k|，
+  // 避免单点曲率异常把整段速度压到零；该参数是 [8, 15] 区间内的具体值，
+  // 12 是中央默认值（用户验收后再评估 10 或 14）。
+  double global_route_curvature_envelope_m{12.0};
   // 变道（M4）：五次多项式横移过渡
   double lane_change_time_s{3.0};  // 过渡时长（长度 = v × 时长，有下限）
   double lane_change_min_len_m{25.0};
   double lane_width_m{3.5};
+  bool lateral_avoidance_enabled{false};
 };
 
 // 主前车信息（由 object_tracker 选举结果投影）
@@ -33,6 +47,12 @@ struct LeadInfo {
   bool present{false};
   double gap_m{0.0};       // 沿路径纵向间距
   double speed_mps{0.0};   // 滤波后前车速度（≥0）
+};
+
+struct StaticObstacle {
+  double longitudinal_m{0.0};
+  double lateral_m{0.0};
+  bool is_static{true};
 };
 
 class TrajectoryPlannerCore {
@@ -53,6 +73,24 @@ class TrajectoryPlannerCore {
                           const LeadInfo& lead = LeadInfo(),
                           double cruise_override_mps = -1.0,
                           int target_lane = 0);
+
+  // Commit 2 — 为全局路线生成可跟踪的速度剖面。全局路线来自地图中心线，
+  // 不能只按巡航速度前进：必须同时满足弯道横向加速度、终点停车距离和
+  // 可用减速度约束。当 lead.present 时叠加第 4 个限速（lead cap）：仅
+  // ego-side 包络（不涉及 AEB，AEB 由独立通道处理）；跟车距离增量随前车
+  // 共移：follow_dist = lead.gap + v_lead·t_est − standstill − T·v_lead − s，
+  // 保证稳态收敛到 gap = standstill + T·v_lead（前车静止时停在其后 standstill）。
+  common::Trajectory plan_global_route(const common::KinematicState& ego,
+                                       const common::Trajectory& route,
+                                       double cruise_speed_mps,
+                                       double goal_stop_distance_m,
+                                       bool stop_at_route_end = true,
+                                       const LeadInfo& lead = LeadInfo(),
+                                       const std::vector<StaticObstacle>& obstacles = {}) const;
+
+  common::Trajectory avoid_obstacles_laterally(
+      const common::Trajectory& reference,
+      const std::vector<StaticObstacle>& obstacles) const;
 
  private:
   PlannerParams params_;

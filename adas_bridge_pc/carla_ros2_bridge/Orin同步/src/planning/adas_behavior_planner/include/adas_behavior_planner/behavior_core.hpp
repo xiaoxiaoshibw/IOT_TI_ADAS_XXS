@@ -19,6 +19,10 @@ enum class BehaviorKind : int {
   kOvertakeActive = 3,
   kOvertakeReturn = 4,
   kStopping = 5,
+  kApproachingStop = 7,
+  kStoppingAtStop = 8,
+  kWaitingAtLight = 9,
+  kEnteringJunction = 10,
 };
 
 struct BehaviorParams {
@@ -40,6 +44,23 @@ struct BehaviorParams {
   double abort_lat_limit_m{1.4};        // 仍在本车道内（|lat|<此值）才允许中止
   int target_lane{-1};                  // 超车用车道：-1=左邻道
   double lane_width_m{3.5};
+  double stop_sign_approach_m{15.0};
+  double stop_sign_stop_duration_s{2.0};
+  double traffic_light_approach_m{30.0};
+  double junction_approach_m{30.0};
+};
+
+enum class MapSignType : uint8_t {
+  kStopSign = 0,
+  kTrafficLight = 1,
+  kJunction = 2,
+};
+
+struct MapSignLite {
+  MapSignType type{MapSignType::kJunction};
+  double distance_m{0.0};
+  bool traffic_light_red{false};
+  int64_t lane_id{0};
 };
 
 // 路径坐标系下的轻量目标（由 TrackedObjectArray 投影字段构建）
@@ -57,6 +78,8 @@ struct BehaviorInput {
   double lead_speed_mps{0.0};
   double ego_speed_mps{0.0};
   double ego_lateral_m{0.0};   // 自车相对本车道中心线横向
+  double now_s{0.0};
+  std::vector<MapSignLite> map_signs;
   bool mrm_stop{false};
 };
 
@@ -82,6 +105,7 @@ class BehaviorCore {
   int clear_count_{0};
   int lost_count_{0};
   uint32_t overtaking_id_{0};
+  double stop_start_s_{0.0};
 };
 
 }  // namespace adas::planning

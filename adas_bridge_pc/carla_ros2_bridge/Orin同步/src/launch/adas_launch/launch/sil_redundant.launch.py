@@ -59,13 +59,24 @@ def _change_state(node, transition_id):
 
 def _stack_node(package, executable, name, role):
     remaps = [(t, f'/{role}{t}') for t in STACK_TOPICS]
+    parameters = [_config(name + '.yaml')]
+    if name == 'safety_monitor':
+        # /diagnostics is intentionally isolated per stack. The global
+        # vehicle_interface diagnostic therefore belongs to the arbiter/global
+        # execution path, not to either namespaced stack monitor.
+        parameters.append({
+            'required_diagnostic_components': [
+                'command_gate', 'trajectory_follower', 'trajectory_planner',
+                'behavior_planner', 'object_tracker', 'aeb',
+            ],
+        })
     return LifecycleNode(
         package=package,
         executable=executable,
         name=name,
         namespace=role,
         output='screen',
-        parameters=[_config(name + '.yaml')],
+        parameters=parameters,
         remappings=remaps,
     )
 

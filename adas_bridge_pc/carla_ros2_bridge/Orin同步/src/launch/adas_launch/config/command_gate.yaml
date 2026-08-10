@@ -14,4 +14,4 @@
       steer_rate_lim_rps: [0.8, 0.5, 0.35, 0.25]
       max_accel_mps2: 3.0
       max_decel_mps2: 8.0
-      max_jerk_mps3: 3.0   # Commit 6c — mirror of SoC yaml.
+      max_jerk_mps3: 3.0   # Commit 6c — 常规控制限 3.0 m/s³（AEB 走独立通道不受此限制）

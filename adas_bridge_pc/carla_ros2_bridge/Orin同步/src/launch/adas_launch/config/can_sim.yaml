@@ -1,0 +1,20 @@
+# PC SIL MCU-in-the-loop transport.  The gateway and the MCU host binary both
+# attach to this interface; all frames still use the production CAN v3 layout.
+/**:
+  ros__parameters:
+    transport: sim
+    can_interface: vcan0
+    command_timeout_s: 0.05
+    status_timeout_s: 0.25
+    feedback_timeout_s: 0.1
+    max_steer_deg: 30.0
+    startup_stable_s: 0.5
+    tx_deadline_control_s: 0.055
+    tx_deadline_status_s: 0.06
+    feedback_deviation_arm_s: 2.0
+    feedback_steer_tolerance_deg: 8.0
+    feedback_accel_tolerance_mps2: 2.5
+    feedback_deviation_hold_s: 1.5
+    feedback_recovery_hold_s: 1.0
+    sequence_persist_path: /tmp/adas_can_gateway_sil_seq.bin
+    hil_session_persist_path: /tmp/adas_can_gateway_sil_session_id.bin
