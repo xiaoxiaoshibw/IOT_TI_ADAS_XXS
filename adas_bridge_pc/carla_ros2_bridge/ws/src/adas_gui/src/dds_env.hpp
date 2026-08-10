@@ -82,6 +82,9 @@ inline void setenv_if_unset(const char* key, const std::string& value) {
 // 网卡/Peer 可用 ADAS_DDS_IFACE / ADAS_DDS_PEER 覆盖；探测不到直连网卡时
 // 只设 domain/rmw，不硬绑网卡（回退默认发现，避免误绑更糟）。
 inline void apply_dds_defaults() {
+  // Local three-machine HIL deliberately exercises the process-wide default
+  // RMW on ROS_DOMAIN_ID=145. Do not inject production direct-link DDS knobs.
+  if (std::getenv("ADAS_LOCAL_THREE_MACHINE") != nullptr) return;
   setenv_if_unset("ROS_DOMAIN_ID", "43");
   setenv_if_unset("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp");
   // 抑制 Humble(Orin)↔Jazzy(PC) 跨版本 type-hash 装饰性刷屏（不影响数据）。

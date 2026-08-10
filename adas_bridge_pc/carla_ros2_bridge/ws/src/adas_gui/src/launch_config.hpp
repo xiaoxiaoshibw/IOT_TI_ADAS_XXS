@@ -38,7 +38,7 @@ struct LaunchConfig {
 
 inline QStringList known_scenarios() {
   return {"lka", "acc", "acc_stop_and_go", "acc_slow_truck",
-          "aeb", "aeb_stationary", "aeb_pedestrian", "free"};
+          "overtake", "aeb", "aeb_stationary", "aeb_pedestrian", "free"};
 }
 
 inline QStringList known_towns() {

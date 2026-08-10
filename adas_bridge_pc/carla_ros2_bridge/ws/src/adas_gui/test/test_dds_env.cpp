@@ -11,6 +11,7 @@
 namespace {
 
 using adas::gui::build_cyclonedds_uri;
+using adas::gui::apply_dds_defaults;
 using adas::gui::pick_direct_iface;
 
 TEST(DdsEnv, UriBindsInterfaceAndPeer) {
@@ -47,6 +48,21 @@ TEST(DdsEnv, ReturnsEmptyWhenNoDirectLink) {
       {"zt6q3kbgiw", "10.218.44.2"},
   };
   EXPECT_TRUE(pick_direct_iface(ifaces).empty());
+}
+
+TEST(DdsEnv, LocalThreeMachineKeepsDefaultRmwUntouched) {
+  const char* old_local = std::getenv("ADAS_LOCAL_THREE_MACHINE");
+  const char* old_rmw = std::getenv("RMW_IMPLEMENTATION");
+  const std::string saved_local = old_local ? old_local : "";
+  const std::string saved_rmw = old_rmw ? old_rmw : "";
+  ::setenv("ADAS_LOCAL_THREE_MACHINE", "1", 1);
+  ::unsetenv("RMW_IMPLEMENTATION");
+  apply_dds_defaults();
+  EXPECT_EQ(std::getenv("RMW_IMPLEMENTATION"), nullptr);
+  if (old_local) ::setenv("ADAS_LOCAL_THREE_MACHINE", saved_local.c_str(), 1);
+  else ::unsetenv("ADAS_LOCAL_THREE_MACHINE");
+  if (old_rmw) ::setenv("RMW_IMPLEMENTATION", saved_rmw.c_str(), 1);
+  else ::unsetenv("RMW_IMPLEMENTATION");
 }
 
 }  // namespace

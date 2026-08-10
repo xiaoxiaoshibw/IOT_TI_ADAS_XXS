@@ -86,7 +86,8 @@ TEST(LaunchConfig, KnownListsMatchBridgeContract) {
   // 与 scenarios.py ORDER / bridge_node.py --control-source 保持一致
   EXPECT_EQ(adas::gui::known_scenarios(),
             (QStringList{"lka", "acc", "acc_stop_and_go", "acc_slow_truck",
-                         "aeb", "aeb_stationary", "aeb_pedestrian", "free"}));
+                         "overtake", "aeb", "aeb_stationary",
+                         "aeb_pedestrian", "free"}));
   EXPECT_EQ(adas::gui::known_control_sources(),
             (QStringList{"ros2", "can", "can_cpp"}));
 }

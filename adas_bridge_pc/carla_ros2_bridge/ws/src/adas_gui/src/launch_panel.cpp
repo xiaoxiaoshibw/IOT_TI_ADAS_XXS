@@ -61,6 +61,11 @@ QString default_carla_root() {
   return QDir::homePath() + QStringLiteral("/CARLA_0.9.16");
 }
 
+QString environment_or(const char* name, const QString& fallback) {
+  const QByteArray value = qgetenv(name);
+  return value.isEmpty() ? fallback : QString::fromLocal8Bit(value);
+}
+
 QGroupBox* make_card(const QString& icon_name, const QString& title, QWidget* parent = nullptr) {
   auto* box = new QGroupBox(parent);
   box->setTitle(QString());
@@ -746,11 +751,14 @@ void LaunchPanel::restore_settings() {
     if (index >= 0) combo->setCurrentIndex(index);
   };
   pick(scenario_combo_,
-       settings.value(QStringLiteral("launch/scenario"), QStringLiteral("free")).toString());
+       settings.value(QStringLiteral("launch/scenario"),
+                      environment_or("ADAS_GUI_SCENARIO", QStringLiteral("free"))).toString());
   pick(town_combo_,
        settings.value(QStringLiteral("launch/town"), QStringLiteral("Town04")).toString());
   pick(source_combo_,
-       settings.value(QStringLiteral("launch/control_source"), QStringLiteral("ros2")).toString());
+       settings.value(QStringLiteral("launch/control_source"),
+                      environment_or("ADAS_GUI_CONTROL_SOURCE",
+                                     QStringLiteral("ros2"))).toString());
   carla_root_edit_->setText(
       settings.value(QStringLiteral("launch/carla_root"), default_carla_root()).toString());
   low_quality_check_->setChecked(

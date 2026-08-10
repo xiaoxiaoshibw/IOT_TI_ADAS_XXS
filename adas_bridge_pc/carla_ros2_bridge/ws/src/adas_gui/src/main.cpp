@@ -83,10 +83,19 @@ int main(int argc, char** argv) {
   // 主窗口栅格化成 PNG（offscreen 平台 + QWidget::grab）。正常启动走默认
   // 分支，不破坏 ros2 run adas_gui adas_gui 的入参透传。
   QString screenshot_path;
+  int screenshot_delay_ms = 1500;
   for (int i = 1; i < argc; ++i) {
     const QString arg = QString::fromLocal8Bit(argv[i]);
     if (arg == QStringLiteral("--screenshot") && i + 1 < argc) {
       screenshot_path = QString::fromLocal8Bit(argv[++i]);
+    } else if (arg == QStringLiteral("--screenshot-delay-ms") && i + 1 < argc) {
+      bool ok = false;
+      const int value = QString::fromLocal8Bit(argv[++i]).toInt(&ok);
+      if (!ok || value < 0 || value > 60000) {
+        std::cerr << "adas_gui: invalid --screenshot-delay-ms" << std::endl;
+        return 2;
+      }
+      screenshot_delay_ms = value;
     }
   }
 
@@ -136,8 +145,7 @@ int main(int argc, char** argv) {
     adas::gui::MainWindow window(&bridge);
     if (!screenshot_path.isEmpty()) {
       // 截屏模式：offscreen 平台 + grab() 栅格化，无需 X server 即可出 PNG。
-      const int delay_ms = 1500;
-      QTimer::singleShot(delay_ms, &application, [&window, screenshot_path]() {
+      QTimer::singleShot(screenshot_delay_ms, &application, [&window, screenshot_path]() {
         const QPixmap pix = window.grab();
         const bool saved = pix.save(screenshot_path, "PNG");
         if (saved) {
