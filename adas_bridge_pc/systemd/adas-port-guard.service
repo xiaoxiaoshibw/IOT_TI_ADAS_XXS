@@ -1,0 +1,23 @@
+[Unit]
+Description=ADAS CARLA port guard (cleanup zombie CARLA port holders)
+Documentation=file:///home/xxs/bowen_ADAS/adas_bridge_pc/scripts/port_guard.py
+# 与 carla-supervisor 共同启动；supervisor 起来就拉起
+BindsTo=carla-supervisor.service
+After=carla-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/xxs/bowen_ADAS/adas_bridge_pc/scripts/port_guard.py
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+Environment=PYTHONUNBUFFERED=1
+
+# port_guard 不需要写很多
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/adas /home/xxs/.local/share/adas
+
+[Install]
+WantedBy=multi-user.target

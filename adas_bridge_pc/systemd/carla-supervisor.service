@@ -1,0 +1,36 @@
+[Unit]
+Description=ADAS CARLA Supervisor (single CARLA instance arbiter)
+Documentation=file:///home/xxs/bowen_ADAS/adas_bridge_pc/scripts/carla_supervisor.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python3 /home/xxs/bowen_ADAS/adas_bridge_pc/scripts/carla_supervisor.py --foreground
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+
+# Lock + socket files
+RuntimeDirectory=adas
+RuntimeDirectoryMode=0755
+
+# CARLA 需要 X / Vulkan；当前只跑 RPC，no-rendering 也可
+Environment=CARLA_ROOT=/home/xxs/CARLA_0.9.16
+Environment=TOWN=Town04
+Environment=CARLA_PORT=2000
+Environment=CARLA_HOST=127.0.0.1
+Environment=PYTHONUNBUFFERED=1
+
+# 安全收紧：supervisor 不需要写很多东西
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp /var/log/adas /home/xxs/bowen_ADAS/logs
+
+# 启动 supervisor 的用户通常已经是开发用户，保留 root 不必要
+# User=adas
+# Group=adas
+
+[Install]
+WantedBy=multi-user.target
