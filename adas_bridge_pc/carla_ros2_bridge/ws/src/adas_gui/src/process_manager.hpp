@@ -98,7 +98,8 @@ class ProcessManager : public QObject {
   void setGreenLightCheck(GreenLightCheck check) { green_light_check_ = std::move(check); }
   bool hilManagerActive() const { return hil_manager_.state() != QProcess::NotRunning; }
   bool hasManagedProcesses() const {
-    return hilManagerActive() || carla_.active() || bridge_.active();
+    return hilManagerActive() || stop_helper_.state() != QProcess::NotRunning ||
+           carla_.active() || bridge_.active();
   }
   bool hasManagedCarla() const { return hilManagerActive() || carla_.active(); }
   bool hasManagedBridge() const { return hilManagerActive() || bridge_.active(); }
@@ -136,6 +137,7 @@ class ProcessManager : public QObject {
   // 首次启动缺 Orin ssh 密码：让 LaunchPanel 弹 QInputDialog 让用户填；
   // 填完后用户重新按"一键启动全流程"即可（密码已写入 secrets.ini）。
   void needsOrinCredentials(const QString& host, const QString& user);
+  void flashFinished(bool success, const QString& detail);
 
  private slots:
   void on_orin_command_finished(OrinStackManager::Op op, int exit_code,

@@ -469,20 +469,13 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
 void MainWindow::closeEvent(QCloseEvent* event) {
   if (launch_panel_ && launch_panel_->processManager() &&
       launch_panel_->processManager()->hasManagedProcesses()) {
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(QStringLiteral("退出 ADAS 验证台"));
-    box.setText(bridge_->isSilMode()
-                    ? QStringLiteral("<b>完整 SIL 会话仍在运行</b><br>"
-                                     "关闭 GUI 将停止本地 SIL 闭环进程。")
-                    : QStringLiteral("<b>完整 HIL 会话仍在运行</b><br>"
-                                     "关闭 GUI 将停止 bridge、CARLA 与 Orin HIL/CAN 服务。"));
-    box.setInformativeText(QStringLiteral("确认停止完整系统并退出 GUI？"));
-    box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
-    box.setDefaultButton(QMessageBox::Cancel);
-    box.button(QMessageBox::Yes)->setText(QStringLiteral("确认退出"));
-    box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
-    if (box.exec() != QMessageBox::Yes) {
+    if (!confirm_action(
+            this, QStringLiteral("确认退出 ADAS 验证台"),
+            QStringLiteral("停止本机受管进程并退出 GUI"),
+            bridge_->isSilMode()
+                ? QStringLiteral("将停止本地 SIL 闭环。")
+                : QStringLiteral("将停止本机 bridge/CARLA；Orin HIL/CAN 常驻服务保持运行。"),
+            ConfirmSeverity::Danger)) {
       event->ignore();
       return;
     }

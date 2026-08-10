@@ -62,7 +62,6 @@ class LaunchPanel : public QWidget {
   void save_settings() const;
   void restore_settings();
   void update_buttons();
-  bool confirmStopAll();        // 全部停止前二次确认对话框
   bool confirmFlashMcu(const QString& firmware_path);  // 烧录前二次确认
   void onFlashMcuClicked();     // 选文件 + 弹确认 + 调 manager_
   void onNeedsOrinCredentials(const QString& host, const QString& user);  // 弹密码框
@@ -79,16 +78,17 @@ class LaunchPanel : public QWidget {
   QCheckBox* low_quality_check_;
   QCheckBox* offscreen_check_;
   QCheckBox* start_full_stack_check_;  // 默认不勾：只跑 PC 本地栈
-  QPushButton* start_all_button_;
-  QPushButton* stop_all_button_;
-  QList<QPushButton*> preset_buttons_;  // 演示预设按钮，桥运行期间禁用
+  BusyButton* start_all_button_;
+  BusyButton* stop_all_button_;
+  QList<BusyButton*> preset_buttons_;  // 演示预设按钮，桥运行期间禁用
+  BusyButton* active_start_button_{nullptr};
   // 高级调试折叠
   QPushButton* advanced_toggle_;
   QWidget* advanced_box_;
-  QPushButton* start_carla_button_;
-  QPushButton* start_bridge_button_;
-  QPushButton* stop_bridge_button_;
-  QPushButton* flash_mcu_button_;  // 高级折叠：调 dslite.sh 烧 F280025C
+  BusyButton* start_carla_button_;
+  BusyButton* start_bridge_button_;
+  BusyButton* stop_bridge_button_;
+  BusyButton* flash_mcu_button_;  // 高级折叠：调 dslite.sh 烧 F280025C
   // 状态灯
   LedIndicator* carla_light_;
   QLabel* carla_state_label_;

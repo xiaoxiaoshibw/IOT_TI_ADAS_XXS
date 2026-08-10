@@ -80,10 +80,9 @@ QGroupBox* make_card(const QString& icon_name, const QString& title, QWidget* pa
   return box;
 }
 
-QPushButton* make_button(const QString& icon_name, const QString& text,
-                         const QString& object_name, QWidget* parent = nullptr) {
-  auto* b = new QPushButton(parent);
-  b->setText(text);
+BusyButton* make_button(const QString& icon_name, const QString& text,
+                        const QString& object_name, QWidget* parent = nullptr) {
+  auto* b = new BusyButton(text, parent);
   b->setIcon(icons::get(icon_name));
   b->setIconSize(QSize(16, 16));
   b->setObjectName(object_name);
@@ -117,6 +116,14 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
                 : state == ProcState::Failed ? HealthState::Fault
                                              : HealthState::Offline;
             setHealthRow(QStringLiteral("carla"), health, detail);
+            if (state == ProcState::Running || state == ProcState::Failed) {
+              start_carla_button_->setBusy(false);
+              if (state == ProcState::Failed && active_start_button_) {
+                active_start_button_->setBusy(false);
+                active_start_button_ = nullptr;
+              }
+            }
+            if (!manager_.hasManagedProcesses()) stop_all_button_->setBusy(false);
             update_buttons();
           });
   connect(&manager_, &ProcessManager::bridgeChanged, this,
@@ -148,6 +155,19 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
             }
             emit runStateChanged(running, scenario_combo_->currentText(),
                                  town_combo_->currentText());
+            if (state == ProcState::Running || state == ProcState::Failed) {
+              start_bridge_button_->setBusy(false);
+              if (active_start_button_) {
+                active_start_button_->setBusy(false);
+                active_start_button_ = nullptr;
+              }
+            }
+            if (state == ProcState::Stopped || state == ProcState::Failed ||
+                (state == ProcState::Running &&
+                 detail.contains(QStringLiteral("未停止")))) {
+              stop_bridge_button_->setBusy(false);
+            }
+            if (!manager_.hasManagedProcesses()) stop_all_button_->setBusy(false);
             update_buttons();
           });
 
@@ -165,26 +185,55 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
 
   connect(start_all_button_, &QPushButton::clicked, this, [this]() {
     if (!runPreflightGate()) return;
+    const auto config = currentConfig();
+    if (!confirm_action(this, QStringLiteral("确认启动完整系统"),
+                        QStringLiteral("启动 %1 / %2")
+                            .arg(config.scenario, config.town),
+                        config.start_full_stack
+                            ? QStringLiteral("将启动 PC 仿真，并通过 SSH 请求 Orin HIL 栈启动。")
+                            : QStringLiteral("将启动本机 CARLA/SIL 与 ROS2 bridge。"),
+                        ConfirmSeverity::Warning)) return;
+    start_all_button_->setBusy(true, QStringLiteral("启动中"),
+                               QStringLiteral("等待 bridge 运行或启动失败"));
+    active_start_button_ = start_all_button_;
     save_settings();
-    manager_.startAll(currentConfig());
+    manager_.startAll(config);
     update_buttons();
   });
   connect(stop_all_button_, &QPushButton::clicked, this, [this]() {
-    if (!confirmStopAll()) return;
+    if (!confirm_action(this, QStringLiteral("确认停止完整系统"),
+                        QStringLiteral("停止本机受管的 bridge 与 CARLA/SIL"),
+                        QStringLiteral("Orin HIL/CAN 常驻服务不会被停止；外部实例也不会被终止。"),
+                        ConfirmSeverity::Danger)) return;
+    stop_all_button_->setBusy(true, QStringLiteral("停止中"),
+                              QStringLiteral("等待受管进程退出"));
     manager_.stopAll();
     update_buttons();
   });
   connect(start_carla_button_, &QPushButton::clicked, this, [this]() {
+    if (!confirm_action(this, QStringLiteral("确认启动仿真"),
+                        QStringLiteral("仅启动 CARLA/SIL 仿真"),
+                        QStringLiteral("不会自动启动 bridge。"))) return;
+    start_carla_button_->setBusy(true, QStringLiteral("启动中"));
     save_settings();
     manager_.startCarla(currentConfig());
     update_buttons();
   });
   connect(start_bridge_button_, &QPushButton::clicked, this, [this]() {
+    if (!confirm_action(this, QStringLiteral("确认启动桥接"),
+                        QStringLiteral("仅启动 ROS2 bridge"),
+                        QStringLiteral("请确认仿真与控制源已经就绪。"))) return;
+    start_bridge_button_->setBusy(true, QStringLiteral("启动中"));
     save_settings();
     manager_.startBridge(currentConfig());
     update_buttons();
   });
   connect(stop_bridge_button_, &QPushButton::clicked, this, [this]() {
+    if (!confirm_action(this, QStringLiteral("确认停止桥接"),
+                        QStringLiteral("停止本 GUI 管理的 ROS2 bridge"),
+                        QStringLiteral("控制数据将中断；外部 bridge 不会被终止。"),
+                        ConfirmSeverity::Danger)) return;
+    stop_bridge_button_->setBusy(true, QStringLiteral("停止中"));
     manager_.stopBridge();
     update_buttons();
   });
@@ -194,6 +243,28 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
   // 用户再次按"一键启动全流程"即可（不再弹）。
   connect(&manager_, &ProcessManager::needsOrinCredentials, this,
           &LaunchPanel::onNeedsOrinCredentials);
+  connect(&manager_, &ProcessManager::needsOrinCredentials, this,
+          [this](const QString&, const QString&) {
+            if (active_start_button_) active_start_button_->setBusy(false);
+            active_start_button_ = nullptr;
+          });
+  connect(&manager_, &ProcessManager::stackProgress, this,
+          [this](const QString& stage, const QString&) {
+            if (stage == QStringLiteral("failed") ||
+                stage == QStringLiteral("complete")) {
+              if (active_start_button_) active_start_button_->setBusy(false);
+              active_start_button_ = nullptr;
+            }
+          });
+  connect(&manager_, &ProcessManager::flashFinished, this,
+          [this](bool success, const QString& detail) {
+            flash_mcu_button_->setBusy(false);
+            flash_mcu_button_->setToolTip(detail);
+            if (!success) {
+              QMessageBox::warning(this, QStringLiteral("MCU 烧录失败"), detail);
+            }
+            update_buttons();
+          });
   connect(advanced_toggle_, &QPushButton::toggled, this,
           &LaunchPanel::setAdvancedVisible);
   update_buttons();
@@ -510,6 +581,18 @@ void LaunchPanel::applyPreset(const DemoPreset& preset) {
   };
   pick(scenario_combo_, preset.scenario);
   pick(town_combo_, preset.town);
+  if (!runPreflightGate()) return;
+  if (!confirm_action(this, QStringLiteral("确认启动演示场景"),
+                      QStringLiteral("启动 %1").arg(preset.label),
+                      QStringLiteral("场景：%1，地图：%2；不会自动下发导航目标。")
+                          .arg(preset.scenario, preset.town),
+                      ConfirmSeverity::Warning)) return;
+  auto* button = qobject_cast<BusyButton*>(sender());
+  if (button) {
+    button->setBusy(true, QStringLiteral("启动中"),
+                    QStringLiteral("等待 bridge 运行或启动失败"));
+    active_start_button_ = button;
+  }
   // 控制源保留操作员当前选择（HIL 下 can/can_cpp 是人为设定，预设不越权覆盖）。
   save_settings();
   // 不再 emit demoGoalArmed：导航目标由用户在地图上手动选点（MapView::goalRequested）
@@ -556,37 +639,12 @@ void LaunchPanel::onHealthSnapshot(const QVector<GuiHealthStatus>& statuses) {
   }
 }
 
-bool LaunchPanel::confirmStopAll() {
-  QMessageBox box(this);
-  box.setIcon(QMessageBox::Warning);
-  box.setWindowTitle(QStringLiteral("停止完整系统"));
-  box.setText(QStringLiteral(
-      "<b>将停止完整 HIL 会话</b><br>"
-      "停止顺序：ROS2 bridge → CARLA → Orin adas-hil / adas-can。"));
-  box.setInformativeText(QStringLiteral(
-      "GUI 保持运行，可再次点击“启动完整系统”。MCU 将进入安全状态。"));
-  box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
-  box.setDefaultButton(QMessageBox::Cancel);
-  box.button(QMessageBox::Yes)->setText(QStringLiteral("停止完整系统"));
-  box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
-  return box.exec() == QMessageBox::Yes;
-}
-
 bool LaunchPanel::confirmFlashMcu(const QString& firmware_path) {
-  QMessageBox box(this);
-  box.setIcon(QMessageBox::Warning);
-  box.setWindowTitle(QStringLiteral("烧录 F280025C 固件"));
-  box.setText(QStringLiteral("<b>将擦除并重写 F280025C 现有固件</b>"));
-  box.setInformativeText(QStringLiteral(
-      "固件：%1\n\n"
-      "GUI 不会控制 MCU 电源/复位。\n"
-      "烧录完成后请按 LAUNCHXL-F280025C 的 S1 让 MCU 重新握手。")
-          .arg(firmware_path));
-  box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
-  box.setDefaultButton(QMessageBox::Cancel);
-  box.button(QMessageBox::Yes)->setText(QStringLiteral("确认烧录"));
-  box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
-  return box.exec() == QMessageBox::Yes;
+  return confirm_action(
+      this, QStringLiteral("确认烧录 F280025C 固件"),
+      QStringLiteral("擦除并重写 MCU：%1").arg(firmware_path),
+      QStringLiteral("GUI 不控制电源/复位；完成后需人工按 LAUNCHXL S1。"),
+      ConfirmSeverity::Critical);
 }
 
 void LaunchPanel::onFlashMcuClicked() {
@@ -597,6 +655,8 @@ void LaunchPanel::onFlashMcuClicked() {
       QStringLiteral("F280025C 固件 (*.out *.hex);;所有文件 (*)"));
   if (path.isEmpty()) return;
   if (!confirmFlashMcu(path)) return;
+  flash_mcu_button_->setBusy(true, QStringLiteral("烧录中"),
+                             QStringLiteral("等待 dslite 进程完成"));
   manager_.flashMcuFirmware(path);
   update_buttons();
 }
@@ -713,7 +773,7 @@ void LaunchPanel::update_buttons() {
                                manager_.externalCarlaDetected() ||
                                manager_.externalBridgeDetected());
   stop_all_button_->setToolTip(QStringLiteral(
-      "统一停止本机 CARLA/bridge 与 Orin adas-hil/adas-can；GUI 保持运行"));
+      "停止本机受管 CARLA/bridge；Orin HIL/CAN 常驻服务与外部实例保持运行"));
   // 运行配置在桥/CARLA 运行期间锁定，避免界面显示与实际运行场景不一致
   scenario_combo_->setEnabled(!bridge_busy);
 }

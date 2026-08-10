@@ -58,4 +58,20 @@ TEST(ProcessManager, ExternalBridgeDisappearanceRestoresStoppedState) {
   EXPECT_EQ(manager.bridgeState(), ProcState::Stopped);
 }
 
+TEST(ProcessManager, RejectedFlashAlwaysCompletesForUiRecovery) {
+  ProcessManager manager;
+  int completions = 0;
+  bool success = true;
+  QObject::connect(&manager, &ProcessManager::flashFinished,
+                   [&completions, &success](bool result, const QString&) {
+                     ++completions;
+                     success = result;
+                   });
+
+  manager.flashMcuFirmware(QString());
+
+  EXPECT_EQ(completions, 1);
+  EXPECT_FALSE(success);
+}
+
 }  // namespace adas::gui

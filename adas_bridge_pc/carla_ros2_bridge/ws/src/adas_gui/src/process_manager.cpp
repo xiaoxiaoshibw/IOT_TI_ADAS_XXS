@@ -628,21 +628,27 @@ void ProcessManager::stopAll() {
 
 void ProcessManager::flashMcuFirmware(const QString& firmware_path) {
   if (firmware_path.isEmpty()) {
-    emit logLine(QStringLiteral("MCU"),
-                 QStringLiteral("未指定固件路径，已跳过烧录"));
+    const QString detail = QStringLiteral("未指定固件路径，已跳过烧录");
+    emit logLine(QStringLiteral("MCU"), detail);
+    emit flashFinished(false, detail);
     return;
   }
   if (orin_.busy()) {
-    emit logLine(QStringLiteral("MCU"),
-                 QStringLiteral("Orin 命令正在跑，请等待结束再烧录"));
+    const QString detail = QStringLiteral("Orin 命令正在跑，请等待结束再烧录");
+    emit logLine(QStringLiteral("MCU"), detail);
+    emit flashFinished(false, detail);
     return;
   }
   emit stackProgress(QStringLiteral("mcu_flash"),
                      QStringLiteral("烧录 F280025C：%1").arg(firmware_path));
   // 烧录是本地操作（不需 ssh）；host/user/password 留空，OrinStackManager 会
   // 自动走 build_flash_argv 分支。
-  orin_.start(OrinStackManager::Op::FlashMcu, QString(), QString(), QString(),
-              firmware_path, 0);
+  const int result = orin_.start(OrinStackManager::Op::FlashMcu, QString(),
+                                 QString(), QString(), firmware_path, 0);
+  if (result != 0) {
+    emit flashFinished(false,
+                       QStringLiteral("烧录进程启动被拒绝：rc=%1").arg(result));
+  }
 }
 
 void ProcessManager::stopBridge() {
@@ -851,7 +857,14 @@ void ProcessManager::on_orin_command_finished(OrinStackManager::Op op,
   // OrinStackManager 状态清掉，否则它的 busy_ 仍为 true，下次 start 会
   // 立即返回 -1（被拒）。这里无脑转发：OrinStackManager 自身会处理
   // finished 信号并 set_busy(false)。
-  if (!full_stack_running()) return;  // 非全流程触发的命令（如 Flash）忽略
+  if (op == OrinStackManager::Op::FlashMcu) {
+    emit flashFinished(exit_code == 0, detail.isEmpty()
+        ? (exit_code == 0 ? QStringLiteral("MCU 固件烧录完成")
+                          : QStringLiteral("MCU 固件烧录失败：exit=%1").arg(exit_code))
+        : detail);
+    return;
+  }
+  if (!full_stack_running()) return;
   if (exit_code != 0) {
     const char* op_name = "?";
     switch (op) {
