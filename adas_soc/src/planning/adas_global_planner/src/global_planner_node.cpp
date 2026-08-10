@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <iomanip>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include "adas_global_planner/global_planner_core.hpp"
 #include "adas_global_planner/route_validator.hpp"
@@ -43,6 +45,20 @@ std::string route_id(const std::string& map_hash, const rclcpp::Time& stamp) {
   std::ostringstream value;
   value << map_hash.substr(0, 8) << '-' << stamp.nanoseconds();
   return value.str();
+}
+
+bool is_uuid_v4(const std::string& value) {
+  if (value.size() != 36U || value[8] != '-' || value[13] != '-' ||
+      value[18] != '-' || value[23] != '-' || value[14] != '4') {
+    return false;
+  }
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (i == 8U || i == 13U || i == 18U || i == 23U) continue;
+    const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(value[i])));
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    if (i == 19U && c != '8' && c != '9' && c != 'a' && c != 'b') return false;
+  }
+  return true;
 }
 
 double point_segment_distance(double px, double py, const MapPoint& a, const MapPoint& b) {
@@ -160,11 +176,24 @@ class GlobalPlannerNode : public rclcpp::Node {
         [this](const std::shared_ptr<adas_msgs::srv::SetNavigationGoal::Request> request,
                std::shared_ptr<adas_msgs::srv::SetNavigationGoal::Response> response) {
           response->request_id = request->request_id;
-          if (request->request_id.empty() || request->goal.header.frame_id.empty() ||
+          const auto cached = goal_responses_.find(request->request_id);
+          if (cached != goal_responses_.end()) {
+            *response = cached->second;
+            return;
+          }
+          if (!is_uuid_v4(request->request_id) || request->goal.header.frame_id.empty() ||
               !std::isfinite(request->goal.pose.position.x) ||
               !std::isfinite(request->goal.pose.position.y)) {
             response->accepted = false;
-            response->message = "invalid request_id, frame, or goal coordinates";
+            response->message = "request_id must be UUID v4; frame/goal must be valid";
+            goal_responses_[request->request_id] = *response;
+            return;
+          }
+          if (goal_ && !arrived_) {
+            response->accepted = false;
+            response->goal_id = goal_id_;
+            response->message = "navigation busy with active goal";
+            goal_responses_[request->request_id] = *response;
             return;
           }
           goal_ = std::make_shared<geometry_msgs::msg::PoseStamped>(request->goal);
@@ -173,6 +202,7 @@ class GlobalPlannerNode : public rclcpp::Node {
           response->accepted = true;
           response->goal_id = goal_id_;
           response->message = "goal accepted";
+          goal_responses_[request->request_id] = *response;
           plan_route();
         });
     srv_cancel_ = create_service<adas_msgs::srv::CancelNavigation>(
@@ -180,11 +210,17 @@ class GlobalPlannerNode : public rclcpp::Node {
         [this](const std::shared_ptr<adas_msgs::srv::CancelNavigation::Request> request,
                std::shared_ptr<adas_msgs::srv::CancelNavigation::Response> response) {
           response->request_id = request->request_id;
+          const auto cached = cancel_responses_.find(request->request_id);
+          if (cached != cancel_responses_.end()) {
+            *response = cached->second;
+            return;
+          }
           response->goal_id = goal_id_;
-          if (request->request_id.empty() ||
+          if (!is_uuid_v4(request->request_id) ||
               (!request->goal_id.empty() && request->goal_id != goal_id_)) {
             response->accepted = false;
-            response->message = "invalid request_id or goal_id mismatch";
+            response->message = "request_id must be UUID v4 or goal_id mismatch";
+            cancel_responses_[request->request_id] = *response;
             return;
           }
           goal_.reset();
@@ -193,6 +229,7 @@ class GlobalPlannerNode : public rclcpp::Node {
                          "navigation canceled");
           response->accepted = true;
           response->message = "cancel accepted";
+          cancel_responses_[request->request_id] = *response;
         });
 
     pub_route_ = create_publisher<nav_msgs::msg::Path>(
@@ -202,6 +239,11 @@ class GlobalPlannerNode : public rclcpp::Node {
     deviation_timer_ = create_wall_timer(
         std::chrono::duration<double>(1.0 / deviation_check_rate_hz_),
         std::bind(&GlobalPlannerNode::check_route_deviation, this));
+    status_timer_ = create_wall_timer(std::chrono::milliseconds(500), [this]() {
+      if (!last_status_valid_) return;
+      last_status_.header.stamp = now();
+      pub_status_->publish(last_status_);
+    });
     publish_status(adas_msgs::msg::NavigationStatus::WAITING_FOR_MAP, "waiting for lane graph");
   }
 
@@ -432,6 +474,8 @@ class GlobalPlannerNode : public rclcpp::Node {
     status.route_id = active_route_id_;
     status.detail = detail;
     status.remaining_distance_m = static_cast<float>(remaining_distance_m_);
+    last_status_ = status;
+    last_status_valid_ = true;
     if (pub_status_) pub_status_->publish(status);
   }
 
@@ -466,6 +510,13 @@ class GlobalPlannerNode : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_;
   rclcpp::Publisher<adas_msgs::msg::NavigationStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr deviation_timer_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
+  adas_msgs::msg::NavigationStatus last_status_;
+  bool last_status_valid_{false};
+  std::unordered_map<std::string, adas_msgs::srv::SetNavigationGoal::Response>
+      goal_responses_;
+  std::unordered_map<std::string, adas_msgs::srv::CancelNavigation::Response>
+      cancel_responses_;
 };
 
 }  // namespace adas::planning
