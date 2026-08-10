@@ -31,7 +31,6 @@ PC (CARLA sim + ROS2 Jazzy bridge + Qt6 GUI)
 | `adas_mcu/` | CCS 21.0 + CGT 25.11.1 LTS + C2000Ware 26.01; host tests via GCC | TMS320F280025C bare-metal C firmware — CAN v3 protocol, safety state machine, 1 kHz actuator loop |
 | `adas_bridge_pc/` | colcon + ROS2 Jazzy | CARLA↔SoC Python bridge (`adas_carla_bridge`) + Qt6 safety monitor GUI (`adas_gui`) |
 | `adas_iot/` | Python | MQTT bridge, Flask/SocketIO dashboard, WeChat mini-program, webhook/email alerts |
-| `can_bench/` | per-platform | CAN round-trip latency benchmark (ESP32 responder / F280025C / PC) |
 | `adas_tools/` | Python / Shell / MATLAB | HIL preflight gate, hil_logger, MATLAB plotting |
 | `scripts/` | Bash | Top-level helpers (notably `run_sil_fallback.sh`) |
 | `adas_bridge_pc/carla_ros2_bridge/Orin同步/` | — | Mirror of source packages deployed to Orin's `~/adas/adas_soc_ws/` |
@@ -161,15 +160,6 @@ Common usage:
 - `miniapp/` — WeChat mini-program (WXML/WXSS/JS)
 - `config.yaml` — broker / endpoints / notifier config
 
-## CAN benchmark (`can_bench/`)
-
-Round-trip latency benchmarks across three responder types:
-- `pc/bench.py` — PC master
-- `esp32_responder/` — ESP32 firmware (`CMakeLists.txt` + `main/`)
-- `f280025c_bench/bench_main.c` — MCU-side firmware
-
-Each platform's results land in its own directory; aggregate plotting lives in `pc/plot_*.py`.
-
 ## HIL tooling (`adas_tools/`)
 
 - `harness/hil_preflight_before_mcu.sh` — operation-side gate before powering/resetting the MCU. Strict exit codes 0..7; never outputs PASS when conditions aren't met; never uses fixed sleeps.
@@ -274,12 +264,6 @@ pip install -r requirements.txt
 python3 mqtt_bridge.py
 python3 dashboard/app.py
 bash test_dashboard.sh
-```
-
-### CAN benchmark
-```bash
-cd can_bench/pc
-python3 bench.py
 ```
 
 ### HIL preflight (before MCU power-up)
