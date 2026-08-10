@@ -71,11 +71,14 @@ SCENARIOS = {
         'pedestrian': {
             'ahead_m': 90.0,
             'start_lateral_m': -6.0,
+            # 对称穿越到对侧车道；JSON 直读时可显式覆写。
+            # SIL overlay 同样按 -start_lateral_m 推导（scenario_overlay.py:153-154）。
+            'end_lateral_m': 6.0,
             'trigger_ego_gap_m': 40.0,
             'speed_mps': 1.5,
         },
         'notes': [
-            '自车逼近 40m 时行人从右侧横穿',
+            '自车逼近 40m 时行人从右侧横穿到对侧车道',
             '观察点：object_tracker 上报 CLASS_PEDESTRIAN，AEB 紧急制动',
         ],
     },
@@ -184,13 +187,19 @@ def legacy_to_scripted(scenario_id, config=None):
     pedestrian = config.get('pedestrian')
     if pedestrian:
         speed = float(pedestrian['speed_mps'])
+        start_lateral = float(pedestrian['start_lateral_m'])
+        end_lateral = pedestrian.get('end_lateral_m')
+        if end_lateral is None:
+            # 对称穿越：默认从右路肩 (-start) 走到对侧车道 (+start)
+            end_lateral = -start_lateral
         actors.append({
             'id': 2,
             'classification': 'pedestrian',
             'legacy_role': 'pedestrian',
             'lane': 'crossing',
             'initial_station_m': float(pedestrian['ahead_m']),
-            'initial_lateral_m': float(pedestrian['start_lateral_m']),
+            'initial_lateral_m': start_lateral,
+            'end_lateral_m': float(end_lateral),
             'initial_speed_mps': speed,
             'accel_limit_mps2': 3.0,
             'speed_profile': [[0.0, speed]],

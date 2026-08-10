@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "aeb_pedestrian",
+  "name": "AEB 横穿行人",
+  "town": "Town04",
+  "supported_backends": ["carla", "sil"],
+  "seed": 0,
+  "duration_s": 60.0,
+  "ego": { "spawn_index": 88 },
+  "actors": [
+    {
+      "id": 2,
+      "classification": "pedestrian",
+      "legacy_role": "pedestrian",
+      "lane": "crossing",
+      "initial_station_m": 90.0,
+      "initial_lateral_m": -6.0,
+      "end_lateral_m": 6.0,
+      "initial_speed_mps": 1.5,
+      "accel_limit_mps2": 3.0,
+      "speed_profile": [[0.0, 1.5]],
+      "trigger_ego_gap_m": 40.0,
+      "crossing_speed_mps": 1.5
+    }
+  ],
+  "notes": [
+    "自车逼近 40m 时行人从右侧横穿到对侧车道",
+    "观察点：object_tracker 上报 CLASS_PEDESTRIAN，AEB 紧急制动"
+  ]
+}

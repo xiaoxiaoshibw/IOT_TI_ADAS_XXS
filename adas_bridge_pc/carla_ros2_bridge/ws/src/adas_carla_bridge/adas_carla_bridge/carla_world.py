@@ -696,22 +696,62 @@ class CarlaWorld:
         return _clamp(1.2 * he - 0.15 * lat, -0.5, 0.5)
 
     def _drive_pedestrian(self, scripted):
-        """自车逼近到触发距离后，行人垂直横穿车道（AEB 场景）。"""
+        """自车逼近到触发距离后，行人垂直横穿车道（AEB 场景）。
+
+        坐标系约定（与 scenario JSON / sim_vehicle_core 对齐）：
+          * JSON ``initial_lateral_m`` / ``end_lateral_m``：左正、右负（右手系）
+          * CARLA 自车坐标系：x 前、y 右（UE4 左手系）
+          * 车道左法向（CARLA 世界系）：( sin(yaw), -cos(yaw) )
+            + yaw=0 时 = (0, -1) = CARLA -y = 车体左侧 ✓
+          * spawn 时 lateral_left 取反传给 _offset_transform_carla（CARLA 右正）
+            + JSON lateral=-6（右路肩）→ CARLA 偏移 +6 = +y = 右侧 ✓
+          * 本函数：direction=+1 → 沿车道左法向走 = 朝自车所在侧横穿
+
+        方向判定（修复）：JSON 起点 lateral 与终点 lateral 谁更大决定 direction。
+        end_lateral_m 默认 ``-initial_lateral_m``（对称穿越到对侧车道），
+        与 SIL overlay（scenario_overlay.py:153-154）一致。
+        """
         config = scripted.config
+        ref_tf = scripted.reference_waypoint.transform
+        yaw = math.radians(float(ref_tf.rotation.yaw))
+
+        # ── 1) 触发检测 ──────────────────────────────────────────
         if not scripted.triggered:
             gap = _xy_distance(self.ego.get_transform().location,
                                scripted.actor.get_transform().location)
             if gap > float(config.get('trigger_ego_gap_m', 35.0)):
                 return
             scripted.triggered = True
-        yaw = math.radians(float(
-            scripted.reference_waypoint.transform.rotation.yaw))
-        # start_lateral_m 左正（右手系）：从左侧出发向右横穿，反之向左
-        direction = -1.0 if float(config.get(
-            'initial_lateral_m', -6.0)) < 0.0 else 1.0
-        # CARLA 系：车道左法向 = (sin(yaw), -cos(yaw))
-        vx = math.sin(yaw) * direction
-        vy = -math.cos(yaw) * direction
+
+        initial_lateral_m = float(config.get('initial_lateral_m', -6.0))
+        end_lateral_m = config.get('end_lateral_m')
+        if end_lateral_m is None:
+            end_lateral_m = -initial_lateral_m   # 默认对称穿越
+        else:
+            end_lateral_m = float(end_lateral_m)
+
+        # ── 2) 终点检测（actor 已在 JSON 横向系下越过 end_lateral_m） ──
+        actor_loc = scripted.actor.get_transform().location
+        # JSON 左正 ↔ CARLA 偏移符号相反：lateral = +dx*sin(yaw) - dy*cos(yaw)
+        current_lateral = (
+            (float(actor_loc.x) - float(ref_tf.location.x)) * math.sin(yaw)
+            - (float(actor_loc.y) - float(ref_tf.location.y)) * math.cos(yaw))
+        direction_sign = (
+            1.0 if end_lateral_m > initial_lateral_m else -1.0)
+        traveled = (current_lateral - initial_lateral_m) * direction_sign
+        total_distance = abs(end_lateral_m - initial_lateral_m)
+
+        if scripted.triggered and total_distance > 1e-3 and traveled >= total_distance:
+            # 已到达或越过对侧车道
+            scripted.actor.apply_control(self.carla.WalkerControl(
+                direction=self.carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                speed=0.0, jump=False))
+            return
+
+        # ── 3) 横穿运动：沿车道左法向（CARLA 系） ──────────────────
+        # direction_sign = +1 → velocity 沿 (sin(yaw), -cos(yaw)) = 左法向
+        vx = math.sin(yaw) * direction_sign
+        vy = -math.cos(yaw) * direction_sign
         scripted.actor.apply_control(self.carla.WalkerControl(
             direction=self.carla.Vector3D(x=float(vx), y=float(vy), z=0.0),
             speed=float(config.get('crossing_speed_mps', 1.5)),
