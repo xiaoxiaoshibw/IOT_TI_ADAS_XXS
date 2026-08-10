@@ -32,6 +32,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from datetime import datetime
 
 
@@ -201,13 +202,16 @@ class CarlaBridgeNode(Node):
         parameter = 0
         accepted = False
         detail = ''
+        response = None
+        timed_out = False
         try:
             payload = json.loads(msg.data)
             request_id = str(payload.get('request_id', ''))
             command = int(payload.get('cmd', -1))
             parameter = int(payload.get('param', 0))
-            if not request_id:
-                raise ValueError('missing request_id')
+            parsed_id = uuid.UUID(request_id)
+            if parsed_id.version != 4 or str(parsed_id) != request_id.lower():
+                raise ValueError('request_id must be canonical UUID v4')
             if self._can_receiver is None:
                 raise RuntimeError('CAN transport is not active for this bridge')
             self._fault_sequence = (self._fault_sequence + 1) & 0xFF
@@ -219,10 +223,16 @@ class CarlaBridgeNode(Node):
                          response['sequence']))
         except (ValueError, TypeError, RuntimeError, OSError) as error:
             detail = str(error)
+            timed_out = isinstance(error, TimeoutError)
         ack = String()
         ack.data = json.dumps({
             'request_id': request_id, 'cmd': command,
             'accepted': accepted, 'detail': detail,
+            'timed_out': timed_out,
+            'can_id': '0x302' if response is not None else '',
+            'dlc': 8 if response is not None else 0,
+            'crc_valid': response is not None,
+            'param': parameter,
             'source': 'adas_carla_bridge'}, separators=(',', ':'))
         self.pub_fault_ack.publish(ack)
 

@@ -1,8 +1,11 @@
 import math
+import json
 from types import SimpleNamespace
+import uuid
 
 import rclpy
 from adas_msgs.msg import ActuationCommand
+from std_msgs.msg import String
 
 from adas_carla_bridge.bridge_node import CarlaBridgeNode, validate_actuation_values
 
@@ -56,6 +59,50 @@ def test_invalid_frame_latches_failsafe_until_three_valid_frames():
         recovered = node.get_actuation()
         assert not recovered['invalid_latched']
         assert recovered['throttle'] == 0.2
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_fault_ack_requires_uuid4_and_reports_can_contract():
+    class Receiver:
+        def send_fault_injection(self, command, parameter, sequence):
+            assert (command, parameter, sequence) == (3, 9, 1)
+            return {'system_state': 4, 'fault_level': 1, 'sequence': sequence}
+
+        def close(self):
+            pass
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(json.loads(message.data))
+
+    rclpy.init()
+    node = CarlaBridgeNode(SimpleNamespace(
+        stale_timeout_s=0.5, control_source='ros2', scenario='test'))
+    publisher = Publisher()
+    node.pub_fault_ack = publisher
+    node._can_receiver = Receiver()
+    try:
+        invalid = String()
+        invalid.data = json.dumps({'request_id': 'not-a-uuid', 'cmd': 3, 'param': 9})
+        node._fault_inject_cb(invalid)
+        assert not publisher.messages[-1]['accepted']
+
+        request_id = str(uuid.uuid4())
+        valid = String()
+        valid.data = json.dumps({'request_id': request_id, 'cmd': 3, 'param': 9})
+        node._fault_inject_cb(valid)
+        ack = publisher.messages[-1]
+        assert ack['accepted']
+        assert ack['request_id'] == request_id
+        assert ack['can_id'] == '0x302'
+        assert ack['dlc'] == 8
+        assert ack['crc_valid']
+        assert ack['param'] == 9
     finally:
         node.destroy_node()
         rclpy.shutdown()

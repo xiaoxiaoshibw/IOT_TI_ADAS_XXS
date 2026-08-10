@@ -106,6 +106,21 @@ SCENARIOS = {
             '观察点：长跟时距、无误加速、目标车速收敛到 11 km/h',
         ],
     },
+    'overtake': {
+        'name': '慢车超越决策',
+        'duration': 90.0,
+        'spawn_index': 30,
+        'lead': {
+            'gap0': 30.0,
+            'profile': [(0.0, 3.0)],
+            'hard_brake': None,
+        },
+        'pedestrian': None,
+        'notes': [
+            '前方慢车保持 3 m/s，触发跟车与超越决策链路',
+            '观察点：行为规划进入超越判定，车辆轨迹与执行反馈保持闭环',
+        ],
+    },
     'aeb_stationary': {
         'name': 'AEB 静止障碍物',
         'duration': 30.0,
@@ -132,5 +147,5 @@ SCENARIOS = {
     },
 }
 
-ORDER = ['lka', 'acc', 'acc_stop_and_go', 'acc_slow_truck',
+ORDER = ['lka', 'acc', 'acc_stop_and_go', 'acc_slow_truck', 'overtake',
          'aeb', 'aeb_stationary', 'aeb_pedestrian', 'free']
