@@ -5,6 +5,7 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QGuiApplication>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPaintEvent>
@@ -47,6 +48,69 @@ QColor led_color(LedState state) {
 }
 
 }  // namespace
+
+bool confirm_action(QWidget* parent, const QString& title,
+                    const QString& action, const QString& impact,
+                    ConfirmSeverity severity) {
+  QMessageBox box(parent);
+  box.setWindowTitle(title);
+  box.setText(QStringLiteral("<b>%1</b>").arg(action.toHtmlEscaped()));
+  box.setInformativeText(impact);
+  box.setIcon(severity == ConfirmSeverity::Critical ? QMessageBox::Critical
+                                                     : QMessageBox::Warning);
+  box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
+  box.setDefaultButton(QMessageBox::Cancel);
+  box.button(QMessageBox::Yes)->setText(QStringLiteral("确认%1").arg(action));
+  box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
+  if (severity == ConfirmSeverity::Danger ||
+      severity == ConfirmSeverity::Critical) {
+    box.button(QMessageBox::Yes)->setObjectName(QStringLiteral("dangerButton"));
+  }
+  return box.exec() == QMessageBox::Yes;
+}
+
+BusyButton::BusyButton(QWidget* parent) : QPushButton(parent) { initialise(); }
+
+BusyButton::BusyButton(const QString& text, QWidget* parent)
+    : QPushButton(text, parent), idle_text_(text) {
+  initialise();
+}
+
+void BusyButton::initialise() {
+  animation_timer_.setInterval(250);
+  connect(&animation_timer_, &QTimer::timeout, this, [this]() {
+    animation_frame_ = (animation_frame_ + 1) % 4;
+    updateBusyText();
+  });
+}
+
+void BusyButton::setBusy(bool busy, const QString& text,
+                         const QString& reason) {
+  if (busy_ == busy && text.isEmpty()) return;
+  if (busy) {
+    if (!busy_) {
+      idle_text_ = QPushButton::text();
+      idle_tooltip_ = toolTip();
+    }
+    busy_text_ = text.isEmpty() ? QStringLiteral("处理中") : text;
+    animation_frame_ = 0;
+    busy_ = true;
+    setEnabled(false);
+    if (!reason.isEmpty()) setToolTip(reason);
+    animation_timer_.start();
+    updateBusyText();
+  } else {
+    busy_ = false;
+    animation_timer_.stop();
+    setText(idle_text_);
+    setToolTip(idle_tooltip_);
+    setEnabled(true);
+  }
+}
+
+void BusyButton::updateBusyText() {
+  setText(busy_text_ + QString(animation_frame_, QChar('.')));
+}
 
 // ============================ StatusBanner ====================================
 StatusBanner::StatusBanner(QWidget* parent) : QLabel(parent) {

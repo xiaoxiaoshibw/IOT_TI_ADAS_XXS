@@ -32,6 +32,7 @@ else()
     src/realtime_plot.cpp
     src/fault_inject_panel.cpp
     src/widgets.cpp
+    src/request_tracker.cpp
     src/icons.cpp
     src/telemetry_freshness.cpp
     src/secure_settings.cpp
@@ -67,6 +68,11 @@ if(BUILD_TESTING)
       src/telemetry_freshness.cpp)
     target_include_directories(test_telemetry_freshness PRIVATE src)
     target_link_libraries(test_telemetry_freshness Qt6::Core)
+    ament_add_gtest(test_request_tracker
+      test/test_request_tracker.cpp
+      src/request_tracker.cpp)
+    target_include_directories(test_request_tracker PRIVATE src)
+    target_link_libraries(test_request_tracker Qt6::Core)
     ament_add_gtest(test_dds_env test/test_dds_env.cpp)
     target_include_directories(test_dds_env PRIVATE src)
     target_link_libraries(test_dds_env Qt6::Core)

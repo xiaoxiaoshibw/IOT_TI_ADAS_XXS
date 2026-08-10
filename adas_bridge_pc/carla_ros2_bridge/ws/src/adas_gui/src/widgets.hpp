@@ -15,13 +15,48 @@
 
 #include <QFrame>
 #include <QLabel>
+#include <QPushButton>
 #include <QString>
 #include <QStringView>
+#include <QTimer>
 
 namespace adas::gui {
 
 // 状态分级枚举（与 theme::kOk/kWarn/kDanger/kStale 语义对应）。
 enum class LedState { Ok, Warn, Danger, Stale };
+
+enum class ConfirmSeverity { Normal, Warning, Danger, Critical };
+
+// Safety-sensitive operations use one dialog contract: cancel is always the
+// default and pressing Escape never confirms the operation.
+bool confirm_action(QWidget* parent, const QString& title,
+                    const QString& action, const QString& impact,
+                    ConfirmSeverity severity = ConfirmSeverity::Warning);
+
+// Push button with an immediate, recoverable busy state. Business code still
+// owns the backend guard; this class only makes the lock visible and prevents
+// a second UI click from entering the slot.
+class BusyButton : public QPushButton {
+  Q_OBJECT
+ public:
+  explicit BusyButton(QWidget* parent = nullptr);
+  explicit BusyButton(const QString& text, QWidget* parent = nullptr);
+
+  bool isBusy() const { return busy_; }
+  void setBusy(bool busy, const QString& text = QString(),
+               const QString& reason = QString());
+
+ private:
+  void initialise();
+  void updateBusyText();
+
+  QTimer animation_timer_;
+  QString idle_text_;
+  QString busy_text_;
+  QString idle_tooltip_;
+  int animation_frame_{0};
+  bool busy_{false};
+};
 
 class StatusBanner : public QLabel {
   Q_OBJECT
