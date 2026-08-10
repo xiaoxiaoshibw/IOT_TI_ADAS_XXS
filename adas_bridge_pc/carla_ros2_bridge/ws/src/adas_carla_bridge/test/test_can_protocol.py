@@ -210,3 +210,18 @@ def test_canalyst_fault_request_waits_for_matching_mcu_ack():
         assert bus.sent[0].arbitration_id == CANID_FAULT_INJECT
     finally:
         receiver.close()
+
+
+def test_canalyst_fault_request_times_out_without_0x302():
+    receiver = CanalystReceiver(
+        bus_factory=lambda **kwargs: FakeCanalystBus([], **kwargs))
+    started = time.monotonic()
+    try:
+        try:
+            receiver.send_fault_injection(1, 0, 23)
+            assert False, 'missing 0x302 must not be accepted'
+        except TimeoutError:
+            pass
+        assert time.monotonic() - started >= 0.9
+    finally:
+        receiver.close()
