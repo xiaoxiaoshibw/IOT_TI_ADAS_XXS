@@ -24,6 +24,7 @@ else()
     src/main.cpp
     src/main_window.cpp
     src/map_view.cpp
+    src/scenario_run_panel.cpp
     src/launch_panel.cpp
     src/process_manager.cpp
     src/ros_bridge.cpp
@@ -57,6 +58,12 @@ if(BUILD_TESTING)
     ament_add_gtest(test_map_camera test/test_map_camera.cpp)
     target_include_directories(test_map_camera PRIVATE src)
     target_link_libraries(test_map_camera Qt6::Core)
+    ament_add_gtest(test_map_objects test/test_map_objects.cpp src/map_view.cpp
+      APPEND_ENV LD_PRELOAD=/lib/x86_64-linux-gnu/libpthread.so.0)
+    target_include_directories(test_map_objects PRIVATE src)
+    target_link_libraries(test_map_objects Qt6::Widgets)
+    # snap 自带的 libpthread.so.0 缺失 __libc_pthread_init，会在 Qt6 Widgets
+    # 测试启动时崩。强制使用系统 libpthread 让 colcon test 可重复运行。
     ament_add_gtest(test_lane_hit test/test_lane_hit.cpp)
     target_include_directories(test_lane_hit PRIVATE src)
     target_link_libraries(test_lane_hit Qt6::Core)
@@ -68,6 +75,16 @@ if(BUILD_TESTING)
       src/telemetry_freshness.cpp)
     target_include_directories(test_telemetry_freshness PRIVATE src)
     target_link_libraries(test_telemetry_freshness Qt6::Core)
+    ament_add_gtest(test_safety_panel
+      test/test_safety_panel.cpp
+      src/safety_panel.cpp
+      src/widgets.cpp
+      src/icons.cpp
+      src/telemetry_freshness.cpp)
+    target_include_directories(test_safety_panel PRIVATE src)
+    target_link_libraries(test_safety_panel Qt6::Widgets Qt6::Svg)
+    ament_target_dependencies(test_safety_panel
+      rclcpp adas_msgs std_msgs nav_msgs geometry_msgs)
     ament_add_gtest(test_request_tracker
       test/test_request_tracker.cpp
       src/request_tracker.cpp)
@@ -89,6 +106,9 @@ if(BUILD_TESTING)
     ament_add_gtest(test_demo_presets test/test_demo_presets.cpp)
     target_include_directories(test_demo_presets PRIVATE src)
     target_link_libraries(test_demo_presets Qt6::Core)
+    ament_add_gtest(test_scenario_workflow test/test_scenario_workflow.cpp)
+    target_include_directories(test_scenario_workflow PRIVATE src)
+    target_link_libraries(test_scenario_workflow Qt6::Core)
     ament_add_gtest(test_process_manager
       test/test_process_manager.cpp
       src/process_manager.cpp

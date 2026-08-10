@@ -6,6 +6,7 @@
 #include <QPainterPath>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -45,7 +46,35 @@ MapView::MapView(QWidget* parent) : QWidget(parent) {
   });
 }
 
+void MapView::setMapMetadata(const QString& map_id, const QString& map_hash) {
+  const bool changed = (!map_id_.isEmpty() && map_id_ != map_id) ||
+                       (!map_hash_.isEmpty() && map_hash_ != map_hash);
+  if (changed) {
+    click_timer_.stop();
+    lanes_.clear();
+    route_.clear();
+    trail_.clear();
+    objects_.clear();
+    goal_valid_ = false;
+    vehicle_valid_ = false;
+    hover_valid_ = false;
+    fitted_ = false;
+  }
+  map_id_ = map_id;
+  map_hash_ = map_hash;
+  update();
+}
+
 void MapView::setLanes(const QVector<GuiLane>& lanes, const QString& map_id) {
+  if (!map_id_.isEmpty() && map_id_ != map_id) {
+    click_timer_.stop();
+    route_.clear();
+    trail_.clear();
+    objects_.clear();
+    goal_valid_ = false;
+    hover_valid_ = false;
+    fitted_ = false;
+  }
   lanes_ = lanes;
   map_id_ = map_id;
   if (!fitted_) fitToLanes();
@@ -70,6 +99,11 @@ void MapView::setVehicle(double x, double y, double yaw_rad, bool valid) {
   update();
 }
 
+void MapView::setObjects(const QVector<GuiMapObject>& objects) {
+  objects_ = objects.mid(0, 64);
+  update();
+}
+
 void MapView::setGoal(double x, double y, bool valid) {
   goal_x_ = x;
   goal_y_ = y;
@@ -79,6 +113,7 @@ void MapView::setGoal(double x, double y, bool valid) {
 
 void MapView::setGoalSelectionEnabled(bool enabled) {
   goal_selection_enabled_ = enabled;
+  if (!enabled) click_timer_.stop();
   setCursor(enabled ? Qt::CrossCursor : Qt::ForbiddenCursor);
   setToolTip(enabled ? QString() : QStringLiteral("导航请求处理中，暂不能设置新目标"));
 }
@@ -174,6 +209,29 @@ void MapView::paintEvent(QPaintEvent*) {
       painter.setPen(QPen(QColor(theme::kLaneNormal), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     }
     painter.drawPolyline(polyline_to_screen(camera_, lane.centerline));
+
+    // LaneGraph centerline order is the legal driving direction.  A compact
+    // arrow makes adjacent opposite-direction lanes unambiguous for goal
+    // selection without turning the GUI into a duplicate CARLA scene.
+    if (lane.centerline.size() >= 2) {
+      const int segment = std::max<int>(0, static_cast<int>(lane.centerline.size() / 2) - 1);
+      const QPointF a = to_screen(camera_, lane.centerline[segment]);
+      const QPointF b = to_screen(camera_, lane.centerline[segment + 1]);
+      const double length = std::hypot(b.x() - a.x(), b.y() - a.y());
+      if (length > 5.0) {
+        const QPointF direction((b.x() - a.x()) / length,
+                                (b.y() - a.y()) / length);
+        const QPointF normal(-direction.y(), direction.x());
+        const QPointF tip = (a + b) * 0.5;
+        const QPointF arrow[3] = {
+            tip,
+            tip - direction * 7.0 + normal * 3.5,
+            tip - direction * 7.0 - normal * 3.5};
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(lane.junction ? "#d6ad43" : "#7892a8"));
+        painter.drawPolygon(arrow, 3);
+      }
+    }
   }
 
   // 行驶尾迹：渐变 alpha 暗绿（越早越淡）；下方铺在路线之下
@@ -232,6 +290,33 @@ void MapView::paintEvent(QPaintEvent*) {
     painter.drawEllipse(goal, 2.5, 2.5);
   }
 
+  // 完整目标物：按消息中的稳定 ID 绘制，图层默认关闭。车辆/卡车画有朝向的
+  // 矩形，行人画圆，避免 20~64 个目标时创建 QWidget 子项阻塞 UI。
+  if (layer_flags_ & kLayerObjects) {
+    for (const auto& object : objects_) {
+      const QPointF center = to_screen(camera_, {object.x, object.y});
+      painter.save();
+      painter.translate(center);
+      painter.rotate(-object.yaw_rad * 180.0 / M_PI);
+      QColor color = object.classification == 3 ? QColor("#ffb74d")
+                     : object.classification == 2 ? QColor("#ce93d8")
+                                                  : QColor("#64b5f6");
+      painter.setPen(QPen(color.darker(160), 1.2));
+      painter.setBrush(color);
+      if (object.classification == 3) {
+        painter.drawEllipse(QPointF(0, 0), 4.0, 4.0);
+      } else {
+        const double length_px = std::clamp(object.length_m * scale, 7.0, 22.0);
+        const double width_px = std::clamp(object.width_m * scale, 4.0, 12.0);
+        painter.drawRoundedRect(QRectF(-length_px / 2.0, -width_px / 2.0,
+                                      length_px, width_px), 2.0, 2.0);
+        painter.drawLine(QPointF(length_px / 2.0, 0),
+                         QPointF(length_px / 2.0 + 3.0, 0));
+      }
+      painter.restore();
+    }
+  }
+
   // 自车三角 + dropshadow + 朝向描边（屏幕 y 翻转）
   if (vehicle_valid_) {
     const QPointF center = to_screen(camera_, {vehicle_x_, vehicle_y_});
@@ -274,13 +359,21 @@ void MapView::paintEvent(QPaintEvent*) {
   painter.setPen(QColor(theme::kTextSecondary));
   painter.drawText(QPointF(14, height() - 22), QStringLiteral("50 m"));
   // 地图 ID chip
-  QRectF id_rect(12, 12, std::max(80.0, 8 + bar_m * 0 + 100), 22);
+  const QString hash_text = map_hash_.isEmpty()
+                                ? QString()
+                                : QStringLiteral(" · %1").arg(map_hash_.left(8));
+  const QString map_text = QStringLiteral("%1%2 · %3 lanes")
+                               .arg(map_id_, hash_text)
+                               .arg(lanes_.size());
+  const QFontMetrics metrics(painter.font());
+  QRectF id_rect(12, 12,
+                 std::max(140, metrics.horizontalAdvance(map_text) + 18), 22);
   painter.setPen(Qt::NoPen);
   painter.setBrush(QColor(theme::kMdSurfaceContainerHigh));
   painter.drawRoundedRect(id_rect, 5, 5);
   painter.setPen(QColor(theme::kTextPrimary));
   painter.drawText(id_rect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                   map_id_);
+                   map_text);
   if (follow_) {
     QRectF f_r(12, 40, 110, 22);
     painter.setPen(Qt::NoPen);

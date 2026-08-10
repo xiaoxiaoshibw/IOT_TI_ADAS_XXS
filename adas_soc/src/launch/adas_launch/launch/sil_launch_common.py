@@ -38,13 +38,15 @@ def _lifecycle_node(package, executable, name, scenario_files):
     )
 
 
-def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False,
-               include_mcu=False):
+def adas_nodes(sim_extra_params=None, scenario_overlay=None, include_sim=True,
+               include_navigation=False, include_mcu=False):
     """返回节点与事件处理器；每个节点 Active 后才配置下一个节点。
 
     sim_extra_params：场景 overlay yaml 文件名列表——追加到**所有节点**的参数表
     （每个节点只读取自己的 section），场景文件因此可以覆盖任意节点参数
     （如 acc/aeb 场景关闭 behavior 的超车）。
+    scenario_overlay：仅传给 sim_vehicle 的 ROS 原生扁平参数字典；用于
+    schema-v1 JSON，避免让 C++ SoC 节点引入 JSON 解析依赖。
     include_sim：False = 不起 sim_vehicle（CARLA/HIL 模式——感知话题与执行
     回路由外部桥提供，如 IOT_TI carla_ros2_bridge）。
     include_navigation：启动地图全局规划节点；CARLA 点到点导航模式启用。
@@ -87,6 +89,8 @@ def adas_nodes(sim_extra_params=None, include_sim=True, include_navigation=False
         sim_params = [_config('sim_vehicle.yaml')]
         for extra in scenario_files:
             sim_params.append(_config(extra))
+        if scenario_overlay:
+            sim_params.append(dict(scenario_overlay))
         actions.append(Node(
             package='adas_sim_vehicle',
             executable='sim_vehicle_node',

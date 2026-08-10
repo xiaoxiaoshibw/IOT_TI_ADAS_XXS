@@ -83,13 +83,46 @@ TEST(LaunchConfig, BridgeArgumentsSocketcanAddsInterface) {
 }
 
 TEST(LaunchConfig, KnownListsMatchBridgeContract) {
-  // 与 scenarios.py ORDER / bridge_node.py --control-source 保持一致
-  EXPECT_EQ(adas::gui::known_scenarios(),
-            (QStringList{"lka", "acc", "acc_stop_and_go", "acc_slow_truck",
-                         "overtake", "aeb", "aeb_stationary",
-                         "aeb_pedestrian", "free"}));
+  // legacy 场景保持不丢；仓库 catalog 可追加密集场景。
+  const QStringList scenarios = adas::gui::known_scenarios();
+  for (const auto& legacy : adas::gui::legacy_scenarios()) {
+    EXPECT_TRUE(scenarios.contains(legacy));
+  }
   EXPECT_EQ(adas::gui::known_control_sources(),
             (QStringList{"ros2", "can", "can_cpp"}));
+  EXPECT_EQ(adas::gui::known_backends(), (QStringList{"carla_local_soc", "mil"}));
+}
+
+TEST(LaunchConfig, CatalogLoadsDenseScenarioAndAbsoluteFile) {
+  const QString root = adas::gui::find_repo_root();
+  ASSERT_FALSE(root.isEmpty());
+  const auto entry = adas::gui::scenario_catalog_entry("dense_overtake_v1", root);
+  EXPECT_EQ(entry.expected_actor_count, 20);
+  EXPECT_TRUE(QFileInfo(entry.file).isAbsolute());
+  EXPECT_TRUE(QFileInfo::exists(entry.file));
+}
+
+TEST(LaunchConfig, ScenarioFileBridgeArgumentsAreExplicit) {
+  LaunchConfig config;
+  config.scenario_file = "/repo/scenarios/dense_overtake_v1.json";
+  config.seed = 7;
+  config.expected_actor_count = 20;
+  const QStringList args = adas::gui::bridge_arguments(config);
+  EXPECT_TRUE(args.contains("--scenario-file"));
+  EXPECT_TRUE(args.contains("--seed"));
+  EXPECT_TRUE(args.contains("--expected-actor-count"));
+  EXPECT_FALSE(args.contains("--scenario"));
+}
+
+TEST(LaunchConfig, LocalThreeMachineNeverRecursivelyStartsGui) {
+  LaunchConfig config;
+  config.scenario_file = "/repo/scenarios/dense_overtake_v1.json";
+  config.seed = 0;
+  const QStringList args = adas::gui::local_three_machine_arguments(config);
+  EXPECT_EQ(args, (QStringList{"--scenario-file", config.scenario_file,
+                               "--seed", "0"}));
+  EXPECT_FALSE(args.contains("--gui"));
+  EXPECT_FALSE(args.contains("--gui-offscreen"));
 }
 
 TEST(LaunchConfig, OrinHostUserDefaultsMatchKnownHarness) {

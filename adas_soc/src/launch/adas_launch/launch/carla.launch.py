@@ -17,7 +17,42 @@ sys.path.insert(0, os.path.dirname(__file__))
 from sil_launch_common import adas_nodes  # noqa: E402
 
 from launch import LaunchDescription  # noqa: E402
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction  # noqa: E402
+from launch.substitutions import LaunchConfiguration  # noqa: E402
+
+
+def scenario_parameter_files(scenario_id):
+    """Return the SoC behavior overlay for a catalog scenario.
+
+    CARLA owns the actors, but the control stack still has to receive the same
+    scenario semantics.  In particular ACC/AEB must disable overtaking while
+    overtake scenarios keep it enabled.
+    """
+    if scenario_id in {'acc', 'acc_stop_and_go', 'acc_slow_truck'}:
+        return ['acc_scenario.yaml']
+    if scenario_id in {'aeb', 'aeb_stationary', 'aeb_pedestrian'}:
+        return ['aeb_scenario.yaml']
+    if scenario_id in {'overtake', 'dense_overtake_v1'}:
+        return ['overtake_scenario.yaml']
+    return []
+
+
+def _setup(context):
+    scenario_id = LaunchConfiguration('scenario_id').perform(context).strip()
+    overlays = scenario_parameter_files(scenario_id)
+    overlay_text = ','.join(overlays) if overlays else 'baseline'
+    return [
+        LogInfo(msg='[scenario] CARLA SoC profile: %s -> %s' %
+                (scenario_id, overlay_text)),
+        *adas_nodes(sim_extra_params=overlays, include_sim=False,
+                    include_navigation=True),
+    ]
 
 
 def generate_launch_description():
-    return LaunchDescription(adas_nodes(include_sim=False, include_navigation=True))
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'scenario_id', default_value='free',
+            description='Catalog scenario whose behavior policy is applied'),
+        OpaqueFunction(function=_setup),
+    ])

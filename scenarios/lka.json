@@ -1,0 +1,1 @@
+{"schema_version":1,"id":"lka","name":"LKA 车道保持","town":"Town04","supported_backends":["carla","sil"],"seed":0,"duration_s":90.0,"ego":{"spawn_index":30},"actors":[],"notes":["无前车，自车沿高速车道巡航","观察点：弯道曲率前馈 + 横向误差修正，lateral_offset 有界"]}

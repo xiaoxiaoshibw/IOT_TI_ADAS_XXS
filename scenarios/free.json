@@ -1,0 +1,1 @@
+{"schema_version":1,"id":"free","name":"自由巡航（无脚本演员）","town":"Town04","supported_backends":["carla","sil"],"seed":0,"duration_s":0.0,"ego":{"spawn_index":30},"actors":[],"notes":["长跑/调试用，Ctrl-C 结束"]}

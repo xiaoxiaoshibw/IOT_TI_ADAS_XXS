@@ -3,8 +3,12 @@
 
 #include <set>
 
+#include <QFile>
+#include <QJsonDocument>
+
 #include "demo_presets.hpp"
 #include "launch_config.hpp"
+#include "scenario_workflow.hpp"
 
 namespace {
 
@@ -37,6 +41,60 @@ TEST(DemoPresets, LabelsAreUnique) {
     EXPECT_TRUE(seen.insert(p.label).second)
         << "duplicate preset label: " << p.label.toStdString();
   }
+}
+
+TEST(DemoPresets, CatalogPresetAndWorkflowCoverSameTenScenarios) {
+  const auto catalog = adas::gui::load_scenario_catalog();
+  const auto presets = demo_presets();
+  const auto workflow_ids = adas::gui::scenario_workflow_ids();
+  ASSERT_EQ(catalog.size(), 10);
+  ASSERT_EQ(presets.size(), 10U);
+  ASSERT_EQ(workflow_ids.size(), 10);
+
+  QStringList catalog_ids;
+  QStringList preset_ids;
+  for (const auto& entry : catalog) catalog_ids << entry.id;
+  for (const auto& preset : presets) preset_ids << preset.scenario;
+
+  EXPECT_EQ(preset_ids, catalog_ids);
+  EXPECT_EQ(workflow_ids, catalog_ids);
+  std::set<QString> unique_ids(workflow_ids.cbegin(), workflow_ids.cend());
+  EXPECT_EQ(unique_ids.size(), 10U);
+}
+
+TEST(DemoPresets, EveryAutomaticWorkflowRequiresNavigationDrivingEvidence) {
+  using adas::gui::ScenarioEvidenceKey;
+  for (const auto& profile : adas::gui::scenario_workflow_profiles()) {
+    bool requires_driving_evidence = false;
+    for (const auto& requirement : profile.requirements) {
+      if (requirement.key == ScenarioEvidenceKey::NavigationDriving) {
+        requires_driving_evidence = true;
+        break;
+      }
+    }
+    if (profile.requires_navigation) {
+      EXPECT_TRUE(requires_driving_evidence)
+          << profile.id.toStdString()
+          << " enables automatic navigation without DRIVING evidence";
+    } else {
+      EXPECT_FALSE(requires_driving_evidence)
+          << profile.id.toStdString()
+          << " must remain a manual-navigation workflow";
+    }
+  }
+}
+
+TEST(DemoPresets, SlowTruckUsesDeterministicCarlaTruckBlueprint) {
+  const auto entry = adas::gui::scenario_catalog_entry("acc_slow_truck");
+  QFile file(entry.file);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+  ASSERT_TRUE(document.isObject());
+  const QJsonArray actors =
+      document.object().value(QStringLiteral("actors")).toArray();
+  ASSERT_EQ(actors.size(), 1);
+  EXPECT_EQ(actors.at(0).toObject().value(QStringLiteral("blueprint")).toString(),
+            QStringLiteral("vehicle.carlamotors.carlacola"));
 }
 
 }  // namespace

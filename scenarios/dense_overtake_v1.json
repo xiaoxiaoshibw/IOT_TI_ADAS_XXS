@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "dense_overtake_v1",
+  "name": "固定大车流超越 v1",
+  "town": "Town04",
+  "supported_backends": ["carla", "sil"],
+  "seed": 0,
+  "duration_s": 60.0,
+  "ego": {"spawn_index": 30},
+  "actors": [
+    {"id":1001,"classification":"vehicle","lane":"ego","initial_station_m":30.0,"initial_lateral_m":0.0,"initial_speed_mps":4.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,4.0],[25.0,6.0]]},
+    {"id":1002,"classification":"vehicle","lane":"ego","initial_station_m":72.0,"initial_lateral_m":0.0,"initial_speed_mps":8.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,8.0]]},
+    {"id":1003,"classification":"vehicle","lane":"ego","initial_station_m":114.0,"initial_lateral_m":0.0,"initial_speed_mps":10.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,10.0],[35.0,7.0]]},
+    {"id":1004,"classification":"vehicle","lane":"ego","initial_station_m":156.0,"initial_lateral_m":0.0,"initial_speed_mps":7.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,7.0]]},
+    {"id":1005,"classification":"vehicle","lane":"ego","initial_station_m":198.0,"initial_lateral_m":0.0,"initial_speed_mps":9.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,9.0]]},
+    {"id":1006,"classification":"vehicle","lane":"ego","initial_station_m":-45.0,"initial_lateral_m":0.0,"initial_speed_mps":11.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,11.0]]},
+    {"id":1007,"classification":"vehicle","lane":"left","initial_station_m":10.0,"initial_lateral_m":3.7,"initial_speed_mps":10.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,10.0]]},
+    {"id":1008,"classification":"vehicle","lane":"left","initial_station_m":52.0,"initial_lateral_m":3.7,"initial_speed_mps":12.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,12.0]]},
+    {"id":1009,"classification":"vehicle","lane":"left","initial_station_m":94.0,"initial_lateral_m":3.7,"initial_speed_mps":9.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,9.0],[30.0,11.0]]},
+    {"id":1010,"classification":"vehicle","lane":"left","initial_station_m":136.0,"initial_lateral_m":3.7,"initial_speed_mps":11.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,11.0]]},
+    {"id":1011,"classification":"vehicle","lane":"left","initial_station_m":178.0,"initial_lateral_m":3.7,"initial_speed_mps":8.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,8.0]]},
+    {"id":1012,"classification":"vehicle","lane":"left","initial_station_m":220.0,"initial_lateral_m":3.7,"initial_speed_mps":12.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,12.0]]},
+    {"id":1013,"classification":"vehicle","lane":"left","initial_station_m":-66.0,"initial_lateral_m":3.7,"initial_speed_mps":10.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,10.0]]},
+    {"id":1014,"classification":"vehicle","lane":"right","initial_station_m":20.0,"initial_lateral_m":-3.7,"initial_speed_mps":7.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,7.0]]},
+    {"id":1015,"classification":"vehicle","lane":"right","initial_station_m":62.0,"initial_lateral_m":-3.7,"initial_speed_mps":6.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,6.0],[20.0,8.0]]},
+    {"id":1016,"classification":"vehicle","lane":"right","initial_station_m":104.0,"initial_lateral_m":-3.7,"initial_speed_mps":9.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,9.0]]},
+    {"id":1017,"classification":"vehicle","lane":"right","initial_station_m":146.0,"initial_lateral_m":-3.7,"initial_speed_mps":8.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,8.0]]},
+    {"id":1018,"classification":"vehicle","lane":"right","initial_station_m":188.0,"initial_lateral_m":-3.7,"initial_speed_mps":10.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,10.0]]},
+    {"id":1019,"classification":"vehicle","lane":"right","initial_station_m":230.0,"initial_lateral_m":-3.7,"initial_speed_mps":7.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,7.0],[40.0,9.0]]},
+    {"id":1020,"classification":"vehicle","lane":"right","initial_station_m":-35.0,"initial_lateral_m":-3.7,"initial_speed_mps":11.0,"accel_limit_mps2":3.0,"speed_profile":[[0.0,11.0]]}
+  ],
+  "notes": ["固定 20 辆 NPC，无行人、无脚本变道", "用于多目标排序、稳定 ID 与确定性验收"]
+}
