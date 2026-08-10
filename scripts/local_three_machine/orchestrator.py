@@ -13,6 +13,9 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'adas_soc/src/launch/adas_launch/launch'))
+from scenario_overlay import ScenarioOverlayError, load_scenario_overlay  # noqa: E402
+
 LOG_ROOT = ROOT / 'logs' / 'local_three_machine'
 CRITICAL_PATTERNS = (
     'local_three_machine_pc', 'mcu_sil_runner.py', 'can_gateway_node',
@@ -27,6 +30,10 @@ def parse_args():
     parser.add_argument('--gui-offscreen', action='store_true')
     parser.add_argument('--scenario', choices=['baseline', 'acc', 'aeb', 'overtake'],
                         default='baseline')
+    parser.add_argument('--scenario-file', default='',
+                        help='schema-v1 JSON; takes priority over --scenario')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='optional unsigned deterministic seed override')
     parser.add_argument('--duration', type=int, default=0)
     parser.add_argument('--keep-running', action='store_true')
     parser.add_argument('--fault-test', action='store_true')
@@ -74,10 +81,16 @@ class Run:
         self.cleaned = False
 
     def write_initial_report(self):
+        metadata = getattr(self.args, 'scenario_metadata', None) or {}
         report = {
             'schema_version': 1, 'overall': 'RUNNING',
             'run_id': self.log_dir.name, 'ros_domain_id': os.environ.get('ROS_DOMAIN_ID'),
             'can_interface': 'vcan0', 'scenario': self.args.scenario,
+            'scenario_id': metadata.get('id', self.args.scenario),
+            'scenario_file': metadata.get('source_file', ''),
+            'seed': metadata.get('seed', 0),
+            'actor_count': metadata.get('actor_count',
+                                        {'baseline': 0}.get(self.args.scenario, 1)),
             'simulation': ('carla' if getattr(self.args, 'carla', False)
                            else 'software_vehicle'),
             'log_dir': str(self.log_dir), 'checks': [], 'processes': {},
@@ -261,6 +274,26 @@ def main():
     if args.duration < 0:
         print('--duration must be non-negative', file=sys.stderr)
         return 2
+    if args.seed is not None and args.seed < 0:
+        print('--seed must be an unsigned integer', file=sys.stderr)
+        return 2
+    scenario_error = None
+    if args.scenario_file:
+        try:
+            metadata, _ = load_scenario_overlay(
+                scenario_file=args.scenario_file, seed=args.seed)
+            args.scenario_file = metadata['source_file']
+            args.scenario_metadata = metadata
+        except ScenarioOverlayError as error:
+            args.scenario_metadata = None
+            scenario_error = str(error)
+    else:
+        args.scenario_metadata = {
+            'id': args.scenario,
+            'seed': 0 if args.seed is None else args.seed,
+            'actor_count': {'baseline': 0}.get(args.scenario, 1),
+            'source_file': '',
+        }
     if args.dangerous_fault_test:
         args.fault_test = True
     if args.check:
@@ -269,6 +302,15 @@ def main():
     run = Run(args)
     run.write_initial_report()
     print('logs=%s' % run.log_dir, flush=True)
+
+    if scenario_error:
+        run.add_check('Scenario', False, scenario_error)
+        return 2
+    scenario_detail = 'id=%s seed=%d actors=%d source=%s' % (
+        args.scenario_metadata['id'], args.scenario_metadata['seed'],
+        args.scenario_metadata['actor_count'],
+        args.scenario_metadata['source_file'] or 'legacy-yaml')
+    run.add_check('Scenario', True, scenario_detail)
 
     if os.environ.get('ROS_DOMAIN_ID') != '145':
         run.add_check('Preflight', False, 'ROS_DOMAIN_ID must be explicitly 145')
@@ -285,7 +327,8 @@ def main():
         return 1
     run.add_check('Preflight', True, 'vcan0 up; no conflicting managed processes')
 
-    overlay = '' if args.scenario == 'baseline' else args.scenario + '_scenario.yaml'
+    overlay = ('' if args.scenario_file or args.scenario == 'baseline'
+               else args.scenario + '_scenario.yaml')
     try:
         mcu = run.start('mcu', [
             sys.executable, str(ROOT / 'adas_mcu/tools/mcu_sil_runner.py'),
@@ -295,17 +338,38 @@ def main():
             if carla_root is None:
                 raise RuntimeError(
                     'CARLA 0.9.16 not found; set CARLA_ROOT to its installation directory')
-            carla_command = [str(carla_root / 'CarlaUE4.sh'), '-nosound',
-                             '-quality-level=Low', '-carla-port=2000']
+            # Phase 1 hardening：所有 CARLA 调用收敛到 carla_invoker.py。
+            # invoker 自己持 flock + readiness 探测 + 进程组守护,orchestrator
+            # 不再直接 Popen CarlaUE4.sh,杜绝与 GUI / start_pc_stack.sh 抢
+            # 端口 / 双启的可能。
+            invoker = (ROOT / 'adas_bridge_pc/scripts/carla_invoker.py')
+            if not invoker.is_file():
+                raise RuntimeError(
+                    'carla_invoker.py 缺失;请确认 adas_bridge_pc/scripts/ 已部署')
+            carla_command = [
+                sys.executable, str(invoker), 'start',
+                '--scenario', args.scenario, '--town', 'Town04',
+                '--quality-level', 'Low', '--carla-root', str(carla_root),
+                '--timeout', '60',
+            ]
             # A normal --gui run keeps the native CARLA window visible. CI and
             # no-GUI runs still execute full CARLA physics/rendering offscreen.
             if not args.gui:
-                carla_command.append('-RenderOffScreen')
-            carla_process = run.start(
-                'carla', carla_command, cwd=carla_root,
+                carla_command.append('--legacy')  # invoker 直连模式,简化 dev box
+            # invoker 自己 daemonizes CARLA(start_new_session=True),orchestrator
+            # 进程退出后 CARLA 仍存活。记录 PID 到 .pid 文件便于 cleanup。
+            invoker_proc = run.start(
+                'carla', carla_command, cwd=ROOT,
                 remove_env=('LD_LIBRARY_PATH', 'PYTHONPATH', 'QT_PLUGIN_PATH',
                             'QML2_IMPORT_PATH'))
-            carla_ready, carla_detail = wait_carla_ready(carla_process)
+            # 等 invoker 完成 readiness 校验并返回 JSON 状态
+            try:
+                stdout, _ = invoker_proc.communicate(timeout=120)
+                payload = json.loads(stdout.strip().splitlines()[-1])
+                carla_ready = payload.get('state') in ('started', 'already_running')
+                carla_detail = json.dumps(payload, ensure_ascii=False)
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, IndexError) as exc:
+                carla_ready, carla_detail = False, f'invoker 启动失败: {exc}'
             run.add_check('CARLA server', carla_ready, carla_detail)
             if not carla_ready:
                 raise RuntimeError(carla_detail)
@@ -314,14 +378,22 @@ def main():
                              'adas_carla_bridge/lib/adas_carla_bridge/bridge_node')
             if not bridge_binary.is_file():
                 raise RuntimeError('CARLA bridge is not built; rerun with --build')
-            scenario = {'baseline': 'lka', 'acc': 'acc', 'aeb': 'aeb',
-                        'overtake': 'overtake'}[args.scenario]
+            scenario = args.scenario_metadata['id']
             pc_command = [
-                str(bridge_binary), '--scenario', scenario,
+                str(bridge_binary),
                 '--control-source', 'can', '--can-transport', 'socketcan',
                 '--can-interface', 'vcan0', '--carla-host', '127.0.0.1',
                 '--carla-port', '2000', '--town', 'Town04', '--duration', '0',
                 '--log-dir', str(run.log_dir / 'carla_csv')]
+            if args.scenario_file:
+                pc_command += [
+                    '--scenario-file', args.scenario_file,
+                    '--seed', str(args.scenario_metadata['seed']),
+                    '--expected-actor-count',
+                    str(args.scenario_metadata['actor_count'])]
+            else:
+                pc_command += ['--scenario', {'baseline': 'lka'}.get(
+                    args.scenario, args.scenario)]
             pc = run.start('pc', pc_command)
             orin_command = [
                 'ros2', 'launch', 'adas_launch',
@@ -334,7 +406,12 @@ def main():
             pc = run.start('pc', pc_command)
             orin_command = [
                 'ros2', 'launch', 'adas_launch', 'local_three_machine.launch.py']
-            if overlay:
+            if args.scenario_file:
+                orin_command += [
+                    'scenario_file:=' + args.scenario_file,
+                    'scenario_id:=' + args.scenario_metadata['id'],
+                    'seed:=' + str(args.scenario_metadata['seed'])]
+            elif overlay:
                 orin_command.append('scenario:=' + overlay)
         orin = run.start('orin', orin_command)
         gui_expected = args.gui or args.gui_offscreen
@@ -409,6 +486,9 @@ def main():
                 sys.executable, str(ROOT / 'scripts/local_three_machine/checker.py'),
                 '--interface', 'vcan0', '--report', str(run.report_path),
                 '--mcu-pid', str(mcu.pid), '--scenario', args.scenario]
+            if args.scenario_file:
+                command += ['--scenario-file', args.scenario_file,
+                            '--seed', str(args.scenario_metadata['seed'])]
             if args.carla:
                 command.append('--carla')
             if args.fault_test:
@@ -480,6 +560,10 @@ def main():
             report['ros_domain_id'] = '145'
             report['can_interface'] = 'vcan0'
             report['scenario'] = args.scenario
+            report['scenario_id'] = args.scenario_metadata['id']
+            report['scenario_file'] = args.scenario_metadata['source_file']
+            report['seed'] = args.scenario_metadata['seed']
+            report['actor_count'] = args.scenario_metadata['actor_count']
             report['log_dir'] = str(run.log_dir)
             run.write_report(report)
 
