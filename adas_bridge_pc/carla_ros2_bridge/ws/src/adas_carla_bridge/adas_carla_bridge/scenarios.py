@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""CARLA 桥场景库（IOT_TI HIL 闭环）。
+"""Deprecated hard-coded CARLA scenario compatibility library.
+
+New scenarios live in the repository ``scenarios/`` JSON catalog.  Keep
+``SCENARIOS`` and ``ORDER`` until every existing launcher has migrated.
 
 字段说明：
   duration      仿真时长 (s)，0 = 不限
@@ -22,7 +25,7 @@ SCENARIOS = {
     'lka': {
         'name': 'LKA 车道保持',
         'duration': 90.0,
-        'spawn_index': 30,
+        'spawn_index': 30,  # Town04 高速环路默认
         'lead': None,
         'pedestrian': None,
         'notes': [
@@ -33,7 +36,7 @@ SCENARIOS = {
     'acc': {
         'name': 'ACC 自适应巡航',
         'duration': 90.0,
-        'spawn_index': 30,
+        'spawn_index': 42,  # 距 lka 出生点 ~600m, 避免 race-condition 重叠
         'lead': {
             'gap0': 50.0,
             'profile': [(0.0, 8.0), (20.0, 5.0), (40.0, 10.0), (60.0, 7.0)],
@@ -48,7 +51,7 @@ SCENARIOS = {
     'aeb': {
         'name': 'AEB 前车急停',
         'duration': 60.0,
-        'spawn_index': 30,
+        'spawn_index': 71,  # 距 acc 出生点 ~1.2km,直线长段适合高速急停
         'lead': {
             'gap0': 60.0,
             'profile': [(0.0, 9.0), (15.0, 0.0), (30.0, 8.0)],
@@ -63,7 +66,7 @@ SCENARIOS = {
     'aeb_pedestrian': {
         'name': 'AEB 横穿行人',
         'duration': 60.0,
-        'spawn_index': 30,
+        'spawn_index': 88,  # Town04 城镇路口,适合行人横穿
         'lead': None,
         'pedestrian': {
             'ahead_m': 90.0,
@@ -79,7 +82,7 @@ SCENARIOS = {
     'acc_stop_and_go': {
         'name': 'ACC 停车再走',
         'duration': 90.0,
-        'spawn_index': 30,
+        'spawn_index': 55,  # 弯道后直线段,适合停车再起步演示
         'lead': {
             'gap0': 35.0,
             'profile': [(0.0, 8.0), (20.0, 0.0), (45.0, 8.0)],
@@ -94,7 +97,7 @@ SCENARIOS = {
     'acc_slow_truck': {
         'name': 'ACC 慢速卡车',
         'duration': 90.0,
-        'spawn_index': 30,
+        'spawn_index': 68,  # 慢速车跟随段
         'lead': {
             'gap0': 25.0,
             'profile': [(0.0, 3.0)],
@@ -109,7 +112,7 @@ SCENARIOS = {
     'overtake': {
         'name': '慢车超越决策',
         'duration': 90.0,
-        'spawn_index': 30,
+        'spawn_index': 90,  # 高速长直线段,适合超车轨迹规划
         'lead': {
             'gap0': 30.0,
             'profile': [(0.0, 3.0)],
@@ -124,7 +127,7 @@ SCENARIOS = {
     'aeb_stationary': {
         'name': 'AEB 静止障碍物',
         'duration': 30.0,
-        'spawn_index': 30,
+        'spawn_index': 80,  # 高速直线段,适合静态目标 AEB
         'lead': {
             'gap0': 40.0,
             'profile': [(0.0, 0.0)],
@@ -149,3 +152,62 @@ SCENARIOS = {
 
 ORDER = ['lka', 'acc', 'acc_stop_and_go', 'acc_slow_truck', 'overtake',
          'aeb', 'aeb_stationary', 'aeb_pedestrian', 'free']
+
+
+def legacy_to_scripted(scenario_id, config=None):
+    """Convert one legacy dictionary to the frozen schema-v1 actor shape."""
+    if config is None:
+        config = SCENARIOS[scenario_id]
+    actors = []
+    lead = config.get('lead')
+    if lead:
+        actor = {
+            'id': 1,
+            'classification': 'vehicle',
+            'legacy_role': 'lead',
+            'lane': 'ego',
+            'initial_station_m': float(lead['gap0']),
+            'initial_lateral_m': 0.0,
+            'initial_speed_mps': float(lead['profile'][0][1]),
+            'accel_limit_mps2': 8.0,
+            'speed_profile': [
+                [float(point[0]), float(point[1])]
+                for point in lead['profile']
+            ],
+            'blueprint': str(lead.get('blueprint', 'vehicle.audi.tt')),
+        }
+        if lead.get('hard_brake') is not None:
+            actor['hard_brake_window_s'] = [
+                float(lead['hard_brake'][0]), float(lead['hard_brake'][1])]
+        actors.append(actor)
+
+    pedestrian = config.get('pedestrian')
+    if pedestrian:
+        speed = float(pedestrian['speed_mps'])
+        actors.append({
+            'id': 2,
+            'classification': 'pedestrian',
+            'legacy_role': 'pedestrian',
+            'lane': 'crossing',
+            'initial_station_m': float(pedestrian['ahead_m']),
+            'initial_lateral_m': float(pedestrian['start_lateral_m']),
+            'initial_speed_mps': speed,
+            'accel_limit_mps2': 3.0,
+            'speed_profile': [[0.0, speed]],
+            'trigger_ego_gap_m': float(pedestrian['trigger_ego_gap_m']),
+            'crossing_speed_mps': speed,
+            'blueprint': 'walker.pedestrian.*',
+        })
+
+    return {
+        'schema_version': 1,
+        'id': scenario_id,
+        'name': config['name'],
+        'town': 'Town04',
+        'supported_backends': ['carla', 'sil'],
+        'seed': 0,
+        'duration_s': float(config['duration']),
+        'ego': {'spawn_index': int(config['spawn_index'])},
+        'actors': actors,
+        'notes': list(config.get('notes', [])),
+    }

@@ -20,9 +20,20 @@ SoC 栈的 trajectory_planner 恰好也以"同一根中心线 + 横向偏移"规
 """
 
 import math
+import uuid
+from dataclasses import dataclass
 
 CARLA_TIMEOUT_S = 60.0
 SPAWN_WAYPOINT_MAX_DIST_M = 4.0
+STATION_WAYPOINT_STEP_M = 5.0
+# Phase 4 hardening：自车 / 前车 / 行人 互相之间最小生成距离 (m)。
+# 防止多车场景下 spawn 撞墙 / 互相重叠。spawn 时若任一已有 actor
+# 与目标位置距离 < 该值,raise RuntimeError 让上层捕获并回退。
+SAFE_SPAWN_DISTANCE_M = 5.0
+# spawn 后自检：actor 离地高度 < 该值视为穿地 / 撞墙。
+SPAWN_AUDIT_MIN_HEIGHT_M = 0.0
+# spawn 后自检：actor 与 hero 距离 < 该值视为重叠。
+SPAWN_AUDIT_MIN_HERO_DIST_M = 1.0
 EGO_BLUEPRINT = 'vehicle.tesla.model3'
 LEAD_BLUEPRINT = 'vehicle.audi.tt'
 WALKER_BLUEPRINT = 'walker.pedestrian.*'
@@ -30,6 +41,15 @@ WALKER_BLUEPRINT = 'walker.pedestrian.*'
 # adas_msgs/TrackedObject 分类常量（与 msg 定义一致，避免此处依赖 ROS）
 CLASS_CAR = 1
 CLASS_PEDESTRIAN = 3
+CLASS_BICYCLE = 4
+CLASS_UNKNOWN = 0
+
+CLASSIFICATION_IDS = {
+    'unknown': CLASS_UNKNOWN,
+    'vehicle': CLASS_CAR,
+    'pedestrian': CLASS_PEDESTRIAN,
+    'cyclist': CLASS_BICYCLE,
+}
 
 # 曲率估计的前视弧长 [m]。
 # 决策：导航场景下若车辆仍在直道、但 next(CURVATURE_LOOKAHEAD_M) 已跨入弯道，
@@ -93,6 +113,30 @@ def _lane_reference_valid(lateral_offset, heading_error):
         abs(lateral_offset) > LANE_INVALID_LATERAL_OFFSET_M)
 
 
+@dataclass
+class ScriptedActor:
+    """One actor owned by this CarlaWorld run and its deterministic state."""
+
+    actor_id: int
+    classification: int
+    actor: object
+    config: dict
+    reference_waypoint: object
+    velocity_integral: float = 0.0
+    triggered: bool = False
+
+    def target_speed(self, sim_t):
+        speed = 0.0
+        for time_s, target_speed in self.config['speed_profile']:
+            if sim_t >= float(time_s):
+                speed = float(target_speed)
+        return speed
+
+    def in_hard_brake(self, sim_t):
+        window = self.config.get('hard_brake_window_s')
+        return bool(window) and float(window[0]) <= sim_t <= float(window[1])
+
+
 class CarlaWorld:
     """持有 CARLA 客户端与场景演员，输出右手系真值帧、接收归一化执行量。"""
 
@@ -120,61 +164,62 @@ class CarlaWorld:
         self.world.apply_settings(settings)
 
         if spawn_index is None:
-            spawn_index = int(scenario.get('spawn_index', 30))
+            spawn_index = int(scenario.get(
+                'ego', {}).get('spawn_index', scenario.get('spawn_index', 30)))
 
+        self.run_marker = uuid.uuid4().hex
         self.spawned = []
-        self._cleanup_previous_actors()
-        self.ego = self._spawn(EGO_BLUEPRINT, 'hero', spawn_index)
-        self.world.tick()
-
-        # ── 前车（可选）──
+        self.scripted_actors = []
+        self.ego = None
         self.lead = None
-        self._lead_cfg = scenario.get('lead') or {}
-        self._lead_v_int = 0.0
-        if self._lead_cfg:
-            ego_wp = self.map.get_waypoint(self.ego.get_transform().location)
-            gap0 = float(self._lead_cfg.get('gap0', 40.0))
-            lead_wps = ego_wp.next(gap0)
-            if not lead_wps:
-                raise RuntimeError('无法在前方 %.0fm 找到前车生成点' % gap0)
-            bp = str(self._lead_cfg.get('blueprint', LEAD_BLUEPRINT))
-            self.lead = self._spawn_at(bp, 'lead', lead_wps[0].transform)
-
-        # ── 横穿行人（可选，AEB 场景）──
         self.walker = None
-        self._walker_cfg = scenario.get('pedestrian') or {}
-        self._walker_triggered = False
-        if self._walker_cfg:
-            ego_wp = self.map.get_waypoint(self.ego.get_transform().location)
-            ahead = float(self._walker_cfg.get('ahead_m', 80.0))
-            wps = ego_wp.next(ahead)
-            if not wps:
-                raise RuntimeError('无法在前方 %.0fm 找到行人生成点' % ahead)
-            # start_lateral_m 为右手系左正 → CARLA 侧偏移取反
-            lat_r = float(self._walker_cfg.get('start_lateral_m', -6.0))
-            tf = self._offset_transform_carla(wps[0].transform, -lat_r)
-            self.walker = self._spawn_at(WALKER_BLUEPRINT, 'lead', tf,
-                                         actor_type='pedestrian')
-            self._walker_wp = wps[0]
-
-        phys = self.ego.get_physics_control()
-        self.max_steer_rad = math.radians(
-            max(w.max_steer_angle for w in phys.wheels) or 70.0)
-
         self.sim_t0 = None
         self._last_steer_cmd = 0.0    # 左正（右手系），转角回读兜底用
-
-        # 参考中心线：锚定自车初始车道
-        self._ref_wp = self._driving_waypoint(
-            self.ego.get_transform().location, project_to_road=False)
-        if self._ref_wp is None:
-            self._ref_wp = self._driving_waypoint(
-                self.ego.get_transform().location, project_to_road=True)
-        if self._ref_wp is None:
-            raise RuntimeError('自车不在可驾驶车道附近，无法初始化参考线')
-
-        for _ in range(5):
+        try:
+            self.ego = self._spawn(
+                EGO_BLUEPRINT, self._owned_role('ego'), spawn_index)
             self.world.tick()
+
+            ego_wp = self._driving_waypoint(
+                self.ego.get_transform().location, project_to_road=True)
+            if ego_wp is None:
+                raise RuntimeError('无法获取自车生成车道')
+            self._spawn_scripted_actors(ego_wp)
+
+            phys = self.ego.get_physics_control()
+            self.max_steer_rad = math.radians(
+                max(w.max_steer_angle for w in phys.wheels) or 70.0)
+
+            # 参考中心线：锚定自车初始车道
+            self._ref_wp = self._driving_waypoint(
+                self.ego.get_transform().location, project_to_road=False)
+            if self._ref_wp is None:
+                self._ref_wp = self._driving_waypoint(
+                    self.ego.get_transform().location, project_to_road=True)
+            if self._ref_wp is None:
+                raise RuntimeError('自车不在可驾驶车道附近，无法初始化参考线')
+
+            # Phase 4 hardening：warmup tick 从 5 次降到 2 次,加速启动。
+            # 5 次 tick 在 sync_mode 下约 250ms,实测 2 次足够让物理引擎
+            # 稳定 actor 位置（不会撞墙）。
+            for _ in range(2):
+                self.world.tick()
+            # spawn audit：检查所有 spawned actor 离地高度、与 hero 距离。
+            self._audit_actors()
+        except Exception as error:
+            cleanup_error = None
+            try:
+                self._destroy_spawned(flush=True)
+            except RuntimeError as caught:
+                cleanup_error = caught
+            try:
+                self.world.apply_settings(self.original_settings)
+            except RuntimeError:
+                pass
+            if cleanup_error is not None:
+                raise RuntimeError('%s; cleanup failed: %s' %
+                                   (error, cleanup_error)) from error
+            raise
 
     # ── 生成/清理 ──
 
@@ -186,27 +231,61 @@ class CarlaWorld:
         except RuntimeError:
             return None
 
-    def _cleanup_previous_actors(self):
-        stale = []
-        for pattern in ('vehicle.*', 'walker.pedestrian.*'):
-            for actor in self.world.get_actors().filter(pattern):
-                if actor.attributes.get('role_name', '') in ('hero', 'lead'):
-                    stale.append(actor)
-        if stale:
-            print('cleaning %d stale actor(s)' % len(stale), flush=True)
-            for actor in stale:
+    def _owned_role(self, kind, actor_id=None):
+        suffix = kind if actor_id is None else '%s:%d' % (kind, actor_id)
+        return 'adas:%s:%s' % (self.run_marker, suffix)
+
+    def _destroy_actor_batch(self, actors, flush=False):
+        actors = list(actors)
+        actor_ids = {
+            int(actor.id) for actor in actors if hasattr(actor, 'id')}
+        for actor in reversed(actors):
+            try:
+                if bool(getattr(actor, 'is_alive', True)):
+                    actor.destroy()
+            except RuntimeError:
+                pass
+        if not flush or not actor_ids or not hasattr(self, 'world'):
+            return
+
+        self.world.tick()
+        remaining = {
+            int(actor.id): actor for actor in self.world.get_actors()
+            if int(actor.id) in actor_ids
+        }
+        if remaining:
+            for actor in remaining.values():
                 try:
                     actor.destroy()
                 except RuntimeError:
                     pass
-            for _ in range(2):
-                self.world.tick()
+            self.world.tick()
+            remaining = {
+                int(actor.id) for actor in self.world.get_actors()
+                if int(actor.id) in actor_ids
+            }
+        if remaining:
+            raise RuntimeError('owned actor cleanup incomplete: %s' %
+                               sorted(remaining))
+
+    def _destroy_spawned(self, flush=False):
+        self._destroy_actor_batch(self.spawned, flush=flush)
+        self.spawned.clear()
 
     def _aligned_spawn_transform(self, transform):
         wp = self._driving_waypoint(transform.location, project_to_road=False)
         if wp is None:
             wp = self._driving_waypoint(transform.location, project_to_road=True)
         if wp is None:
+            return None
+        # Phase 4 hardening：拒绝非 Driving 车道（停车道、行人道等）。如果
+        # 目标点投影到了步行道或停车道,直接 None,让 _spawn 顺延到下一个点。
+        # 这里只读 wp.lane_type 属性,不依赖 CARLA 的 waypoint.is_driving 这种
+        # 较新 API（0.9.16 也支持但有些地图返回不一致）。
+        try:
+            if int(wp.lane_type) != int(self.carla.LaneType.Driving):
+                return None
+        except (AttributeError, RuntimeError):
             return None
         if _xy_distance(transform.location, wp.transform.location) > SPAWN_WAYPOINT_MAX_DIST_M:
             return None
@@ -220,6 +299,21 @@ class CarlaWorld:
             roll=float(transform.rotation.roll))
         return self.carla.Transform(loc, rot)
 
+    def _too_close_to_existing(self, transform):
+        """检查目标 transform 是否与已有 actor 距离过近。
+
+        Phase 4 hardening:多车场景下防止 spawn 互相重叠 / 撞墙。
+        返回 True 表示"太近了,需要顺延到下一个 spawn point"。
+        """
+        for existing in self.spawned:
+            try:
+                loc = existing.get_location()
+                if _xy_distance(loc, transform.location) < SAFE_SPAWN_DISTANCE_M:
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
     def _spawn(self, bp_name, role, spawn_index):
         bp = self.world.get_blueprint_library().find(bp_name)
         if bp.has_attribute('role_name'):
@@ -232,6 +326,10 @@ class CarlaWorld:
             idx = (spawn_index + off) % n
             transform = self._aligned_spawn_transform(points[idx])
             if transform is None:
+                continue
+            # Phase 4 hardening：与已有 actor 距离过近则跳过该点,顺延到下一个。
+            # 这样多车场景下不会发生"hero / lead / walker 三车撞在一起"。
+            if self._too_close_to_existing(transform):
                 continue
             actor = self.world.try_spawn_actor(bp, transform)
             if actor is not None:
@@ -255,12 +353,145 @@ class CarlaWorld:
         bp = self._blueprint(bp_name)
         if bp.has_attribute('role_name'):
             bp.set_attribute('role_name', role)
-        transform.location.z += 0.2 if actor_type == 'pedestrian' else 0.5
-        actor = self.world.try_spawn_actor(bp, transform)
+        loc = self.carla.Location(
+            x=float(transform.location.x), y=float(transform.location.y),
+            z=float(transform.location.z) +
+            (0.2 if actor_type == 'pedestrian' else 0.5))
+        rot = self.carla.Rotation(
+            pitch=float(transform.rotation.pitch),
+            yaw=float(transform.rotation.yaw),
+            roll=float(transform.rotation.roll))
+        spawn_transform = self.carla.Transform(loc, rot)
+        # Phase 4 hardening：目标位置距离已有 actor 过近则 raise,
+        # 让上层选择别的位置而不是 silently 重叠。
+        if self._too_close_to_existing(spawn_transform):
+            raise RuntimeError(
+                '目标位置与已有 actor 距离 < %.1fm (SAFE_SPAWN_DISTANCE_M),'
+                '拒绝 spawn 以避免撞墙/重叠' % SAFE_SPAWN_DISTANCE_M)
+        actor = self.world.try_spawn_actor(bp, spawn_transform)
         if actor is None:
-            raise RuntimeError('无法生成目标 %s' % bp_name)
+            raise RuntimeError('无法生成目标 %s role=%s' % (bp_name, role))
         self.spawned.append(actor)
         return actor
+
+    def _audit_actors(self):
+        """spawn 后自检：所有 spawned actor 必须落在地面、与 hero 不重叠。
+
+        检查项：
+          1. location.z >= SPAWN_AUDIT_MIN_HEIGHT_M（CARLA 坐标 z=0 是地面,
+             负值意味穿地 = 撞墙/被卡在墙里）
+          2. 与 hero 距离 >= SPAWN_AUDIT_MIN_HERO_DIST_M（防止 spawn 重叠）
+
+        Phase 4 hardening：发现问题仅 print 警告,不 raise —— 因为某些场景
+        故意要让车静止 / 在桥下,但给操作员明确的可见信号。
+        """
+        if not self.spawned:
+            return
+        hero = self.ego
+        issues = []
+        for actor in self.spawned:
+            try:
+                loc = actor.get_location()
+            except RuntimeError:
+                continue
+            if loc.z < SPAWN_AUDIT_MIN_HEIGHT_M:
+                issues.append(
+                    '%s(id=%s) z=%.2f < %.1fm，可能穿地/撞墙'
+                    % (actor.type_id, actor.id, loc.z, SPAWN_AUDIT_MIN_HEIGHT_M))
+            if hero is not None and actor.id != hero.id:
+                try:
+                    hero_loc = hero.get_location()
+                    d = _xy_distance(loc, hero_loc)
+                    if d < SPAWN_AUDIT_MIN_HERO_DIST_M:
+                        issues.append(
+                            '%s(id=%s) 与 hero 距离 %.2fm < %.1fm,可能重叠'
+                            % (actor.type_id, actor.id, d,
+                               SPAWN_AUDIT_MIN_HERO_DIST_M))
+                except RuntimeError:
+                    continue
+        if issues:
+            print('[AUDIT] spawn 后自检发现问题:', flush=True)
+            for line in issues:
+                print('  -', line, flush=True)
+
+    def _waypoint_at_station(self, origin, station_m):
+        if abs(station_m) < 1e-6:
+            return origin
+        current = origin
+        remaining = abs(float(station_m))
+        while remaining > 1e-6:
+            step = min(remaining, STATION_WAYPOINT_STEP_M)
+            candidates = (current.next(step) if station_m > 0.0
+                          else current.previous(step))
+            if not candidates:
+                raise RuntimeError(
+                    '无法在 station %.1fm 找到生成点' % station_m)
+            current_yaw = _waypoint_yaw(current)
+            selected = _select_forward_waypoint(
+                candidates, current.transform.location,
+                current_yaw, current_yaw)
+            if selected is None:
+                raise RuntimeError(
+                    'station %.1fm 的局部生成点方向不一致' % station_m)
+            current = selected
+            remaining -= step
+        return current
+
+    def _spawn_scripted_actors(self, ego_waypoint):
+        configs = list(self.scenario.get('actors', []))
+        actor_ids = [int(config['id']) for config in configs]
+        if actor_ids != sorted(actor_ids) or len(actor_ids) != len(set(actor_ids)):
+            raise RuntimeError('scripted actor ID 必须唯一且升序')
+        initial_spawned = len(self.spawned)
+        initial_scripted = len(self.scripted_actors)
+        try:
+            for config in configs:
+                actor_id = int(config['id'])
+                classification_name = str(config['classification'])
+                if classification_name not in CLASSIFICATION_IDS:
+                    raise RuntimeError(
+                        'actor %d classification 不支持' % actor_id)
+                station = float(config['initial_station_m'])
+                waypoint = self._waypoint_at_station(ego_waypoint, station)
+                lateral_left = float(config['initial_lateral_m'])
+                transform = self._offset_transform_carla(
+                    waypoint.transform, -lateral_left)
+                actor_type = (
+                    'pedestrian' if classification_name == 'pedestrian'
+                    else 'vehicle')
+                blueprint = str(config.get(
+                    'blueprint', WALKER_BLUEPRINT
+                    if actor_type == 'pedestrian' else LEAD_BLUEPRINT))
+                actor = self._spawn_at(
+                    blueprint, self._owned_role('actor', actor_id), transform,
+                    actor_type=actor_type)
+                scripted = ScriptedActor(
+                    actor_id=actor_id,
+                    classification=CLASSIFICATION_IDS[classification_name],
+                    actor=actor,
+                    config=config,
+                    reference_waypoint=waypoint)
+                self.scripted_actors.append(scripted)
+                if config.get('legacy_role') == 'lead':
+                    self.lead = actor
+                elif config.get('legacy_role') == 'pedestrian':
+                    self.walker = actor
+        except Exception:
+            self._destroy_actor_batch(
+                self.spawned[initial_spawned:], flush=True)
+            del self.spawned[initial_spawned:]
+            del self.scripted_actors[initial_scripted:]
+            self.lead = None
+            self.walker = None
+            raise
+
+        if len(self.scripted_actors) != len(configs):
+            raise RuntimeError('scripted actor 生成数量不完整: %d/%d' %
+                               (len(self.scripted_actors), len(configs)))
+
+    @property
+    def scripted_actor_count(self):
+        return len(self.scripted_actors)
 
     def _offset_transform_carla(self, transform, lateral_offset_carla):
         """CARLA 系横向偏移（右正）。"""
@@ -351,6 +582,13 @@ class CarlaWorld:
             'dims': self._actor_dims(actor),
         }
 
+    def _scripted_object_states(self):
+        return [
+            self._actor_state(item.actor, item.actor_id, item.classification)
+            for item in sorted(
+                self.scripted_actors, key=lambda scripted: scripted.actor_id)
+        ]
+
     @staticmethod
     def _actor_dims(actor):
         try:
@@ -395,11 +633,7 @@ class CarlaWorld:
             },
             'objects': [],
         }
-        if self.lead is not None:
-            frame['objects'].append(self._actor_state(self.lead, 1, CLASS_CAR))
-        if self.walker is not None:
-            frame['objects'].append(
-                self._actor_state(self.walker, 2, CLASS_PEDESTRIAN))
+        frame['objects'] = self._scripted_object_states()
         return frame
 
     # ── 执行：归一化执行量 → 自车（ActuationCommand 语义）──
@@ -417,44 +651,37 @@ class CarlaWorld:
     # ── 场景脚本：前车/行人驱动 ──
 
     def drive_actors(self, sim_t):
-        if self.lead is not None:
-            self._drive_lead(sim_t)
-        if self.walker is not None:
-            self._drive_walker()
+        for scripted in self.scripted_actors:
+            if scripted.classification == CLASS_PEDESTRIAN:
+                self._drive_pedestrian(scripted)
+            else:
+                self._drive_vehicle(scripted, sim_t)
 
-    def _lead_target_speed(self, sim_t):
-        v = 0.0
-        for t, spd in self._lead_cfg.get('profile', [(0.0, 0.0)]):
-            if sim_t >= float(t):
-                v = float(spd)
-        return v
-
-    def _lead_in_hard_brake(self, sim_t):
-        hb = self._lead_cfg.get('hard_brake')
-        return bool(hb) and float(hb[0]) <= sim_t <= float(hb[1])
-
-    def _drive_lead(self, sim_t):
-        if self._lead_in_hard_brake(sim_t):
-            self.lead.apply_control(self.carla.VehicleControl(
-                throttle=0.0, brake=1.0, steer=self._lead_lane_keep()))
+    def _drive_vehicle(self, scripted, sim_t):
+        if scripted.in_hard_brake(sim_t):
+            scripted.actor.apply_control(self.carla.VehicleControl(
+                throttle=0.0, brake=1.0,
+                steer=self._actor_lane_keep(scripted.actor)))
             return
-        v_tgt = self._lead_target_speed(sim_t)
-        v = _speed(self.lead)
+        v_tgt = scripted.target_speed(sim_t)
+        v = _speed(scripted.actor)
         err = v_tgt - v
-        self._lead_v_int = _clamp(self._lead_v_int + err * self.fixed_dt,
-                                  -5.0, 5.0)
-        a_cmd = 0.8 * err + 0.1 * self._lead_v_int
+        scripted.velocity_integral = _clamp(
+            scripted.velocity_integral + err * self.fixed_dt, -5.0, 5.0)
+        a_cmd = 0.8 * err + 0.1 * scripted.velocity_integral
         throttle = _clamp(a_cmd / 3.0 + 0.05 * v / 3.0, 0.0, 0.8)
         brake = _clamp(-a_cmd / 6.0, 0.0, 1.0) if a_cmd < -0.2 else 0.0
-        self.lead.apply_control(self.carla.VehicleControl(
+        scripted.actor.apply_control(self.carla.VehicleControl(
             throttle=float(throttle), brake=float(brake),
-            steer=self._lead_lane_keep()))
+            steer=self._actor_lane_keep(scripted.actor)))
 
-    def _lead_lane_keep(self):
-        """前车简易车道保持（P 控制航向 + 横向偏差，CARLA 系内自洽）。"""
-        tf = self.lead.get_transform()
+    def _actor_lane_keep(self, actor):
+        """目标车简易车道保持（P 控制航向 + 横向偏差）。"""
+        tf = actor.get_transform()
         wp = self.map.get_waypoint(tf.location, project_to_road=True,
                                    lane_type=self.carla.LaneType.Driving)
+        if wp is None:
+            return 0.0
         nxt = wp.next(6.0)
         if not nxt:
             return 0.0
@@ -468,24 +695,26 @@ class CarlaWorld:
         lat = -math.sin(ryaw) * dx + math.cos(ryaw) * dy
         return _clamp(1.2 * he - 0.15 * lat, -0.5, 0.5)
 
-    def _drive_walker(self):
+    def _drive_pedestrian(self, scripted):
         """自车逼近到触发距离后，行人垂直横穿车道（AEB 场景）。"""
-        if not self._walker_triggered:
+        config = scripted.config
+        if not scripted.triggered:
             gap = _xy_distance(self.ego.get_transform().location,
-                               self.walker.get_transform().location)
-            if gap > float(self._walker_cfg.get('trigger_ego_gap_m', 35.0)):
+                               scripted.actor.get_transform().location)
+            if gap > float(config.get('trigger_ego_gap_m', 35.0)):
                 return
-            self._walker_triggered = True
-        yaw = math.radians(float(self._walker_wp.transform.rotation.yaw))
+            scripted.triggered = True
+        yaw = math.radians(float(
+            scripted.reference_waypoint.transform.rotation.yaw))
         # start_lateral_m 左正（右手系）：从左侧出发向右横穿，反之向左
-        direction = -1.0 if float(
-            self._walker_cfg.get('start_lateral_m', -6.0)) < 0.0 else 1.0
+        direction = -1.0 if float(config.get(
+            'initial_lateral_m', -6.0)) < 0.0 else 1.0
         # CARLA 系：车道左法向 = (sin(yaw), -cos(yaw))
         vx = math.sin(yaw) * direction
         vy = -math.cos(yaw) * direction
-        self.walker.apply_control(self.carla.WalkerControl(
+        scripted.actor.apply_control(self.carla.WalkerControl(
             direction=self.carla.Vector3D(x=float(vx), y=float(vy), z=0.0),
-            speed=float(self._walker_cfg.get('speed_mps', 1.5)),
+            speed=float(config.get('crossing_speed_mps', 1.5)),
             jump=False))
 
     # ── 旁观者跟车视角 ──
@@ -506,16 +735,20 @@ class CarlaWorld:
             pass
 
     def close(self):
-        try:
-            self.ego.apply_control(self.carla.VehicleControl(brake=1.0))
-        except RuntimeError:
-            pass
-        for actor in self.spawned:
+        if self.ego is not None:
             try:
-                actor.destroy()
+                self.ego.apply_control(self.carla.VehicleControl(brake=1.0))
             except RuntimeError:
                 pass
+        cleanup_error = None
         try:
-            self.world.apply_settings(self.original_settings)
-        except RuntimeError:
-            pass
+            self._destroy_spawned(flush=True)
+        except RuntimeError as error:
+            cleanup_error = error
+        finally:
+            try:
+                self.world.apply_settings(self.original_settings)
+            except RuntimeError:
+                pass
+        if cleanup_error is not None:
+            raise cleanup_error
