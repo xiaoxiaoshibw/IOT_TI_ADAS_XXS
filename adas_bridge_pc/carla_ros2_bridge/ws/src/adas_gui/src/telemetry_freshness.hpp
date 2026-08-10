@@ -26,6 +26,12 @@ class TelemetryFreshness {
     Behavior,   // /adas/planning/behavior
     Aeb,        // /adas/control/aeb/status
     Lead,       // /adas/perception/objects (lead distance)
+    Gate,       // /adas/control/gate/status
+    Safety,     // /adas/system/safety_status
+    Lane,       // /adas/perception/lane_state
+    Map,        // /adas/map/lane_graph
+    Route,      // /adas/navigation/route
+    Dtc,        // /adas/mcu/dtc_history
     Count,
   };
 
@@ -45,7 +51,7 @@ class TelemetryFreshness {
   void resetForTest();
 
  private:
-  TelemetryFreshness() = default;
+  TelemetryFreshness();
   std::array<qint64, Count> last_ms_{};
 };
 

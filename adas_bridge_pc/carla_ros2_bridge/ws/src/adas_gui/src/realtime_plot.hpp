@@ -7,6 +7,7 @@
 #include <QString>
 #include <QVector>
 #include <QWidget>
+#include <QTimer>
 
 namespace adas::gui {
 
@@ -20,9 +21,11 @@ class RealtimePlot : public QWidget {
 
   void setRange(double minimum, double maximum);
   void setWindowSeconds(double seconds);
+  void setStaleAfterSeconds(double seconds);
   void appendValue(double value);
   void clear();
   int sampleCount() const { return samples_.size(); }
+  bool dataStale() const;
 
  protected:
   void paintEvent(QPaintEvent* event) override;
@@ -36,9 +39,11 @@ class RealtimePlot : public QWidget {
   QColor color_;
   QVector<QPointF> samples_;
   QElapsedTimer clock_;
+  QTimer freshness_timer_;
   double minimum_{-1.0};
   double maximum_{1.0};
   double window_s_{30.0};
+  double stale_after_s_{1.5};
 };
 
 }  // namespace adas::gui

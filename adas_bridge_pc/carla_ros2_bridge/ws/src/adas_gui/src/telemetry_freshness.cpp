@@ -2,6 +2,8 @@
 
 namespace adas::gui {
 
+TelemetryFreshness::TelemetryFreshness() { last_ms_.fill(-1); }
+
 TelemetryFreshness& TelemetryFreshness::instance() {
   static TelemetryFreshness inst;
   return inst;

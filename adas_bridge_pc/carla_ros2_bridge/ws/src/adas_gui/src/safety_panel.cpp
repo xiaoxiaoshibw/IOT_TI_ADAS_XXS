@@ -231,6 +231,17 @@ void SafetyPanel::update_link_lights(const GuiMcuStatus& status, bool fresh) {
   set_value_label(can_value_, can_ok ? QStringLiteral("● 正常")
                                      : QStringLiteral("○ 异常"),
                   can_ok ? theme::kOk : theme::kWarn);
+  mcu_value_->setToolTip(QStringLiteral("心跳年龄 %1 s；命令年龄 %2 s")
+                             .arg(status.heartbeat_age_s, 0, 'f', 3)
+                             .arg(status.command_age_s, 0, 'f', 3));
+  can_value_->setToolTip(QStringLiteral("反馈年龄 %1 s；协议 v%2 %3；固件 %4")
+                             .arg(status.feedback_age_s, 0, 'f', 3)
+                             .arg(status.protocol_version)
+                             .arg(status.protocol_version_ok
+                                      ? QStringLiteral("匹配")
+                                      : QStringLiteral("不匹配"))
+                             .arg(status.test_build ? QStringLiteral("TEST")
+                                                    : QStringLiteral("PROD")));
 }
 
 void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
@@ -341,6 +352,8 @@ void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
                                .arg(status.protocol_version)
                                .arg(status.protocol_version_ok ? "OK" : "MISMATCH")
                                .arg(status.test_build ? "  [TEST]" : ""));
+  protocol_value_->setToolTip(
+      QStringLiteral("CAN v3 协议；TEST 标记表示允许 0x301 故障注入"));
   update_link_lights(status, /*fresh=*/true);
 
   // 故障码 DTC 行：主源超时即告警
@@ -370,6 +383,7 @@ void SafetyPanel::onBehavior(int state, double target_speed_mps, int target_lane
 }
 
 void SafetyPanel::onGate(int source, bool limited, const QString& reason) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Gate);
   QString text = QString::fromLatin1(gate_source_name(static_cast<std::uint8_t>(source)));
   if (limited) text += QStringLiteral(" 限幅");
   if (!reason.isEmpty()) text += QString(" (%1)").arg(reason);
@@ -420,6 +434,7 @@ void SafetyPanel::onAeb(int state, double ttc_s, double required_decel_mps2) {
 }
 
 void SafetyPanel::onSafety(int overall, const QString& failed) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Safety);
   QString text = QString::fromLatin1(safety_level_name(static_cast<std::uint8_t>(overall)));
   if (!failed.isEmpty()) text += QString(" (%1)").arg(failed);
   safety_value_->setText(text);
@@ -468,6 +483,7 @@ void SafetyPanel::onEgo(double x, double y, double yaw_rad, double speed_mps,
 }
 
 void SafetyPanel::onLaneState(double lateral_offset_m, bool valid) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Lane);
   if (!valid || !std::isfinite(lateral_offset_m)) {
     set_value_label(lateral_value_, QStringLiteral("-- m"), theme::kStale);
     return;
@@ -480,6 +496,7 @@ void SafetyPanel::onLaneState(double lateral_offset_m, bool valid) {
 }
 
 void SafetyPanel::onDtcHistory(const QString& json) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Dtc);
   dtc_list_->clear();
   const auto document = QJsonDocument::fromJson(json.toUtf8());
   for (const auto& value : document.object().value(QStringLiteral("records")).toArray()) {

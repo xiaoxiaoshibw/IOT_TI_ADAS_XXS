@@ -764,16 +764,34 @@ void LaunchPanel::update_buttons() {
                           manager_.carlaState() == ProcState::Running;
   const bool bridge_busy = manager_.bridgeState() == ProcState::Starting ||
                            manager_.bridgeState() == ProcState::Running;
-  start_all_button_->setEnabled(!bridge_busy);
-  for (auto* button : preset_buttons_) button->setEnabled(!bridge_busy);
-  start_carla_button_->setEnabled(!carla_busy && !manager_.carlaReady());
-  start_bridge_button_->setEnabled(!bridge_busy);
-  stop_bridge_button_->setEnabled(manager_.hasManagedBridge());
-  stop_all_button_->setEnabled(manager_.hasManagedProcesses() ||
-                               manager_.externalCarlaDetected() ||
-                               manager_.externalBridgeDetected());
-  stop_all_button_->setToolTip(QStringLiteral(
-      "停止本机受管 CARLA/bridge；Orin HIL/CAN 常驻服务与外部实例保持运行"));
+  start_all_button_->setEnabled(!start_all_button_->isBusy() && !bridge_busy);
+  start_all_button_->setToolTip(bridge_busy
+      ? QStringLiteral("bridge 正在启动或运行，请先停止当前系统")
+      : QStringLiteral("启动前将执行体检并要求二次确认"));
+  for (auto* button : preset_buttons_) {
+    button->setEnabled(!button->isBusy() && !bridge_busy);
+    if (bridge_busy) button->setToolTip(QStringLiteral("当前 bridge 正在运行，不能切换场景"));
+  }
+  start_carla_button_->setEnabled(!start_carla_button_->isBusy() &&
+                                  !carla_busy && !manager_.carlaReady());
+  if (carla_busy || manager_.carlaReady()) {
+    start_carla_button_->setToolTip(QStringLiteral("CARLA/SIL 已启动或正在启动"));
+  }
+  start_bridge_button_->setEnabled(!start_bridge_button_->isBusy() && !bridge_busy);
+  if (bridge_busy) start_bridge_button_->setToolTip(QStringLiteral("bridge 已运行或正在启动"));
+  stop_bridge_button_->setEnabled(!stop_bridge_button_->isBusy() &&
+                                  manager_.hasManagedBridge());
+  if (!manager_.hasManagedBridge()) {
+    stop_bridge_button_->setToolTip(QStringLiteral("没有由本 GUI 管理的 bridge 可停止"));
+  }
+  const bool can_stop = manager_.hasManagedProcesses() ||
+                        manager_.externalCarlaDetected() ||
+                        manager_.externalBridgeDetected();
+  stop_all_button_->setEnabled(!stop_all_button_->isBusy() && can_stop);
+  stop_all_button_->setToolTip(
+      can_stop
+          ? QStringLiteral("停止本机受管 CARLA/bridge；Orin HIL/CAN 常驻服务与外部实例保持运行")
+          : QStringLiteral("没有受管进程可停止"));
   // 运行配置在桥/CARLA 运行期间锁定，避免界面显示与实际运行场景不一致
   scenario_combo_->setEnabled(!bridge_busy);
 }

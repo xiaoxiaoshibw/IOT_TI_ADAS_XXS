@@ -15,7 +15,13 @@ namespace adas::gui {
 RealtimePlot::RealtimePlot(QString title, QString unit, QColor color, QWidget* parent)
     : QWidget(parent), title_(std::move(title)), unit_(std::move(unit)), color_(color) {
   setMinimumHeight(82);
+  setToolTip(QStringLiteral("仅显示真实订阅数据；灰色遮罩表示输入断流"));
   clock_.start();
+  freshness_timer_.setInterval(500);
+  connect(&freshness_timer_, &QTimer::timeout, this, [this]() {
+    if (!samples_.isEmpty()) update();
+  });
+  freshness_timer_.start();
 }
 
 void RealtimePlot::setRange(double minimum, double maximum) {
@@ -30,6 +36,17 @@ void RealtimePlot::setWindowSeconds(double seconds) {
   window_s_ = seconds;
   prune(clock_.elapsed() / 1000.0);
   update();
+}
+
+void RealtimePlot::setStaleAfterSeconds(double seconds) {
+  if (!std::isfinite(seconds) || seconds <= 0.0) return;
+  stale_after_s_ = seconds;
+  update();
+}
+
+bool RealtimePlot::dataStale() const {
+  if (samples_.isEmpty()) return true;
+  return clock_.elapsed() / 1000.0 - samples_.constLast().x() > stale_after_s_;
 }
 
 void RealtimePlot::appendValue(double value) {
@@ -123,6 +140,18 @@ void RealtimePlot::paintEvent(QPaintEvent*) {
   painter.setPen(Qt::NoPen);
   painter.drawEllipse(last, 3.0, 3.0);
   painter.restore();
+
+  if (dataStale()) {
+    painter.fillRect(plot, QColor(20, 24, 28, 150));
+    painter.setPen(QColor(theme::kWarn));
+    QFont stale_font = small;
+    stale_font.setBold(true);
+    painter.setFont(stale_font);
+    painter.drawText(plot, Qt::AlignCenter,
+                     QStringLiteral("数据断流 · %1 s")
+                         .arg(clock_.elapsed() / 1000.0 - samples_.constLast().x(),
+                              0, 'f', 1));
+  }
 }
 
 QSize RealtimePlot::sizeHint() const { return QSize(260, 96); }

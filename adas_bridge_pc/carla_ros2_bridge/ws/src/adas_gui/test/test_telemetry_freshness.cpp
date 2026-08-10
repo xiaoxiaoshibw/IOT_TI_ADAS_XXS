@@ -54,6 +54,12 @@ TEST_F(TelemetryFreshnessTest, ChannelsAreIndependent) {
   EXPECT_TRUE(f.isFresh(TelemetryFreshness::Mcu, 1000));
   EXPECT_FALSE(f.isFresh(TelemetryFreshness::Actuation, 1000));
   EXPECT_FALSE(f.isFresh(TelemetryFreshness::Ego, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Gate, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Safety, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Lane, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Map, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Route, 1000));
+  EXPECT_FALSE(f.isFresh(TelemetryFreshness::Dtc, 1000));
 }
 
 TEST_F(TelemetryFreshnessTest, RereadFreshnessAfterLimitExceeds) {

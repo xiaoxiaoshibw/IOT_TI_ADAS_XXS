@@ -299,7 +299,14 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
           });
 
   connect(bridge, &RosBridge::laneGraphChanged, map_view_, &MapView::setLanes);
+  connect(bridge, &RosBridge::laneGraphChanged, this,
+          [](const QVector<GuiLane>&, const QString&) {
+            TelemetryFreshness::instance().markFresh(TelemetryFreshness::Map);
+          });
   connect(bridge, &RosBridge::routeChanged, map_view_, &MapView::setRoute);
+  connect(bridge, &RosBridge::routeChanged, this, [](const QPolygonF&) {
+    TelemetryFreshness::instance().markFresh(TelemetryFreshness::Route);
+  });
   connect(bridge, &RosBridge::navStatusChanged, this,
           [this](const GuiNavStatus& status) {
             TelemetryFreshness::instance().markFresh(TelemetryFreshness::Nav);
