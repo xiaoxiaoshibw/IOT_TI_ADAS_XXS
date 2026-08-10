@@ -30,6 +30,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/NavigationStatus.msg"
   "msg/McuStatus.msg"
   "srv/ChangeCommandSource.srv"
+  "srv/SetNavigationGoal.srv"
+  "srv/CancelNavigation.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 

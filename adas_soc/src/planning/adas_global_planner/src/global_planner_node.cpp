@@ -14,6 +14,8 @@
 #include "adas_global_planner/semantic_route.hpp"
 #include "adas_msgs/msg/lane_graph.hpp"
 #include "adas_msgs/msg/navigation_status.hpp"
+#include "adas_msgs/srv/cancel_navigation.hpp"
+#include "adas_msgs/srv/set_navigation_goal.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -153,6 +155,45 @@ class GlobalPlannerNode : public rclcpp::Node {
     sub_cancel_ = create_subscription<std_msgs::msg::Empty>(
         "/adas/navigation/cancel", rclcpp::QoS(1).reliable(),
         std::bind(&GlobalPlannerNode::on_cancel, this, std::placeholders::_1));
+    srv_goal_ = create_service<adas_msgs::srv::SetNavigationGoal>(
+        "/adas/navigation/set_goal",
+        [this](const std::shared_ptr<adas_msgs::srv::SetNavigationGoal::Request> request,
+               std::shared_ptr<adas_msgs::srv::SetNavigationGoal::Response> response) {
+          response->request_id = request->request_id;
+          if (request->request_id.empty() || request->goal.header.frame_id.empty() ||
+              !std::isfinite(request->goal.pose.position.x) ||
+              !std::isfinite(request->goal.pose.position.y)) {
+            response->accepted = false;
+            response->message = "invalid request_id, frame, or goal coordinates";
+            return;
+          }
+          goal_ = std::make_shared<geometry_msgs::msg::PoseStamped>(request->goal);
+          goal_id_ = request->request_id;
+          clear_active_route();
+          response->accepted = true;
+          response->goal_id = goal_id_;
+          response->message = "goal accepted";
+          plan_route();
+        });
+    srv_cancel_ = create_service<adas_msgs::srv::CancelNavigation>(
+        "/adas/navigation/cancel_goal",
+        [this](const std::shared_ptr<adas_msgs::srv::CancelNavigation::Request> request,
+               std::shared_ptr<adas_msgs::srv::CancelNavigation::Response> response) {
+          response->request_id = request->request_id;
+          response->goal_id = goal_id_;
+          if (request->request_id.empty() ||
+              (!request->goal_id.empty() && request->goal_id != goal_id_)) {
+            response->accepted = false;
+            response->message = "invalid request_id or goal_id mismatch";
+            return;
+          }
+          goal_.reset();
+          clear_active_route();
+          publish_status(adas_msgs::msg::NavigationStatus::CANCELED,
+                         "navigation canceled");
+          response->accepted = true;
+          response->message = "cancel accepted";
+        });
 
     pub_route_ = create_publisher<nav_msgs::msg::Path>(
         "/adas/planning/global_route", rclcpp::QoS(1).reliable().transient_local());
@@ -420,6 +461,8 @@ class GlobalPlannerNode : public rclcpp::Node {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_cancel_;
+  rclcpp::Service<adas_msgs::srv::SetNavigationGoal>::SharedPtr srv_goal_;
+  rclcpp::Service<adas_msgs::srv::CancelNavigation>::SharedPtr srv_cancel_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_;
   rclcpp::Publisher<adas_msgs::msg::NavigationStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr deviation_timer_;

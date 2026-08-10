@@ -1,0 +1,7 @@
+string request_id
+string goal_id
+---
+bool accepted
+string request_id
+string goal_id
+string message

@@ -10,6 +10,7 @@
 #include <thread>
 
 #include <QPolygonF>
+#include <QTimer>
 
 #include "adas_msgs/msg/actuation_command.hpp"
 #include "adas_msgs/msg/aeb_status.hpp"
@@ -21,6 +22,8 @@
 #include "adas_msgs/msg/navigation_status.hpp"
 #include "adas_msgs/msg/safety_status.hpp"
 #include "adas_msgs/msg/tracked_object_array.hpp"
+#include "adas_msgs/srv/cancel_navigation.hpp"
+#include "adas_msgs/srv/set_navigation_goal.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -30,6 +33,7 @@
 
 #include "map_view.hpp"
 #include "health_model.hpp"
+#include "request_tracker.hpp"
 
 namespace adas::gui {
 
@@ -94,8 +98,8 @@ class RosBridge : public QObject {
 
   // GUI 线程调用；rclcpp publisher 线程安全。导航目标/取消是 GUI 允许发布的
   // 唯二话题——它们只是导航请求，最终控制仍由 SoC 规划链与 MCU 仲裁。
-  void publishGoal(double world_x, double world_y);
-  void publishCancel();
+  QString requestGoal(double world_x, double world_y);
+  QString requestCancel(const QString& goal_id);
   bool hasCarlaBridgeNode() const;
   // SIL 适配仍沿用原 GUI 的 ROS 观察面；仅在 ADAS_GUI_MODE=sil 时把
   // vehicle_interface 的闭环输出映射为原来的 MCU/执行器显示模型。
@@ -123,6 +127,9 @@ class RosBridge : public QObject {
   void safetyChanged(int overall, const QString& failed_components);
   void laneStateChanged(double lateral_offset_m, bool valid);
   void healthSnapshotChanged(const QVector<adas::gui::GuiHealthStatus>& statuses);
+  void navigationRequestChanged(const QString& request_id,
+                                const QString& operation, int state,
+                                const QString& detail);
 
  private:
   void spin();
@@ -145,11 +152,13 @@ class RosBridge : public QObject {
   rclcpp::Subscription<adas_msgs::msg::GateStatus>::SharedPtr sub_gate_;
   rclcpp::Subscription<adas_msgs::msg::AebStatus>::SharedPtr sub_aeb_;
   rclcpp::Subscription<adas_msgs::msg::SafetyStatus>::SharedPtr sub_safety_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_goal_;
-  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pub_cancel_;
+  rclcpp::Client<adas_msgs::srv::SetNavigationGoal>::SharedPtr client_goal_;
+  rclcpp::Client<adas_msgs::srv::CancelNavigation>::SharedPtr client_cancel_;
   // 审计整改 TOP10-2：故障注入命令 publisher
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_fault_inject_;
   rclcpp::TimerBase::SharedPtr health_timer_;
+  QTimer request_timer_;
+  RequestTracker requests_;
   using Clock = std::chrono::steady_clock;
   Clock::time_point last_odom_{};
   Clock::time_point last_lane_{};

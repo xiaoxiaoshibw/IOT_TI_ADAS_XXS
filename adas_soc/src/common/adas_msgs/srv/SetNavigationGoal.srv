@@ -1,0 +1,8 @@
+# Request-scoped navigation goal. The legacy PoseStamped topic remains supported.
+string request_id
+geometry_msgs/PoseStamped goal
+---
+bool accepted
+string request_id
+string goal_id
+string message

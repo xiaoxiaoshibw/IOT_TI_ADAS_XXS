@@ -17,6 +17,8 @@
 
 namespace adas::gui {
 
+class BusyButton;
+
 // 主窗口：三栏一底部抽屉布局。
 //   ┌──────────────┬─────────────────────┬───────────────┐
 //   │ 系统控制       │       地图          │  安全状态       │
@@ -64,7 +66,7 @@ class MainWindow : public QMainWindow {
   QPushButton* fit_button_;
   QPushButton* clear_trail_button_;
   QPushButton* layer_button_;
-  QPushButton* cancel_button_;
+  BusyButton* cancel_button_;
   QLabel* nav_status_value_;
   QLabel* alert_bar_;
   QLabel* hud_speed_value_;
@@ -94,6 +96,9 @@ class MainWindow : public QMainWindow {
   QMap<QString, QString> active_alerts_;  // key → 文本
   QMap<QString, HealthState> health_states_;
   bool have_health_snapshot_{false};
+  QString active_goal_id_;
+  QString pending_goal_request_id_;
+  QString pending_cancel_request_id_;
 };
 
 }  // namespace adas::gui

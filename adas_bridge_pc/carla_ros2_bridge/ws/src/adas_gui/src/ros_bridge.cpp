@@ -2,7 +2,9 @@
 
 #include <QDateTime>
 #include <QProcess>
+#include <QMetaObject>
 #include <QStringList>
+#include <QUuid>
 
 #include <algorithm>
 #include <cmath>
@@ -221,10 +223,10 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
           emit safetyChanged(message->overall, failed.join("+"));
         });
   }
-  pub_goal_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
-      "/adas/navigation/goal", rclcpp::QoS(1).reliable());
-  pub_cancel_ = node_->create_publisher<std_msgs::msg::Empty>(
-      "/adas/navigation/cancel", rclcpp::QoS(1).reliable());
+  client_goal_ = node_->create_client<adas_msgs::srv::SetNavigationGoal>(
+      "/adas/navigation/set_goal");
+  client_cancel_ = node_->create_client<adas_msgs::srv::CancelNavigation>(
+      "/adas/navigation/cancel_goal");
   // 审计整改 TOP10-2：故障注入命令 topic；桥节点订阅后通过 0x301 帧发给 MCU
   pub_fault_inject_ = node_->create_publisher<std_msgs::msg::String>(
       "/adas/_debug/fault_inject_cmd", rclcpp::QoS(10).reliable());
@@ -232,20 +234,99 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
   health_timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(500), [this]() { updateHealthSnapshot(); });
 
+  request_timer_.setInterval(200);
+  connect(&request_timer_, &QTimer::timeout, this, [this]() {
+    const auto expired = requests_.expire(QDateTime::currentMSecsSinceEpoch());
+    for (const auto& record : expired) {
+      emit navigationRequestChanged(record.request_id, record.operation,
+                                    static_cast<int>(record.state),
+                                    QStringLiteral("请求超时，可重试"));
+    }
+  });
+  request_timer_.start();
+
   spin_thread_ = std::thread([this]() { spin(); });
 }
 
-void RosBridge::publishGoal(double world_x, double world_y) {
-  geometry_msgs::msg::PoseStamped goal;
-  goal.header.stamp = node_->now();
-  goal.header.frame_id = "map";
-  goal.pose.position.x = world_x;
-  goal.pose.position.y = world_y;
-  goal.pose.orientation.w = 1.0;
-  pub_goal_->publish(goal);
+QString RosBridge::requestGoal(double world_x, double world_y) {
+  const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  const QString operation = QStringLiteral("navigation.goal");
+  if (!requests_.begin(operation, id, QDateTime::currentMSecsSinceEpoch(), 5000)) {
+    return {};
+  }
+  emit navigationRequestChanged(id, operation,
+                                static_cast<int>(RequestState::Sent),
+                                QStringLiteral("目标请求已发送"));
+  if (!client_goal_->service_is_ready()) {
+    requests_.finish(operation, id, RequestState::Failed,
+                     QStringLiteral("导航服务不可用"));
+    emit navigationRequestChanged(id, operation,
+                                  static_cast<int>(RequestState::Failed),
+                                  QStringLiteral("导航服务不可用"));
+    return {};
+  }
+  auto request = std::make_shared<adas_msgs::srv::SetNavigationGoal::Request>();
+  request->request_id = id.toStdString();
+  request->goal.header.stamp = node_->now();
+  request->goal.header.frame_id = "map";
+  request->goal.pose.position.x = world_x;
+  request->goal.pose.position.y = world_y;
+  request->goal.pose.orientation.w = 1.0;
+  client_goal_->async_send_request(
+      request, [this, id, operation](
+                   rclcpp::Client<adas_msgs::srv::SetNavigationGoal>::SharedFuture future) {
+        const auto response = future.get();
+        QMetaObject::invokeMethod(this, [this, id, operation, response]() {
+          const bool accepted = response->accepted &&
+              QString::fromStdString(response->request_id) == id;
+          const auto state = accepted ? RequestState::Acknowledged
+                                      : RequestState::Failed;
+          const QString detail = QString::fromStdString(response->message);
+          if (!requests_.finish(operation, id, state, detail)) return;
+          emit navigationRequestChanged(id, operation,
+                                        static_cast<int>(state), detail);
+        }, Qt::QueuedConnection);
+      });
+  return id;
 }
 
-void RosBridge::publishCancel() { pub_cancel_->publish(std_msgs::msg::Empty()); }
+QString RosBridge::requestCancel(const QString& goal_id) {
+  const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  const QString operation = QStringLiteral("navigation.cancel");
+  if (!requests_.begin(operation, id, QDateTime::currentMSecsSinceEpoch(), 5000)) {
+    return {};
+  }
+  emit navigationRequestChanged(id, operation,
+                                static_cast<int>(RequestState::Sent),
+                                QStringLiteral("取消请求已发送"));
+  if (!client_cancel_->service_is_ready()) {
+    requests_.finish(operation, id, RequestState::Failed,
+                     QStringLiteral("导航取消服务不可用"));
+    emit navigationRequestChanged(id, operation,
+                                  static_cast<int>(RequestState::Failed),
+                                  QStringLiteral("导航取消服务不可用"));
+    return {};
+  }
+  auto request = std::make_shared<adas_msgs::srv::CancelNavigation::Request>();
+  request->request_id = id.toStdString();
+  request->goal_id = goal_id.toStdString();
+  client_cancel_->async_send_request(
+      request, [this, id, operation](
+                   rclcpp::Client<adas_msgs::srv::CancelNavigation>::SharedFuture future) {
+        const auto response = future.get();
+        QMetaObject::invokeMethod(this, [this, id, operation, response]() {
+          const bool accepted = response->accepted &&
+              QString::fromStdString(response->request_id) == id;
+          const auto state = accepted ? RequestState::Acknowledged
+                                      : RequestState::Failed;
+          const QString detail = QString::fromStdString(response->message);
+          if (!requests_.finish(operation, id, state, detail)) return;
+          emit navigationRequestChanged(id, operation,
+                                        static_cast<int>(state), detail);
+        }, Qt::QueuedConnection);
+      });
+  return id;
+}
 
 void RosBridge::publishFaultInjectCommand(int cmd, int param, const QString& label) {
   std_msgs::msg::String msg;

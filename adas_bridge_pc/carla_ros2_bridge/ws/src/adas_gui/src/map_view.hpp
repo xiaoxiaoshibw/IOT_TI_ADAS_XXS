@@ -45,6 +45,7 @@ class MapView : public QWidget {
    void setRoute(const QPolygonF& route);
    void setVehicle(double x, double y, double yaw_rad, bool valid);
    void setGoal(double x, double y, bool valid);
+   void setGoalSelectionEnabled(bool enabled);
    void setFollowEnabled(bool enabled);
    void fitToLanes();
    void clearTrail();
@@ -76,6 +77,7 @@ class MapView : public QWidget {
   bool vehicle_valid_{false};
   double goal_x_{0.0}, goal_y_{0.0};
   bool goal_valid_{false};
+  bool goal_selection_enabled_{true};
   bool fitted_{false};
   bool follow_{false};
   bool dragging_{false};

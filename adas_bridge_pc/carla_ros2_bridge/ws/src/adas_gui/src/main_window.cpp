@@ -307,7 +307,41 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             }
             if (!status.detail.isEmpty()) text += QString("  (%1)").arg(status.detail);
             nav_status_value_->setText(text);
+            if (!status.goal_id.isEmpty()) active_goal_id_ = status.goal_id;
             if (status.state >= 4U) map_view_->setGoal(0.0, 0.0, false);
+          });
+  connect(bridge, &RosBridge::navigationRequestChanged, this,
+          [this](const QString& id, const QString& operation, int state,
+                 const QString& detail) {
+            const auto request_state = static_cast<RequestState>(state);
+            if (operation == QStringLiteral("navigation.goal") &&
+                id == pending_goal_request_id_) {
+              if (request_state != RequestState::Sent) {
+                pending_goal_request_id_.clear();
+                map_view_->setGoalSelectionEnabled(true);
+              }
+              if (request_state == RequestState::Acknowledged) {
+                active_goal_id_ = id;
+                nav_status_value_->setText(QStringLiteral("导航: 目标已受理 · %1")
+                                               .arg(id.left(8)));
+              } else if (request_state == RequestState::Failed ||
+                         request_state == RequestState::TimedOut) {
+                map_view_->setGoal(0.0, 0.0, false);
+                nav_status_value_->setText(QStringLiteral("导航: %1").arg(detail));
+              }
+            } else if (operation == QStringLiteral("navigation.cancel") &&
+                       id == pending_cancel_request_id_) {
+              if (request_state == RequestState::Sent) return;
+              pending_cancel_request_id_.clear();
+              cancel_button_->setBusy(false);
+              if (request_state == RequestState::Acknowledged) {
+                active_goal_id_.clear();
+                map_view_->setGoal(0.0, 0.0, false);
+                nav_status_value_->setText(QStringLiteral("导航: 已确认取消"));
+              } else {
+                nav_status_value_->setText(QStringLiteral("导航取消失败: %1").arg(detail));
+              }
+            }
           });
 
   connect(map_view_, &MapView::goalRequested, this, &MainWindow::onGoalRequested);
@@ -340,9 +374,15 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
     map_view_->setLayers(flags);
   });
   connect(cancel_button_, &QPushButton::clicked, this, [this]() {
-    bridge_->publishCancel();
-    map_view_->setGoal(0.0, 0.0, false);
-    nav_status_value_->setText(QStringLiteral("已请求取消导航"));
+    if (!confirm_action(this, QStringLiteral("确认取消导航"),
+                        QStringLiteral("取消导航"),
+                        QStringLiteral("规划器将清除当前路线并请求安全停车。"),
+                        ConfirmSeverity::Warning)) return;
+    pending_cancel_request_id_ = bridge_->requestCancel(active_goal_id_);
+    if (!pending_cancel_request_id_.isEmpty()) {
+      cancel_button_->setBusy(true, QStringLiteral("取消中"),
+                              QStringLiteral("等待导航服务响应"));
+    }
   });
 
   // 进程日志全部转接到底部抽屉
@@ -497,7 +537,12 @@ QWidget* MainWindow::build_map_panel() {
   fit_button_ = make_tool(QStringLiteral("expand"), QStringLiteral("适配全图"));
   clear_trail_button_ = make_tool(QStringLiteral("eraser"), QStringLiteral("清除尾迹"));
   layer_button_ = make_tool(QStringLiteral("sliders"), QStringLiteral("切换地图图层"));
-  cancel_button_ = make_tool(QStringLiteral("ban"), QStringLiteral("取消导航"));
+  cancel_button_ = new BusyButton();
+  cancel_button_->setIcon(icons::get(QStringLiteral("ban")));
+  cancel_button_->setIconSize(QSize(16, 16));
+  cancel_button_->setObjectName(QStringLiteral("iconButton"));
+  cancel_button_->setFixedSize(34, 34);
+  cancel_button_->setToolTip(QStringLiteral("取消导航"));
   toolbar->addWidget(title);
   toolbar->addWidget(nav_status_value_, 1);
   toolbar->addWidget(follow_check_);
@@ -652,11 +697,22 @@ void MainWindow::onDemoPresetLaunched(const QString& scenario,
 }
 
 void MainWindow::onGoalRequested(double world_x, double world_y) {
-  bridge_->publishGoal(world_x, world_y);
+  if (!confirm_action(this, QStringLiteral("确认导航目标"),
+                      QStringLiteral("下发导航目标"),
+                      QStringLiteral("目标坐标：(%1, %2) m\nSoC 将立即规划并可能进入自动行驶。")
+                          .arg(world_x, 0, 'f', 1).arg(world_y, 0, 'f', 1),
+                      ConfirmSeverity::Warning)) return;
   map_view_->setGoal(world_x, world_y, true);
-  nav_status_value_->setText(QString("导航: 目标已发送 (%1, %2)")
-                                  .arg(world_x, 0, 'f', 1)
-                                  .arg(world_y, 0, 'f', 1));
+  map_view_->setGoalSelectionEnabled(false);
+  pending_goal_request_id_ = bridge_->requestGoal(world_x, world_y);
+  if (pending_goal_request_id_.isEmpty()) {
+    map_view_->setGoalSelectionEnabled(true);
+    map_view_->setGoal(0.0, 0.0, false);
+    nav_status_value_->setText(QStringLiteral("导航: 已有目标请求处理中"));
+  } else {
+    nav_status_value_->setText(QStringLiteral("导航: 请求已发送 · %1")
+                                    .arg(pending_goal_request_id_.left(8)));
+  }
 }
 
 void MainWindow::onStaleCheck() {

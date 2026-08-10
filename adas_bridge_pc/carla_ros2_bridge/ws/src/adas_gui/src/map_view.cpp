@@ -77,6 +77,12 @@ void MapView::setGoal(double x, double y, bool valid) {
   update();
 }
 
+void MapView::setGoalSelectionEnabled(bool enabled) {
+  goal_selection_enabled_ = enabled;
+  setCursor(enabled ? Qt::CrossCursor : Qt::ForbiddenCursor);
+  setToolTip(enabled ? QString() : QStringLiteral("导航请求处理中，暂不能设置新目标"));
+}
+
 void MapView::setFollowEnabled(bool enabled) {
   follow_ = enabled;
   if (follow_ && vehicle_valid_) camera_.center_on(vehicle_x_, vehicle_y_);
@@ -333,14 +339,16 @@ void MapView::mouseMoveEvent(QMouseEvent* event) {
 void MapView::mouseReleaseEvent(QMouseEvent* event) {
   if (event->button() != Qt::LeftButton || !dragging_) return;
   dragging_ = false;
-  if (drag_moved_ || lanes_.isEmpty()) return;
+  if (drag_moved_ || lanes_.isEmpty() || !goal_selection_enabled_) return;
   const auto world = camera_.screen_to_world(event->position().x(),
                                              event->position().y());
   const LaneHit hit = nearest_lane_point(lanes_, world.x, world.y,
                                          kSnapMaxDistanceM);
   if (hit.valid) {
-    pending_goal_x_ = world.x;
-    pending_goal_y_ = world.y;
+    // Submit the same safe lane projection shown by the hover preview. Sending
+    // the raw click made the marker disagree with the planner's canonical goal.
+    pending_goal_x_ = hit.x;
+    pending_goal_y_ = hit.y;
     click_timer_.start();   // 等双击窗口过后再提交，双击=适配全图不发目标
   } else {
     // 全局规划器 snap 会失败的点击就地拒绝，给出明确反馈
