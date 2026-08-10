@@ -34,7 +34,7 @@ usage() {
   --mcu                   启用 vcan0 + MCU host-in-the-loop runner
   --no-mcu                显式回退到无 MCU 的原 SIL 链路
   --check                 启动后检查关键话题/执行流，完成后自动退出
-  --scenario NAME         baseline|acc|aeb|overtake|redundant|lqr
+  --scenario NAME         baseline|acc|aeb|overtake
   --duration SEC          运行指定秒数后退出；默认 0 表示持续运行
   -h, --help              显示帮助
 
@@ -75,8 +75,6 @@ case "${SCENARIO}" in
   acc)       LAUNCH_FILE="sil_acc.launch.py"; SCENARIO_OVERLAY="acc_scenario.yaml" ;;
   aeb)       LAUNCH_FILE="sil_aeb.launch.py"; SCENARIO_OVERLAY="aeb_scenario.yaml" ;;
   overtake)  LAUNCH_FILE="sil_overtake.launch.py"; SCENARIO_OVERLAY="overtake_scenario.yaml" ;;
-  redundant) LAUNCH_FILE="sil_redundant.launch.py"; SCENARIO_OVERLAY="redundant_scenario.yaml" ;;
-  lqr)       LAUNCH_FILE="sil_lqr.launch.py"; SCENARIO_OVERLAY="lqr_scenario.yaml" ;;
   *) echo "不支持的场景：${SCENARIO}" >&2; exit 2 ;;
 esac
 
@@ -188,15 +186,8 @@ required_topics=(
   /adas/localization/kinematic_state
   /adas/perception/lane_state
   /adas/vehicle/actuation_cmd
+  /adas/control/gate/status
 )
-if [[ "${SCENARIO}" == redundant ]]; then
-  required_topics+=(
-    /primary/adas/control/gate/status
-    /backup/adas/control/gate/status
-  )
-else
-  required_topics+=(/adas/control/gate/status)
-fi
 if (( MCU )); then
   required_topics+=(/adas/mcu/status /adas/mcu/actuation_feedback)
 fi

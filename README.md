@@ -14,7 +14,6 @@
 | **`adas_mcu/`** | `ADAS0.0.2/MCU/` | TMS320F280025C 裸机 C 固件:CAN v3 协议、安全状态机、1 kHz 执行器驱动 | CCS + C2000Ware(Windows);主机测试用 GCC |
 | **`adas_bridge_pc/`** | `adas_pc/` | CARLA↔SoC 桥接(Python rclpy)+ Qt6 安全监控 GUI | colcon + ROS2 Jazzy |
 | **`adas_iot/`** | `adas_iot/` | MQTT 桥接、Flask/SocketIO Dashboard、微信小程序、Webhook/邮件告警 | Python(Orin 部署为 `adas-mqtt.service`) |
-| **`can_bench/`** | `can_benchmark/` | CAN 往返延迟基准:ESP32 应答器 / F280025C / PC | 各平台独立 |
 | **`adas_tools/`** | `tools/` | hil_logger、HIL 前置检查脚本、MATLAB 绘图 | Python / Shell / MATLAB |
 
 > 完整节点/包清单共 **20 个 ROS2 节点**(soc 端)+ **4 个桥接包**(bridge 端),详见 [`adas_soc/src/`](./adas_soc/src) 与 [`adas_bridge_pc/carla_ros2_bridge/ws/src/`](./adas_bridge_pc/carla_ros2_bridge/ws/src)。
@@ -115,11 +114,6 @@ cd ../adas_iot
 pip install -r requirements.txt
 python3 mqtt_bridge.py                    # MQTT 桥接节点
 python3 dashboard/app.py                  # Flask 仪表板
-
-# ── can_bench:CAN 延迟基准 ────────────────────────────
-cd ../can_bench/pc
-python3 bench.py                          # PC 端基准
-# 嵌入式端:esp32_responder/ 与 f280025c_bench/ 见各自 README
 
 # ── adas_tools:HIL 工具集 ─────────────────────────────
 cd ../adas_tools
