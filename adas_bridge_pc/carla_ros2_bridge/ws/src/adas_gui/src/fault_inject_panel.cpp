@@ -3,142 +3,82 @@
 #include <QDateTime>
 #include <QFrame>
 #include <QGridLayout>
-#include <QHBoxLayout>
+#include <QGroupBox>
 #include <QLabel>
-#include <QMessageBox>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QVBoxLayout>
 
-#include "format.hpp"
+#include "request_tracker.hpp"
 #include "theme.hpp"
 
 namespace adas::gui {
-namespace {
-
-// 按钮在网格里水平伸展填满单元格（Expanding 横向策略）；纵向保持固定高度
-// 防止 panel 高度变化时按钮被拉伸或挤压。
-QPushButton* make_inject_button(const QString& text, const QString& tooltip,
-                                QWidget* parent) {
-  auto* btn = new QPushButton(text, parent);
-  btn->setToolTip(tooltip);
-  btn->setMinimumHeight(34);
-  btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  btn->setStyleSheet(QStringLiteral(
-      "QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:6px;"
-      "font-size:12px;font-weight:600;padding:6px 8px;}"
-      "QPushButton:hover{background:%4;}"
-      "QPushButton:pressed{background:%5;}")
-      .arg(theme::kMdSurfaceContainerHigh, theme::kMdOnSurface,
-           theme::kCardBorder, theme::kMdPrimaryContainer,
-           theme::kMdPrimary));
-  return btn;
-}
-
-// 高危注入按钮（FORCE_* / DROP_ALL / INJECT_SELF_TEST_FAIL）在执行前要二次
-// 确认：bench 上单击 = 0x301 帧 → MCU 即时动作（急停/锁死/FAILSAFE）。
-// 中性按钮（CORRUPT_CRC / FREEZE_SEQ / RECOVER / CLEAR）仅触发观测类状态，
-// 不需要二次确认。
-bool confirm_dangerous(const QString& title, const QString& body) {
-  QMessageBox box;
-  box.setIcon(QMessageBox::Warning);
-  box.setWindowTitle(title);
-  box.setText(QStringLiteral("<b>%1</b>").arg(title));
-  box.setInformativeText(body);
-  box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
-  box.setDefaultButton(QMessageBox::Cancel);
-  box.button(QMessageBox::Yes)->setText(QStringLiteral("确认注入"));
-  box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
-  return box.exec() == QMessageBox::Yes;
-}
-
-}  // namespace
 
 FaultInjectPanel::FaultInjectPanel(InjectCallback callback, QWidget* parent)
     : QWidget(parent), callback_(std::move(callback)) {
-  build_ui();
-}
-
-void FaultInjectPanel::build_ui() {
   auto* root = new QVBoxLayout(this);
   root->setContentsMargins(8, 8, 8, 8);
   root->setSpacing(6);
 
-  // 标题 + 警示（始终可见，不进 scroll，让用户任何时候都看到当前面板说明）
-  auto* title_box = new QGroupBox(QStringLiteral("故障注入（0x301）"), this);
+  auto* title_box = new QGroupBox(QStringLiteral("故障注入（CAN v3 / 0x301）"), this);
   auto* title_layout = new QVBoxLayout(title_box);
-  auto* title_label = new QLabel(QStringLiteral(
-      "桥接节点通过 PC CANalyst-II 发 0x301 帧到 MCU；"
-      "仅当 MCU 烧录 ADAS_TEST_BUILD=1 时生效，生产固件忽略。"));
-  title_label->setWordWrap(true);
-  title_label->setStyleSheet(QStringLiteral("color:%1;font-size:10px;")
-                                 .arg(theme::kTextSecondary));
-  title_layout->addWidget(title_label);
+  auto* title = new QLabel(QStringLiteral(
+      "命令经 PC CAN 接口下发；仅 ADAS_TEST_BUILD=1 的 MCU 接受。"
+      "每次操作均需确认，并等待 bridge 传输确认。"), title_box);
+  title->setWordWrap(true);
+  title->setStyleSheet(QStringLiteral("color:%1;font-size:10px;")
+                           .arg(theme::kTextSecondary));
+  title_layout->addWidget(title);
   root->addWidget(title_box);
 
-  // 按钮矩阵：包到 QScrollArea，纵向空间不足时可滚，避免按钮被剪
   auto* scroll = new QScrollArea(this);
   scroll->setWidgetResizable(true);
   scroll->setFrameShape(QFrame::NoFrame);
   scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  auto* scroll_content = new QWidget();
-  auto* scroll_layout = new QVBoxLayout(scroll_content);
-  scroll_layout->setContentsMargins(0, 0, 0, 0);
-  scroll_layout->setSpacing(4);
-
-  // 按钮 label 缩成纯中文，英文名 + INJ_CMD_xx 进 tooltip（避免 145px 按钮
-  // 里塞不下"主源停止 (DROP_CTRL)"被 ellipsis）。危险按钮的强制语义保留在
-  // tooltip，方便与 fault_catalog 对照。
-  btn_drop_ctrl_ = make_inject_button(
-      QStringLiteral("主源停止"),
-      QStringLiteral("INJ_CMD_DROP_CTRL = 1\n60 ms 后 MCU 应切源/FAILSAFE"), this);
-  btn_freeze_seq_ = make_inject_button(
-      QStringLiteral("SEQ 冻结"),
-      QStringLiteral("INJ_CMD_FREEZE_SEQ = 2\n5 帧后 MCU 应报 seq_stall"), this);
-  btn_corrupt_crc_ = make_inject_button(
-      QStringLiteral("CRC 错"),
-      QStringLiteral("INJ_CMD_CORRUPT_CRC = 3\nCRC 错误计数累加"), this);
-  btn_force_mrm_ = make_inject_button(
-      QStringLiteral("强制 MRM"),
-      QStringLiteral("INJ_CMD_FORCE_MRM = 4\n立即进入 MRM 4.8 m/s² 减速"), this);
-  btn_force_estop_ = make_inject_button(
-      QStringLiteral("强制急停"),
-      QStringLiteral("INJ_CMD_FORCE_EMERGENCY = 5\n立即全力制动"), this);
-  btn_force_lock_ = make_inject_button(
-      QStringLiteral("强制 FAULT_LOCK"),
-      QStringLiteral("INJ_CMD_FORCE_FAULT_LOCK = 6\n闩锁；需重启恢复"), this);
-  btn_drop_all_ = make_inject_button(
-      QStringLiteral("双源失效"),
-      QStringLiteral("INJ_CMD_DROP_ALL = 7\nMCU 进入 FAILSAFE"), this);
-  btn_inject_st_fail_ = make_inject_button(
-      QStringLiteral("自检失败"),
-      QStringLiteral("INJ_CMD_INJECT_SELF_TEST_FAIL = 9\n强制 FAULT_LOCK"), this);
-  btn_recover_ = make_inject_button(
-      QStringLiteral("手动恢复"),
-      QStringLiteral("INJ_CMD_RECOVER = 8\n解除注入并清除非自检故障"), this);
-  btn_clear_ = make_inject_button(
-      QStringLiteral("清空日志"),
-      QStringLiteral("仅清空本地显示"), this);
-
+  auto* content = new QWidget(scroll);
+  auto* content_layout = new QVBoxLayout(content);
+  content_layout->setContentsMargins(0, 0, 0, 0);
   auto* grid = new QGridLayout();
   grid->setSpacing(4);
   grid->setColumnStretch(0, 1);
   grid->setColumnStretch(1, 1);
-  grid->addWidget(btn_drop_ctrl_,     0, 0);
-  grid->addWidget(btn_freeze_seq_,    0, 1);
-  grid->addWidget(btn_corrupt_crc_,   1, 0);
-  grid->addWidget(btn_force_mrm_,     1, 1);
-  grid->addWidget(btn_force_estop_,   2, 0);
-  grid->addWidget(btn_force_lock_,    2, 1);
-  grid->addWidget(btn_drop_all_,      3, 0);
-  grid->addWidget(btn_inject_st_fail_, 3, 1);
-  grid->addWidget(btn_recover_,       4, 0);
-  grid->addWidget(btn_clear_,         4, 1);
-  scroll_layout->addLayout(grid);
-  scroll->setWidget(scroll_content);
-  root->addWidget(scroll, 1);  // stretch=1：随右栏高度伸展
 
-  // 日志：留在 scroll 外、随高度伸展（panel 高时多占、低时收到 minHeight）
+  // Values are defined by adas_mcu/include/adas_can_protocol.h. Keep this
+  // table explicit so the GUI cannot silently drift back to the legacy map.
+  grid->addWidget(makeButton(QStringLiteral("清除故障"),
+                             QStringLiteral("INJ_CMD_CLEAR = 0"), 0,
+                             ConfirmSeverity::Warning), 0, 0);
+  grid->addWidget(makeButton(QStringLiteral("强制降级"),
+                             QStringLiteral("INJ_CMD_FORCE_DEGRADE = 1"), 1,
+                             ConfirmSeverity::Warning), 0, 1);
+  grid->addWidget(makeButton(QStringLiteral("强制急停"),
+                             QStringLiteral("INJ_CMD_FORCE_ESTOP = 2"), 2,
+                             ConfirmSeverity::Critical), 1, 0);
+  grid->addWidget(makeButton(QStringLiteral("主源掉线"),
+                             QStringLiteral("INJ_CMD_DROP_PRIMARY = 3"), 3,
+                             ConfirmSeverity::Danger), 1, 1);
+  grid->addWidget(makeButton(QStringLiteral("备源掉线"),
+                             QStringLiteral("INJ_CMD_DROP_BACKUP = 4"), 4,
+                             ConfirmSeverity::Danger), 2, 0);
+  grid->addWidget(makeButton(QStringLiteral("强制锁定"),
+                             QStringLiteral("INJ_CMD_FORCE_LOCK = 5"), 5,
+                             ConfirmSeverity::Critical), 2, 1);
+  grid->addWidget(makeButton(QStringLiteral("双源掉线"),
+                             QStringLiteral("INJ_CMD_DROP_ALL = 6"), 6,
+                             ConfirmSeverity::Critical), 3, 0);
+  grid->addWidget(makeButton(QStringLiteral("强制 MRM"),
+                             QStringLiteral("INJ_CMD_FORCE_MRM = 7"), 7,
+                             ConfirmSeverity::Critical), 3, 1);
+  grid->addWidget(makeButton(QStringLiteral("CAN 耗尽"),
+                             QStringLiteral("INJ_CMD_CAN_EXHAUSTED = 8"), 8,
+                             ConfirmSeverity::Danger), 4, 0);
+  grid->addWidget(makeButton(QStringLiteral("自检失败"),
+                             QStringLiteral("INJ_CMD_SELF_TEST_FAIL = 9"), 9,
+                             ConfirmSeverity::Critical), 4, 1);
+  content_layout->addLayout(grid);
+  scroll->setWidget(content);
+  root->addWidget(scroll, 1);
+
   log_view_ = new QTextEdit(this);
   log_view_->setReadOnly(true);
   log_view_->setMinimumHeight(80);
@@ -148,92 +88,69 @@ void FaultInjectPanel::build_ui() {
       "font-family:'Courier New',monospace;font-size:10px;}")
       .arg(theme::kMdSurfaceContainerHigh, theme::kMdOnSurface,
            theme::kCardBorder));
-  root->addWidget(log_view_, 1);  // 与 scroll 平分额外高度
-
-  // 信号
-  connect(btn_drop_ctrl_, &QPushButton::clicked, this, [this]() {
-    publish_inject_command(1, 0, QStringLiteral("主源停止"));
-  });
-  connect(btn_freeze_seq_, &QPushButton::clicked, this, [this]() {
-    publish_inject_command(2, 0, QStringLiteral("SEQ 冻结"));
-  });
-  connect(btn_corrupt_crc_, &QPushButton::clicked, this, [this]() {
-    publish_inject_command(3, 0, QStringLiteral("CRC 错"));
-  });
-  connect(btn_force_mrm_, &QPushButton::clicked, this, [this]() {
-    if (!confirm_dangerous(QStringLiteral("强制 MRM"),
-                          QStringLiteral("将向 MCU 发 INJ_CMD_FORCE_MRM = 4；"
-                                         "车辆立即进入 4.8 m/s² 减速的最小风险机动（MRM）。"
-                                         "继续注入？"))) {
-      log_event(QStringLiteral("× 取消：强制 MRM"));
-      return;
-    }
-    publish_inject_command(4, 0, QStringLiteral("强制 MRM"));
-  });
-  connect(btn_force_estop_, &QPushButton::clicked, this, [this]() {
-    if (!confirm_dangerous(QStringLiteral("强制急停"),
-                          QStringLiteral("将向 MCU 发 INJ_CMD_FORCE_EMERGENCY = 5；"
-                                         "车辆立即全力制动（emergency brake）。"
-                                         "继续注入？"))) {
-      log_event(QStringLiteral("× 取消：强制急停"));
-      return;
-    }
-    publish_inject_command(5, 0, QStringLiteral("强制急停"));
-  });
-  connect(btn_force_lock_, &QPushButton::clicked, this, [this]() {
-    if (!confirm_dangerous(QStringLiteral("强制 FAULT_LOCK"),
-                          QStringLiteral("将向 MCU 发 INJ_CMD_FORCE_FAULT_LOCK = 6；"
-                                         "MCU 进入闩锁态，必须重启才能恢复。"
-                                         "继续注入？"))) {
-      log_event(QStringLiteral("× 取消：强制 FAULT_LOCK"));
-      return;
-    }
-    publish_inject_command(6, 0, QStringLiteral("强制 FAULT_LOCK"));
-  });
-  connect(btn_drop_all_, &QPushButton::clicked, this, [this]() {
-    if (!confirm_dangerous(QStringLiteral("双源失效"),
-                          QStringLiteral("将向 MCU 发 INJ_CMD_DROP_ALL = 7；"
-                                         "主/备源同时停止心跳，MCU 进入 FAILSAFE。"
-                                         "继续注入？"))) {
-      log_event(QStringLiteral("× 取消：双源失效"));
-      return;
-    }
-    publish_inject_command(7, 0, QStringLiteral("双源失效"));
-  });
-  connect(btn_inject_st_fail_, &QPushButton::clicked, this, [this]() {
-    if (!confirm_dangerous(QStringLiteral("自检失败注入"),
-                          QStringLiteral("将向 MCU 发 INJ_CMD_INJECT_SELF_TEST_FAIL = 9；"
-                                         "强制 MCU 报告自检失败并进入 FAULT_LOCK。"
-                                         "继续注入？"))) {
-      log_event(QStringLiteral("× 取消：自检失败"));
-      return;
-    }
-    publish_inject_command(9, 0, QStringLiteral("自检失败"));
-  });
-  connect(btn_recover_, &QPushButton::clicked, this, [this]() {
-    publish_inject_command(8, 0, QStringLiteral("手动恢复"));
-  });
-  connect(btn_clear_, &QPushButton::clicked, this, &FaultInjectPanel::onClearClicked);
-
-  log_event(QStringLiteral("面板就绪 — 等待桥节点订阅 /adas/_debug/fault_inject_cmd"));
+  root->addWidget(log_view_, 1);
+  logEvent(QStringLiteral("面板就绪 — 等待 bridge/CAN ack"));
 }
 
-void FaultInjectPanel::onClearClicked() {
-  log_view_->clear();
+BusyButton* FaultInjectPanel::makeButton(const QString& text,
+                                         const QString& tooltip, int command,
+                                         ConfirmSeverity severity) {
+  auto* button = new BusyButton(text, this);
+  button->setToolTip(tooltip);
+  button->setMinimumHeight(34);
+  button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  connect(button, &QPushButton::clicked, this,
+          [this, button, command, text, severity]() {
+            requestInjection(button, command, text, severity);
+          });
+  return button;
 }
 
-void FaultInjectPanel::publish_inject_command(int cmd, int param,
-                                              const QString& label) {
-  if (callback_) callback_(cmd, param, label);
-  log_event(QStringLiteral("→ INJ cmd=%1 param=%2 label=%3")
-                .arg(cmd)
-                .arg(param)
-                .arg(label));
+void FaultInjectPanel::requestInjection(BusyButton* button, int command,
+                                        const QString& label,
+                                        ConfirmSeverity severity) {
+  if (pending_button_ != nullptr) return;
+  const QString action = QStringLiteral("下发 %1（命令 %2）").arg(label).arg(command);
+  const QString impact = command == 0
+      ? QStringLiteral("将清除 MCU 可恢复故障状态。")
+      : QStringLiteral("可能立即改变 MCU 安全状态或车辆控制输出，仅应在受控测试环境执行。");
+  if (!confirm_action(this, QStringLiteral("确认故障注入"), action, impact,
+                      severity)) {
+    logEvent(QStringLiteral("× 已取消：%1").arg(label));
+    return;
+  }
+
+  button->setBusy(true, QStringLiteral("等待确认"),
+                  QStringLiteral("请求处理中，收到 ack 或超时后可重试"));
+  pending_button_ = button;
+  const QString request_id = callback_ ? callback_(command, 0, label) : QString();
+  if (request_id.isEmpty()) {
+    button->setBusy(false);
+    pending_button_ = nullptr;
+    logEvent(QStringLiteral("! 请求未发送：已有请求进行中或接口不可用"));
+    return;
+  }
+  pending_request_id_ = request_id;
+  logEvent(QStringLiteral("→ 已发送 cmd=%1 request_id=%2").arg(command).arg(request_id));
 }
 
-void FaultInjectPanel::log_event(const QString& line) {
-  const auto ts = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"));
-  log_view_->append(QStringLiteral("[%1] %2").arg(ts, line));
+void FaultInjectPanel::onRequestChanged(const QString& request_id, int state,
+                                        const QString& detail) {
+  if (state == static_cast<int>(RequestState::Sent)) return;
+  if (request_id != pending_request_id_) return;
+  const bool ok = state == static_cast<int>(RequestState::Acknowledged);
+  logEvent(QStringLiteral("%1 %2 — %3")
+               .arg(ok ? QStringLiteral("✓ 已确认") : QStringLiteral("! 失败"),
+                    request_id, detail));
+  if (pending_button_) pending_button_->setBusy(false);
+  pending_button_ = nullptr;
+  pending_request_id_.clear();
+}
+
+void FaultInjectPanel::logEvent(const QString& line) {
+  const auto timestamp =
+      QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"));
+  log_view_->append(QStringLiteral("[%1] %2").arg(timestamp, line));
 }
 
 }  // namespace adas::gui

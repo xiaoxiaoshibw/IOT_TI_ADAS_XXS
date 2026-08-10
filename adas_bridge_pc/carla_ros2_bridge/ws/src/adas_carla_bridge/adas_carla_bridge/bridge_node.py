@@ -27,6 +27,7 @@ spin 处理订阅回调；执行量带锁存取，stale 超时安全制动兜底
 
 import argparse
 import csv
+import json
 import math
 import os
 import threading
@@ -56,6 +57,7 @@ from adas_msgs.msg import (ActuationCommand, LaneConnection, LaneGraph,
                            TrackedObjectArray)
 from geometry_msgs.msg import Pose
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 
 from adas_carla_bridge.carla_world import CarlaWorld
 from adas_carla_bridge.can_protocol import CanalystReceiver, SocketCanReceiver
@@ -69,6 +71,8 @@ TOPIC_OBJECTS = '/adas/perception/objects_raw'
 TOPIC_ACTUATION = '/adas/vehicle/actuation_cmd'
 TOPIC_CPP_CAN_ACTUATION = '/adas/pc/mcu_actuation'
 TOPIC_MAP = '/adas/map/lane_graph'
+TOPIC_FAULT_COMMAND = '/adas/_debug/fault_inject_cmd'
+TOPIC_FAULT_ACK = '/adas/_debug/fault_inject_ack'
 
 # 地图一次性发布：小队列 + transient_local，晚订阅的 global_planner 也能收到最后一帧。
 # reliability 显式写死 RELIABLE：订阅端是 reliable，若这里依赖 RMW 默认值、一旦被
@@ -120,6 +124,7 @@ class CarlaBridgeNode(Node):
         self._invalid_count = 0
         self._valid_recovery_frames = 0
         self._can_receiver = None
+        self._fault_sequence = 0
 
         self.pub_odom = self.create_publisher(Odometry, TOPIC_ODOM, SENSOR_QOS)
         self.pub_lane = self.create_publisher(LaneState, TOPIC_LANE, SENSOR_QOS)
@@ -128,6 +133,9 @@ class CarlaBridgeNode(Node):
         self.pub_objects = self.create_publisher(TrackedObjectArray,
                                                  TOPIC_OBJECTS, SENSOR_QOS)
         self.pub_map = self.create_publisher(LaneGraph, TOPIC_MAP, MAP_QOS)
+        self.pub_fault_ack = self.create_publisher(String, TOPIC_FAULT_ACK, 10)
+        self.create_subscription(String, TOPIC_FAULT_COMMAND,
+                                 self._fault_inject_cb, 10)
 
         # 最新帧缓存（主线程写入，20 Hz 定时器读取）
         self._latest_frame = None
@@ -186,6 +194,35 @@ class CarlaBridgeNode(Node):
         if not valid and (invalid_count == 1 or invalid_count % 100 == 0):
             self.get_logger().error(
                 '拒绝非法执行帧：%s（累计 %d）' % (reason, invalid_count))
+
+    def _fault_inject_cb(self, msg):
+        request_id = ''
+        command = -1
+        parameter = 0
+        accepted = False
+        detail = ''
+        try:
+            payload = json.loads(msg.data)
+            request_id = str(payload.get('request_id', ''))
+            command = int(payload.get('cmd', -1))
+            parameter = int(payload.get('param', 0))
+            if not request_id:
+                raise ValueError('missing request_id')
+            if self._can_receiver is None:
+                raise RuntimeError('CAN transport is not active for this bridge')
+            self._fault_sequence = (self._fault_sequence + 1) & 0xFF
+            self._can_receiver.send_fault_injection(
+                command, parameter, self._fault_sequence)
+            accepted = True
+            detail = '0x301 transport send completed'
+        except (ValueError, TypeError, RuntimeError, OSError) as error:
+            detail = str(error)
+        ack = String()
+        ack.data = json.dumps({
+            'request_id': request_id, 'cmd': command,
+            'accepted': accepted, 'detail': detail,
+            'source': 'adas_carla_bridge'}, separators=(',', ':'))
+        self.pub_fault_ack.publish(ack)
 
     # ── 地图一次性发布（M6 第 1 步：CARLA→lane_graph）──
 

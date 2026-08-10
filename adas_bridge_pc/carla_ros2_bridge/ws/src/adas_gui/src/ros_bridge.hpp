@@ -107,7 +107,7 @@ class RosBridge : public QObject {
   // 故障注入命令（审计整改 TOP10-2）：向 `/adas/_debug/fault_inject_cmd`
   // 发布 JSON `{cmd,param,label,ts_ms,source}`。桥节点订阅后通过 PC CANalyst-II
   // 发送 0x301 帧到 MCU。仅当 MCU 烧录 ADAS_TEST_BUILD=1 时生效。
-  void publishFaultInjectCommand(int cmd, int param, const QString& label);
+  QString requestFaultInjectCommand(int cmd, int param, const QString& label);
 
  signals:
   void mcuStatusChanged(const adas::gui::GuiMcuStatus& status);
@@ -130,6 +130,8 @@ class RosBridge : public QObject {
   void navigationRequestChanged(const QString& request_id,
                                 const QString& operation, int state,
                                 const QString& detail);
+  void faultRequestChanged(const QString& request_id, int state,
+                           const QString& detail);
 
  private:
   void spin();
@@ -156,6 +158,7 @@ class RosBridge : public QObject {
   rclcpp::Client<adas_msgs::srv::CancelNavigation>::SharedPtr client_cancel_;
   // 审计整改 TOP10-2：故障注入命令 publisher
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_fault_inject_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_fault_ack_;
   rclcpp::TimerBase::SharedPtr health_timer_;
   QTimer request_timer_;
   RequestTracker requests_;

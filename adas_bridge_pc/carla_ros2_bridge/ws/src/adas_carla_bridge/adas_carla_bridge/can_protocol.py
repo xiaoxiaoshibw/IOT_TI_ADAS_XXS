@@ -16,6 +16,8 @@ CANID_MCU_CONTROL = 0x201
 CANID_MCU_HEARTBEAT = 0x202
 CANID_MCU_DIAG = 0x203
 CANID_MCU_E2E_DIAG = 0x204
+CANID_FAULT_INJECT = 0x301
+CANID_FAULT_RESPONSE = 0x302
 MCU_FEEDBACK_IDS = (CANID_MCU_CONTROL, CANID_MCU_HEARTBEAT,
                     CANID_MCU_DIAG, CANID_MCU_E2E_DIAG)
 CAN_SFF_MASK = 0x7FF
@@ -53,6 +55,20 @@ def crc8(data):
 
 def frame_crc(can_id, data):
     return crc8(bytes((can_id & 0xFF, (can_id >> 8) & 0xFF)) + data[:7])
+
+
+def encode_fault_injection(command, parameter, sequence):
+    """Encode authoritative CAN v3 0x301 payload."""
+    if command not in range(10):
+        raise ValueError('fault_command_out_of_range')
+    if parameter not in range(256) or sequence not in range(256):
+        raise ValueError('fault_parameter_or_sequence_out_of_range')
+    data = bytearray(8)
+    data[0] = command
+    data[1] = parameter
+    data[5] = sequence
+    data[7] = frame_crc(CANID_FAULT_INJECT, data)
+    return bytes(data)
 
 
 def decode_frame(can_id, data):
@@ -227,6 +243,10 @@ class SocketCanReceiver:
     def current(self):
         return self.guard.current()
 
+    def send_fault_injection(self, command, parameter, sequence):
+        data = encode_fault_injection(command, parameter, sequence)
+        self.socket.send(CAN_FRAME.pack(CANID_FAULT_INJECT, 8, data))
+
     def close(self):
         self.stop_event.set()
         try:
@@ -256,6 +276,9 @@ class CanalystReceiver:
                     'python-can/canalystii is unavailable; install python3-can, '
                     'python3-usb and canalystii') from error
             bus_factory = can.Bus
+            self._can_module = can
+        else:
+            self._can_module = None
         filters = [{'can_id': can_id, 'can_mask': CAN_SFF_MASK,
                     'extended': False} for can_id in MCU_FEEDBACK_IDS]
         self.guard = McuFeedbackGuard(feedback_timeout_s=feedback_timeout_s)
@@ -286,6 +309,19 @@ class CanalystReceiver:
 
     def current(self):
         return self.guard.current()
+
+    def send_fault_injection(self, command, parameter, sequence):
+        data = encode_fault_injection(command, parameter, sequence)
+        if self._can_module is not None:
+            message = self._can_module.Message(
+                arbitration_id=CANID_FAULT_INJECT, is_extended_id=False,
+                data=data)
+        else:
+            # Test bus factories accept a minimal message-shaped object.
+            message = type('CanMessage', (), {
+                'arbitration_id': CANID_FAULT_INJECT,
+                'is_extended_id': False, 'data': data, 'dlc': 8})()
+        self.bus.send(message)
 
     def close(self):
         self.stop_event.set()

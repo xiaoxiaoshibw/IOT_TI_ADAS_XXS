@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 from adas_carla_bridge.can_protocol import (
     CAN_EFF_FLAG, CAN_FILTER, CAN_RTR_FLAG, CAN_SFF_MASK, CanalystReceiver,
-    CANID_MCU_CONTROL, CANID_MCU_E2E_DIAG, CANID_MCU_HEARTBEAT, crc8,
-    frame_crc, MCU_FEEDBACK_IDS, McuFeedbackGuard, PROTOCOL_VERSION,
-    sequence_forward, socketcan_feedback_filters,
+    CANID_FAULT_INJECT, CANID_MCU_CONTROL, CANID_MCU_E2E_DIAG,
+    CANID_MCU_HEARTBEAT, crc8, encode_fault_injection, frame_crc,
+    MCU_FEEDBACK_IDS, McuFeedbackGuard, PROTOCOL_VERSION, sequence_forward,
+    socketcan_feedback_filters,
 )
 
 
@@ -23,6 +24,23 @@ def test_crc_and_sequence_contract():
     assert sequence_forward(1, 2)
     assert not sequence_forward(2, 2)
     assert not sequence_forward(2, 1)
+
+
+def test_fault_injection_frame_matches_can_v3_contract():
+    payload = encode_fault_injection(7, 0x34, 0x56)
+    assert payload[:5] == bytes((7, 0x34, 0, 0, 0))
+    assert payload[5:7] == bytes((0x56, 0))
+    assert payload[7] == frame_crc(CANID_FAULT_INJECT, payload)
+
+
+def test_fault_injection_rejects_values_outside_wire_width():
+    for values in ((-1, 0, 0), (10, 0, 0), (0, -1, 0),
+                   (0, 0x100, 0), (0, 0, 0x100)):
+        try:
+            encode_fault_injection(*values)
+            assert False, values
+        except ValueError:
+            pass
 
 
 def test_socketcan_filters_accept_only_exact_mcu_standard_data_ids():

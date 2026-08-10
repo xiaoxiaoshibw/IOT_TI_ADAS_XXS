@@ -115,8 +115,10 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
   // 把 0x301 命令发给桥节点；桥节点订阅后通过 PC CANalyst-II 发送 0x301 帧到 MCU。
   fault_inject_panel_ = new FaultInjectPanel(
       [bridge](int cmd, int param, const QString& label) {
-        bridge->publishFaultInjectCommand(cmd, param, label);
+        return bridge->requestFaultInjectCommand(cmd, param, label);
       });
+  connect(bridge_, &RosBridge::faultRequestChanged, fault_inject_panel_,
+          &FaultInjectPanel::onRequestChanged);
   launch_panel_->processManager()->setBridgeProbe(
       [bridge]() { return bridge->hasCarlaBridgeNode(); });
 

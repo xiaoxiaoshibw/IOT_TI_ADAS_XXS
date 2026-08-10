@@ -3,6 +3,8 @@
 #include <QDateTime>
 #include <QProcess>
 #include <QMetaObject>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStringList>
 #include <QUuid>
 
@@ -230,6 +232,22 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
   // 审计整改 TOP10-2：故障注入命令 topic；桥节点订阅后通过 0x301 帧发给 MCU
   pub_fault_inject_ = node_->create_publisher<std_msgs::msg::String>(
       "/adas/_debug/fault_inject_cmd", rclcpp::QoS(10).reliable());
+  sub_fault_ack_ = node_->create_subscription<std_msgs::msg::String>(
+      "/adas/_debug/fault_inject_ack", rclcpp::QoS(10).reliable(),
+      [this](std_msgs::msg::String::ConstSharedPtr message) {
+        const auto object = QJsonDocument::fromJson(
+            QByteArray::fromStdString(message->data)).object();
+        const QString id = object.value(QStringLiteral("request_id")).toString();
+        const bool accepted = object.value(QStringLiteral("accepted")).toBool();
+        const QString detail = object.value(QStringLiteral("detail")).toString();
+        QMetaObject::invokeMethod(this, [this, id, accepted, detail]() {
+          const QString operation = QStringLiteral("fault.inject");
+          const auto state = accepted ? RequestState::Acknowledged
+                                      : RequestState::Failed;
+          if (!requests_.finish(operation, id, state, detail)) return;
+          emit faultRequestChanged(id, static_cast<int>(state), detail);
+        }, Qt::QueuedConnection);
+      });
 
   health_timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(500), [this]() { updateHealthSnapshot(); });
@@ -238,9 +256,15 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
   connect(&request_timer_, &QTimer::timeout, this, [this]() {
     const auto expired = requests_.expire(QDateTime::currentMSecsSinceEpoch());
     for (const auto& record : expired) {
-      emit navigationRequestChanged(record.request_id, record.operation,
-                                    static_cast<int>(record.state),
-                                    QStringLiteral("请求超时，可重试"));
+      if (record.operation == QStringLiteral("fault.inject")) {
+        emit faultRequestChanged(record.request_id,
+                                 static_cast<int>(record.state),
+                                 QStringLiteral("桥接/CAN 响应超时，可重试"));
+      } else {
+        emit navigationRequestChanged(record.request_id, record.operation,
+                                      static_cast<int>(record.state),
+                                      QStringLiteral("请求超时，可重试"));
+      }
     }
   });
   request_timer_.start();
@@ -328,19 +352,30 @@ QString RosBridge::requestCancel(const QString& goal_id) {
   return id;
 }
 
-void RosBridge::publishFaultInjectCommand(int cmd, int param, const QString& label) {
+QString RosBridge::requestFaultInjectCommand(int cmd, int param,
+                                             const QString& label) {
+  const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  const QString operation = QStringLiteral("fault.inject");
+  if (!requests_.begin(operation, id, QDateTime::currentMSecsSinceEpoch(), 2000)) {
+    return {};
+  }
   std_msgs::msg::String msg;
   // 极简 JSON 序列化（避免引 nlohmann 依赖）：手工构造 {"cmd":N,"param":N,...}
   QString escaped = label;
   escaped.replace(QChar('"'), QLatin1String("\\\""));
-  QString json = QStringLiteral("{\"cmd\":%1,\"param\":%2,\"label\":\"%3\","
-                                "\"ts_ms\":%4,\"source\":\"adas_gui\"}")
+  QString json = QStringLiteral("{\"request_id\":\"%1\",\"cmd\":%2,"
+                                "\"param\":%3,\"label\":\"%4\","
+                                "\"ts_ms\":%5,\"source\":\"adas_gui\"}")
+                     .arg(id)
                      .arg(cmd)
                      .arg(param)
                      .arg(escaped)
                      .arg(QDateTime::currentMSecsSinceEpoch());
   msg.data = json.toStdString();
   pub_fault_inject_->publish(msg);
+  emit faultRequestChanged(id, static_cast<int>(RequestState::Sent),
+                           QStringLiteral("故障命令已发送到 bridge"));
+  return id;
 }
 
 void RosBridge::emitSilMcuStatus() {
