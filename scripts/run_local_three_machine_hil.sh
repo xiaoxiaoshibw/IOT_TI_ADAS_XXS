@@ -54,8 +54,24 @@ set +u
 source "$ROOT/adas_soc/install/setup.bash"
 set -u
 
-if (( BUILD )) && [[ " $* " == *" --gui"* || " $* " == *" --gui-offscreen"* ]]; then
+if (( BUILD )) && [[ " $* " == *" --gui"* || " $* " == *" --gui-offscreen"* || " $* " == *" --carla"* ]]; then
+  pc_stale_python_link="$ROOT/adas_bridge_pc/carla_ros2_bridge/ws/build/adas_msgs/ament_cmake_python/adas_msgs/adas_msgs"
+  if [[ -d "$pc_stale_python_link" && ! -L "$pc_stale_python_link" ]]; then
+    cmake -E remove_directory "$pc_stale_python_link"
+  fi
   "$ROOT/adas_bridge_pc/build.sh"
+fi
+
+if [[ " $* " == *" --carla"* ]]; then
+  pc_setup="$ROOT/adas_bridge_pc/carla_ros2_bridge/ws/install/setup.bash"
+  [[ -f "$pc_setup" ]] || {
+    echo "PC CARLA bridge is not built; rerun with --build --carla" >&2
+    exit 1
+  }
+  set +u
+  # shellcheck disable=SC1090
+  source "$pc_setup"
+  set -u
 fi
 
 filtered=()

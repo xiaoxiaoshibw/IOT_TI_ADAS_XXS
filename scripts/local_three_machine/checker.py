@@ -82,6 +82,7 @@ class Checker(Node):
         super().__init__('local_three_machine_checker')
         self.times = defaultdict(list)
         self.last = {}
+        self.odom_samples = []
         self.fault_acks = {}
         sensor = QoSProfile(depth=20)
         sensor.reliability = ReliabilityPolicy.BEST_EFFORT
@@ -114,6 +115,10 @@ class Checker(Node):
     def on_topic(self, name, msg):
         self.times[name].append(time.monotonic())
         self.last[name] = msg
+        if name == '/adas/localization/kinematic_state':
+            self.odom_samples.append((
+                time.monotonic(), float(msg.pose.pose.position.x),
+                float(msg.pose.pose.position.y), float(msg.twist.twist.linear.x)))
 
     def on_ack(self, msg):
         try:
@@ -165,6 +170,10 @@ def main():
     parser.add_argument('--fault-test', action='store_true')
     parser.add_argument('--dangerous-fault-test', action='store_true')
     parser.add_argument('--navigation-test', action='store_true')
+    parser.add_argument('--carla', action='store_true')
+    parser.add_argument('--carla-host', default='127.0.0.1')
+    parser.add_argument('--carla-port', type=int, default=2000)
+    parser.add_argument('--scenario', default='baseline')
     args = parser.parse_args()
 
     results = Results()
@@ -176,8 +185,10 @@ def main():
     spin = threading.Thread(target=executor.spin, daemon=True)
     spin.start()
     try:
-        expected_nodes = {'/local_three_machine_pc', '/can_gateway', '/global_planner',
-                          '/sim_vehicle', '/behavior_planner', '/trajectory_planner'}
+        pc_node = '/carla_bridge' if args.carla else '/local_three_machine_pc'
+        vehicle_node = set() if args.carla else {'/sim_vehicle'}
+        expected_nodes = {pc_node, '/can_gateway', '/global_planner',
+                          '/behavior_planner', '/trajectory_planner'} | vehicle_node
         deadline = time.monotonic() + 45.0
         names = set()
         while time.monotonic() < deadline:
@@ -204,6 +215,46 @@ def main():
                   for topic in required_topics}
         continuous = all(count >= 2 for count in counts.values())
         results.add('ROS closed loop', continuous, json.dumps(counts, sort_keys=True))
+
+        if args.carla:
+            carla_ok = False
+            carla_detail = ''
+            try:
+                import carla
+                client = carla.Client(args.carla_host, args.carla_port)
+                client.set_timeout(3.0)
+                world = client.get_world()
+                map_name = world.get_map().name
+                actors = world.get_actors()
+                heroes = [actor for actor in actors
+                          if actor.attributes.get('role_name') == 'hero']
+                leads = [actor for actor in actors
+                         if actor.attributes.get('role_name') == 'lead']
+                needs_lead = args.scenario in ('acc', 'aeb', 'overtake')
+                actor_ok = len(heroes) == 1 and (not needs_lead or len(leads) >= 1)
+
+                deadline = time.monotonic() + 20.0
+                distance = 0.0
+                max_speed = 0.0
+                while time.monotonic() < deadline:
+                    samples = list(node.odom_samples)
+                    if len(samples) >= 2:
+                        x0, y0 = samples[0][1], samples[0][2]
+                        distance = max(
+                            ((x - x0) ** 2 + (y - y0) ** 2) ** 0.5
+                            for _, x, y, _ in samples)
+                        max_speed = max(abs(speed) for *_, speed in samples)
+                    if distance >= 1.0 and max_speed >= 0.5:
+                        break
+                    time.sleep(0.1)
+                carla_ok = ('Town04' in map_name and actor_ok and
+                            distance >= 1.0 and max_speed >= 0.5)
+                carla_detail = ('map=%s hero=%d lead=%d displacement=%.2fm '
+                                'max_speed=%.2fm/s' %
+                                (map_name, len(heroes), len(leads), distance, max_speed))
+            except Exception as error:
+                carla_detail = repr(error)
+            results.add('CARLA vehicle dynamics', carla_ok, carla_detail)
 
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline and any(

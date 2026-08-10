@@ -2,6 +2,7 @@
 """Own and verify one local PC/Orin/MCU HIL process topology."""
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOG_ROOT = ROOT / 'logs' / 'local_three_machine'
 CRITICAL_PATTERNS = (
     'local_three_machine_pc', 'mcu_sil_runner.py', 'can_gateway_node',
-    'global_planner_node', 'trajectory_planner_node', '/adas_gui/adas_gui')
+    'global_planner_node', 'trajectory_planner_node', '/adas_gui/adas_gui',
+    'CarlaUE4', 'adas_carla_bridge/lib/adas_carla_bridge/bridge_node')
 
 
 def parse_args():
@@ -30,6 +32,9 @@ def parse_args():
     parser.add_argument('--fault-test', action='store_true')
     parser.add_argument('--dangerous-fault-test', action='store_true')
     parser.add_argument('--navigation-test', action='store_true')
+    parser.add_argument('--carla', action='store_true',
+                        help='run a real CARLA server and CARLA PC bridge')
+    parser.add_argument('--carla-root', default=os.environ.get('CARLA_ROOT', ''))
     return parser.parse_args()
 
 
@@ -73,6 +78,8 @@ class Run:
             'schema_version': 1, 'overall': 'RUNNING',
             'run_id': self.log_dir.name, 'ros_domain_id': os.environ.get('ROS_DOMAIN_ID'),
             'can_interface': 'vcan0', 'scenario': self.args.scenario,
+            'simulation': ('carla' if getattr(self.args, 'carla', False)
+                           else 'software_vehicle'),
             'log_dir': str(self.log_dir), 'checks': [], 'processes': {},
         }
         self.write_report(report)
@@ -99,19 +106,22 @@ class Run:
         print('[%s] %s%s' % ('PASS' if ok else 'FAIL', name,
                              '' if not detail else ': ' + detail), flush=True)
 
-    def start(self, role, command, extra_env=None):
+    def start(self, role, command, extra_env=None, cwd=ROOT, remove_env=()):
         log_path = self.log_dir / ('%s.log' % role)
         stream = open(log_path, 'w', encoding='utf-8')
         env = os.environ.copy()
+        for name in remove_env:
+            env.pop(name, None)
         if extra_env:
             env.update(extra_env)
-        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream,
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         self.processes[role] = process
         self.logs[role] = stream
         report = self.read_report()
         report.setdefault('processes', {})[role] = {
-            'pid': process.pid, 'log': str(log_path), 'command': command}
+            'pid': process.pid, 'log': str(log_path), 'command': command,
+            'cwd': str(cwd)}
         self.write_report(report)
         return process
 
@@ -196,6 +206,56 @@ def interface_ready():
     return result.returncode == 0 and 'UP' in result.stdout.split('\n', 1)[0]
 
 
+def wait_gui_lock(process, timeout=5.0):
+    path = '/tmp/adas_gui.lock'
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process.poll() is None:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BlockingIOError:
+                return True
+        finally:
+            os.close(fd)
+        time.sleep(0.02)
+    return False
+
+
+def find_carla_root(explicit):
+    candidates = [Path(explicit)] if explicit else []
+    candidates += [Path.home() / 'CARLA_0.9.16', Path.home() / '程序' / 'CARLA_0.9.16']
+    for candidate in candidates:
+        if candidate and (candidate / 'CarlaUE4.sh').is_file():
+            return candidate.resolve()
+    return None
+
+
+def wait_carla_ready(process, timeout=90.0):
+    try:
+        import carla
+    except ImportError:
+        return False, 'PythonAPI module carla is not importable'
+    deadline = time.monotonic() + timeout
+    last = 'not contacted'
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False, 'CARLA exited rc=%s' % process.returncode
+        try:
+            # A CARLA rpc client that timed out while UE was booting can retain
+            # a stale connection. Use a fresh client for each readiness probe.
+            client = carla.Client('127.0.0.1', 2000)
+            client.set_timeout(3.0)
+            world = client.get_world()
+            return True, '%s frame=%d' % (world.get_map().name,
+                                          world.get_snapshot().frame)
+        except RuntimeError as error:
+            last = str(error)
+        time.sleep(0.25)
+    return False, 'CARLA readiness timeout: ' + last
+
+
 def main():
     args = parse_args()
     if args.duration < 0:
@@ -230,14 +290,52 @@ def main():
         mcu = run.start('mcu', [
             sys.executable, str(ROOT / 'adas_mcu/tools/mcu_sil_runner.py'),
             '--interface', 'vcan0'])
-        pc = run.start('pc', [
-            sys.executable, str(ROOT / 'scripts/local_three_machine/pc_companion.py'),
-            '--interface', 'vcan0'])
-        orin_command = [
-            'ros2', 'launch', 'adas_launch', 'local_three_machine.launch.py',
-        ]
-        if overlay:
-            orin_command.append('scenario:=' + overlay)
+        if args.carla:
+            carla_root = find_carla_root(args.carla_root)
+            if carla_root is None:
+                raise RuntimeError(
+                    'CARLA 0.9.16 not found; set CARLA_ROOT to its installation directory')
+            carla_command = [str(carla_root / 'CarlaUE4.sh'), '-nosound',
+                             '-quality-level=Low', '-carla-port=2000']
+            # A normal --gui run keeps the native CARLA window visible. CI and
+            # no-GUI runs still execute full CARLA physics/rendering offscreen.
+            if not args.gui:
+                carla_command.append('-RenderOffScreen')
+            carla_process = run.start(
+                'carla', carla_command, cwd=carla_root,
+                remove_env=('LD_LIBRARY_PATH', 'PYTHONPATH', 'QT_PLUGIN_PATH',
+                            'QML2_IMPORT_PATH'))
+            carla_ready, carla_detail = wait_carla_ready(carla_process)
+            run.add_check('CARLA server', carla_ready, carla_detail)
+            if not carla_ready:
+                raise RuntimeError(carla_detail)
+
+            bridge_binary = (ROOT / 'adas_bridge_pc/carla_ros2_bridge/ws/install' /
+                             'adas_carla_bridge/lib/adas_carla_bridge/bridge_node')
+            if not bridge_binary.is_file():
+                raise RuntimeError('CARLA bridge is not built; rerun with --build')
+            scenario = {'baseline': 'lka', 'acc': 'acc', 'aeb': 'aeb',
+                        'overtake': 'overtake'}[args.scenario]
+            pc_command = [
+                str(bridge_binary), '--scenario', scenario,
+                '--control-source', 'can', '--can-transport', 'socketcan',
+                '--can-interface', 'vcan0', '--carla-host', '127.0.0.1',
+                '--carla-port', '2000', '--town', 'Town04', '--duration', '0',
+                '--log-dir', str(run.log_dir / 'carla_csv')]
+            pc = run.start('pc', pc_command)
+            orin_command = [
+                'ros2', 'launch', 'adas_launch',
+                'local_three_machine_carla.launch.py']
+        else:
+            pc_command = [
+                sys.executable,
+                str(ROOT / 'scripts/local_three_machine/pc_companion.py'),
+                '--interface', 'vcan0']
+            pc = run.start('pc', pc_command)
+            orin_command = [
+                'ros2', 'launch', 'adas_launch', 'local_three_machine.launch.py']
+            if overlay:
+                orin_command.append('scenario:=' + overlay)
         orin = run.start('orin', orin_command)
         gui_expected = args.gui or args.gui_offscreen
         if gui_expected:
@@ -249,15 +347,27 @@ def main():
             # CycloneDDS to the physical Orin link. Local HIL keeps the inherited
             # RMW default and only uses the explicitly scoped domain 145.
             gui_command = [str(gui_binary)]
-            gui_env = {'ADAS_GUI_MODE': 'sil'}
+            gui_env = {
+                'ADAS_LOCAL_THREE_MACHINE': '1',
+                'XDG_CONFIG_HOME': str(run.log_dir / 'gui_config'),
+            }
+            if args.carla:
+                gui_env['CARLA_ROOT'] = str(carla_root)
+                gui_env['ADAS_GUI_SCENARIO'] = scenario
+                gui_env['ADAS_GUI_CONTROL_SOURCE'] = 'can'
+            else:
+                gui_env['ADAS_GUI_MODE'] = 'sil'
             if args.gui_offscreen:
                 gui_env['QT_QPA_PLATFORM'] = 'offscreen'
-                gui_command += ['--screenshot', str(run.log_dir / 'gui.png')]
+                gui_command += ['--screenshot', str(run.log_dir / 'gui.png'),
+                                '--screenshot-delay-ms',
+                                '8000' if args.carla else '1500']
             run.start('gui', gui_command, gui_env)
 
-        time.sleep(0.5)
         duplicate_gui_rejected = True
         if gui_expected and run.alive('gui'):
+            if not wait_gui_lock(run.processes['gui']):
+                raise RuntimeError('GUI did not acquire its single-instance lock')
             duplicate = subprocess.run(
                 [str(gui_binary), '--screenshot', str(run.log_dir / 'duplicate.png')],
                 cwd=ROOT, env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen',
@@ -267,7 +377,8 @@ def main():
             duplicate_gui_rejected = duplicate.returncode == 2
             (run.log_dir / 'gui_duplicate.log').write_text(
                 duplicate.stdout, encoding='utf-8')
-        process_ok = run.wait_alive(['mcu', 'pc', 'orin'], timeout=2.0)
+        managed_roles = ['mcu', 'pc', 'orin'] + (['carla'] if args.carla else [])
+        process_ok = run.wait_alive(managed_roles, timeout=2.0)
         run.add_check('PC process', run.alive('pc'), 'pid=%d' % pc.pid)
         run.add_check('MCU host runner', run.alive('mcu'), 'pid=%d' % mcu.pid)
         if not process_ok:
@@ -275,7 +386,7 @@ def main():
 
         if args.gui_offscreen:
             try:
-                run.processes['gui'].wait(timeout=12.0)
+                run.processes['gui'].wait(timeout=20.0)
             except subprocess.TimeoutExpired:
                 raise RuntimeError('offscreen GUI screenshot timed out')
             screenshot = run.log_dir / 'gui.png'
@@ -297,7 +408,9 @@ def main():
             command = [
                 sys.executable, str(ROOT / 'scripts/local_three_machine/checker.py'),
                 '--interface', 'vcan0', '--report', str(run.report_path),
-                '--mcu-pid', str(mcu.pid)]
+                '--mcu-pid', str(mcu.pid), '--scenario', args.scenario]
+            if args.carla:
+                command.append('--carla')
             if args.fault_test:
                 command.append('--fault-test')
             if args.dangerous_fault_test:
@@ -346,10 +459,7 @@ def main():
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 pc_down = probe.returncode == 0
                 recovery_detail.append('pc_down=' + probe.stdout.strip())
-                pc_recovery = run.start('pc_recovery', [
-                    sys.executable,
-                    str(ROOT / 'scripts/local_three_machine/pc_companion.py'),
-                    '--interface', 'vcan0'])
+                pc_recovery = run.start('pc_recovery', pc_command)
                 probe = subprocess.run([
                     sys.executable, str(ROOT / 'scripts/local_three_machine/probe.py'),
                     '--fault', 'success', '--timeout', '5'], cwd=ROOT,
@@ -376,13 +486,13 @@ def main():
         if args.duration:
             deadline = time.monotonic() + args.duration
             while time.monotonic() < deadline:
-                if not all(run.alive(role) for role in ('mcu', 'pc', 'orin')):
+                if not all(run.alive(role) for role in managed_roles):
                     rc = 1
                     break
                 time.sleep(0.2)
         elif not args.check or args.keep_running:
             print('local three-machine HIL running; Ctrl-C to stop', flush=True)
-            while all(run.alive(role) for role in ('mcu', 'pc', 'orin')):
+            while all(run.alive(role) for role in managed_roles):
                 time.sleep(0.5)
             rc = 1
         return rc
