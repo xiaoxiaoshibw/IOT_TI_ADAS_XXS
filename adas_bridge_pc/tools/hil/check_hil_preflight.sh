@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 HIL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ADAS_PC_DIR="$(cd -- "${HIL_DIR}/../.." && pwd)"
+# Reuse the same CARLA_ROOT resolution as start_carla.sh and start_gui.sh.
+# shellcheck source=/dev/null
+source "${ADAS_PC_DIR}/scripts/carla_path.sh"
 # shellcheck source=adas_pc/tools/hil/hil_common.sh
 source "${HIL_DIR}/hil_common.sh"
+CARLA_ROOT="$(resolve_carla_root)"
+export CARLA_ROOT
 
 failures=0
 check_file() {
@@ -14,7 +20,12 @@ check_cmd() {
 
 check_file "/opt/ros/jazzy/setup.bash" "ROS2 Jazzy"
 check_file "${ADAS_PC_DIR}/carla_ros2_bridge/ws/install/setup.bash" "Bridge 工作区"
-check_file "${HOME}/CARLA_0.9.16/CarlaUE4.sh" "CARLA 0.9.16"
+if [[ -x "${CARLA_ROOT}/CarlaUE4.sh" ]]; then
+  pass "CARLA 0.9.16: ${CARLA_ROOT}/CarlaUE4.sh"
+else
+  fail "CARLA 0.9.16 缺失或不可执行: ${CARLA_ROOT}/CarlaUE4.sh" || true
+  failures=$((failures + 1))
+fi
 for command_name in python3 ros2 ssh ss candump; do check_cmd "${command_name}"; done
 
 load_pc_ros

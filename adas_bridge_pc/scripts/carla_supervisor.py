@@ -155,10 +155,7 @@ class Supervisor:
                     "host": payload["host"], "port": payload["port"],
                     "note": "CARLA 已在运行（supervisor 模式探测到）",
                 }
-            bin_path = os.path.join(
-                os.environ.get("CARLA_ROOT", os.path.expanduser("~/CARLA_0.9.16")),
-                "CarlaUE4.sh",
-            )
+            bin_path = inv.DEFAULT_CARLA_BIN
             if not os.path.isfile(bin_path) or not os.access(bin_path, os.X_OK):
                 return {
                     "action": "start", "state": "error",

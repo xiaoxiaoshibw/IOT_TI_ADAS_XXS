@@ -36,6 +36,10 @@ case "${requested_backend}" in
 esac
 
 source "$(cd "$(dirname "$0")" && pwd)/scripts/common.sh"
+if [[ "${requested_backend}" != "mil" ]]; then
+  CARLA_ROOT="$(resolve_carla_root)"
+  export CARLA_ROOT
+fi
 
 source_workspace
 # 从 Snap 版 VS Code 启动终端时会继承 core20 的 GTK/GIO 搜索路径，Qt 插件

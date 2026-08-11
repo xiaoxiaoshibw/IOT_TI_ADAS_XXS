@@ -4,6 +4,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "${REPO_ROOT}/scripts/carla_path.sh"
 WORKSPACE="${REPO_ROOT}/carla_ros2_bridge/ws"
 ROS_DISTRO="${ROS_DISTRO:-jazzy}"
 ROS_SETUP="/opt/ros/${ROS_DISTRO}/setup.bash"
@@ -57,17 +59,8 @@ source_workspace() {
 }
 
 carla_executable() {
-  local root="${CARLA_ROOT:-}"
-  if [[ -z "${root}" ]]; then
-    local candidate
-    for candidate in "${HOME}/CARLA_0.9.16" "${HOME}/程序/CARLA_0.9.16"; do
-      if [[ -x "${candidate}/CarlaUE4.sh" ]]; then
-        root="${candidate}"
-        break
-      fi
-    done
-  fi
-  root="${root:-${HOME}/CARLA_0.9.16}"
-  [[ -x "${root}/CarlaUE4.sh" ]] || fail "Set CARLA_ROOT to the CARLA 0.9.16 directory (missing ${root}/CarlaUE4.sh)."
+  local root
+  root="$(resolve_carla_root)"
+  [[ -x "${root}/CarlaUE4.sh" ]] || fail "CARLA 0.9.16 executable not found or not executable: ${root}/CarlaUE4.sh (set CARLA_ROOT to override)."
   printf '%s\n' "${root}/CarlaUE4.sh"
 }

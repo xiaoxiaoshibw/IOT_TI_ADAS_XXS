@@ -54,8 +54,8 @@ BRIDGE_LAUNCHER="${STACK_BRIDGE_LAUNCHER:-${SCRIPT_DIR}/start_bridge.sh}"
 CARLA_READY_MODE="${STACK_CARLA_READY_MODE:-rpc}"
 CARLA_STABILIZATION_SEC="${CARLA_STABILIZATION_SEC:-10}"
 
-# CARLA 安装根（与 common.sh 口径一致；只读，用于识别“本项目 CARLA”）
-CARLA_ROOT="${CARLA_ROOT:-${HOME}/CARLA_0.9.16}"
+# CARLA 安装根在 main() source common.sh 后统一解析。
+CARLA_ROOT="${CARLA_ROOT:-}"
 
 # ── 运行期状态（不得硬编码为某次运行结果）──────────────────────────
 CLEANUP_STARTED=0
@@ -183,8 +183,9 @@ check_dependencies() {
     missing=1
   fi
   if [[ ! -x "${CARLA_ROOT}/CarlaUE4.sh" ]]; then
-    log_warn CARLA_ROOT_SUSPECT \
+    log_error DEP_MISSING \
       "$(kv_q carla_root "${CARLA_ROOT}")" reason=missing_CarlaUE4.sh
+    missing=1
   fi
   return "${missing}"
 }
@@ -605,7 +606,8 @@ main() {
   source "${SCRIPT_DIR}/scripts/common.sh"
   set -Eeuo pipefail
   IFS=$'\n\t'
-  CARLA_ROOT="${CARLA_ROOT:-${HOME}/CARLA_0.9.16}"
+  CARLA_ROOT="$(resolve_carla_root)"
+  export CARLA_ROOT
 
   MANAGER_PGID="$(ps -o pgid= -p "$$" | tr -d ' ')"
 

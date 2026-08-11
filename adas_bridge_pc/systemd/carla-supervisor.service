@@ -17,7 +17,7 @@ RuntimeDirectory=adas
 RuntimeDirectoryMode=0755
 
 # CARLA 需要 X / Vulkan；当前只跑 RPC，no-rendering 也可
-Environment=CARLA_ROOT=/home/xxs/CARLA_0.9.16
+Environment=CARLA_ROOT=/home/xxs/程序/CARLA_0.9.16
 Environment=TOWN=Town04
 Environment=CARLA_PORT=2000
 Environment=CARLA_HOST=127.0.0.1

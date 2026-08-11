@@ -17,6 +17,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVOKER="${REPO_ROOT}/scripts/carla_invoker.py"
+source "${REPO_ROOT}/scripts/common.sh"
+CARLA_ROOT="$(resolve_carla_root)"
+export CARLA_ROOT
+# Validate before contacting the supervisor so every launch mode fails with the
+# same selected path when CARLA is absent.
+carla_executable >/dev/null
 
 # 解析 CARLA_ARGS 为 invoker 的 --quality-level
 QUALITY_LEVEL="Epic"
@@ -35,7 +41,6 @@ fi
 
 if [[ "${ADAS_LEGACY_CARLA:-0}" == "1" ]]; then
   # 回退到旧的直接路径（仅 dev / debug 使用）
-  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/common.sh"
   exec "$(carla_executable)" ${CARLA_ARGS:-} "$@"
 fi
 

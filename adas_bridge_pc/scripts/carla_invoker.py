@@ -50,8 +50,23 @@ SUPERVISOR_SOCKET = Path(
 )
 SUPERVISOR_TIMEOUT_S = float(os.environ.get("ADAS_INVOKER_SUPERVISOR_TIMEOUT", "0.5"))
 
-# CARLA 默认路径：与 common.sh carla_executable() 完全一致。
-DEFAULT_CARLA_ROOT = os.environ.get("CARLA_ROOT") or os.path.expanduser("~/CARLA_0.9.16")
+# CARLA 默认路径：与 common.sh resolve_carla_root() 完全一致。
+def resolve_carla_root() -> str:
+    configured = os.environ.get("CARLA_ROOT")
+    if configured:
+        return os.path.expanduser(configured)
+    candidates = [
+        Path.home() / "程序" / "CARLA_0.9.16",
+        Path.home() / "CARLA_0.9.16",
+    ]
+    for candidate in candidates:
+        executable = candidate / "CarlaUE4.sh"
+        if executable.is_file() and os.access(executable, os.X_OK):
+            return str(candidate)
+    return str(candidates[0])
+
+
+DEFAULT_CARLA_ROOT = resolve_carla_root()
 DEFAULT_CARLA_BIN = os.path.join(DEFAULT_CARLA_ROOT, "CarlaUE4.sh")
 
 # 默认 town 与 quality —— 与 common.sh 默认值对齐。

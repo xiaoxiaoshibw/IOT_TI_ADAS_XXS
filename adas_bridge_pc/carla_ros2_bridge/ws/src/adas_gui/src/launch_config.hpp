@@ -179,21 +179,20 @@ inline bool scenario_supports_backend(const ScenarioCatalogEntry& scenario,
 
 inline QString discover_carla_root() {
   const QString from_env = qEnvironmentVariable("CARLA_ROOT");
-  if (QFileInfo::exists(QDir(from_env).filePath(QStringLiteral("CarlaUE4.sh")))) {
-    return from_env;
-  }
+  // An explicit override is authoritative even when invalid; the preflight
+  // must report that exact path instead of silently falling back.
+  if (!from_env.isEmpty()) return from_env;
   const QString home = QDir::homePath();
-  QStringList candidates{QDir(home).filePath(QStringLiteral("CARLA_0.9.16"))};
-  const QDir home_dir(home);
-  for (const QString& child : home_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-    candidates << home_dir.filePath(child + QStringLiteral("/CARLA_0.9.16"));
-  }
+  const QString preferred = QDir(home).filePath(QStringLiteral("程序/CARLA_0.9.16"));
+  const QStringList candidates{preferred,
+                               QDir(home).filePath(QStringLiteral("CARLA_0.9.16"))};
   for (const QString& candidate : candidates) {
-    if (QFileInfo::exists(QDir(candidate).filePath(QStringLiteral("CarlaUE4.sh")))) {
+    const QFileInfo executable(QDir(candidate).filePath(QStringLiteral("CarlaUE4.sh")));
+    if (executable.isFile() && executable.isExecutable()) {
       return QDir(candidate).absolutePath();
     }
   }
-  return candidates.front();
+  return preferred;
 }
 
 inline QStringList known_towns() {

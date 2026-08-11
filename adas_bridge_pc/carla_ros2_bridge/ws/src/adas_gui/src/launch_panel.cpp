@@ -908,7 +908,9 @@ void LaunchPanel::restore_settings() {
        settings.value(QStringLiteral("launch/control_source"),
                       environment_or("ADAS_GUI_CONTROL_SOURCE",
                                      QStringLiteral("ros2"))).toString());
-  QString saved_root = settings.value(QStringLiteral("launch/carla_root")).toString();
+  QString saved_root = qEnvironmentVariableIsSet("CARLA_ROOT")
+      ? default_carla_root()
+      : settings.value(QStringLiteral("launch/carla_root")).toString();
   if (!QFileInfo::exists(QDir(saved_root).filePath(QStringLiteral("CarlaUE4.sh")))) {
     saved_root = default_carla_root();
   }

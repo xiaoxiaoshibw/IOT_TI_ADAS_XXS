@@ -106,10 +106,10 @@ class StartWithoutCarlaTests(unittest.TestCase):
     """CARLA 二进制不存在时,start 应该返回非零退出码 + error 状态。"""
 
     def setUp(self):
-        self.mod = _load_invoker()
-        # 临时把 CARLA_ROOT 改成不存在的目录
+        # 必须在加载模块前覆盖；DEFAULT_CARLA_BIN 在 import 时解析。
         self._original_root = os.environ.get("CARLA_ROOT")
         os.environ["CARLA_ROOT"] = "/nonexistent/carla_root_for_test"
+        self.mod = _load_invoker()
 
     def tearDown(self):
         if self._original_root is None:

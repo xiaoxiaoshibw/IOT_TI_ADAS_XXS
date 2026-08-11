@@ -238,9 +238,10 @@ def wait_gui_lock(process, timeout=5.0):
 
 def find_carla_root(explicit):
     candidates = [Path(explicit)] if explicit else []
-    candidates += [Path.home() / 'CARLA_0.9.16', Path.home() / '程序' / 'CARLA_0.9.16']
+    candidates += [Path.home() / '程序' / 'CARLA_0.9.16', Path.home() / 'CARLA_0.9.16']
     for candidate in candidates:
-        if candidate and (candidate / 'CarlaUE4.sh').is_file():
+        executable = candidate / 'CarlaUE4.sh'
+        if executable.is_file() and os.access(executable, os.X_OK):
             return candidate.resolve()
     return None
 
