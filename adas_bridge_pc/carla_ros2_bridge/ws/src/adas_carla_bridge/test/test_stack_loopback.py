@@ -40,11 +40,39 @@ LEAD_GAP0_M = 60.0
 LEAD_SPEED_MPS = 8.0
 
 
+def populate_loopback_objects(message, lead_x, actor_count):
+    """Populate an ID-sorted N-target array matching bridge topic semantics."""
+    message.primary_lead_id = -1
+    for index in range(actor_count):
+        obj = TrackedObject()
+        obj.id = index + 1
+        obj.classification = TrackedObject.CLASS_CAR
+        obj.pose.pose.position.x = lead_x + 30.0 * index
+        obj.pose.pose.position.y = 0.0 if index == 0 else (
+            3.5 if index % 2 else -3.5)
+        obj.pose.pose.orientation.w = 1.0
+        obj.twist.twist.linear.x = LEAD_SPEED_MPS + 0.25 * index
+        obj.dimensions.x, obj.dimensions.y, obj.dimensions.z = 4.5, 1.8, 1.5
+        message.objects.append(obj)
+    return message
+
+
+def test_n_target_topic_structure_is_sorted_and_primary_is_unset():
+    message = populate_loopback_objects(TrackedObjectArray(), 60.0, 20)
+
+    assert len(message.objects) == 20
+    assert [obj.id for obj in message.objects] == list(range(1, 21))
+    assert message.primary_lead_id == -1
+
+
 class LoopbackBridge(Node):
     """直道运动学假 CARLA：发感知四话题，收 actuation_cmd 推进模型。"""
 
-    def __init__(self):
+    def __init__(self, actor_count=1):
         super().__init__('carla_bridge_loopback')
+        if actor_count < 1:
+            raise ValueError('actor_count must be positive')
+        self.actor_count = actor_count
         qos = qos_profile_sensor_data
         self.pub_odom = self.create_publisher(
             Odometry, '/adas/localization/kinematic_state', qos)
@@ -133,26 +161,18 @@ class LoopbackBridge(Node):
         objects = TrackedObjectArray()
         objects.header.stamp = self.get_clock().now().to_msg()
         objects.header.frame_id = 'odom'
-        objects.primary_lead_id = -1
-        o = TrackedObject()
-        o.id = 1
-        o.classification = TrackedObject.CLASS_CAR
-        o.pose.pose.position.x = self.lead_x
-        o.pose.pose.position.y = 0.0
-        o.pose.pose.orientation.w = 1.0
-        o.twist.twist.linear.x = LEAD_SPEED_MPS
-        o.dimensions.x, o.dimensions.y, o.dimensions.z = 4.5, 1.8, 1.5
-        objects.objects.append(o)
+        populate_loopback_objects(objects, self.lead_x, self.actor_count)
         self.pub_objects.publish(objects)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--duration', type=float, default=20.0)
+    parser.add_argument('--actor-count', type=int, default=1)
     args = parser.parse_args()
 
     rclpy.init()
-    node = LoopbackBridge()
+    node = LoopbackBridge(actor_count=args.actor_count)
     t_end = time.monotonic() + args.duration
     while rclpy.ok() and time.monotonic() < t_end:
         rclpy.spin_once(node, timeout_sec=0.1)

@@ -6,14 +6,19 @@
 
 namespace adas::gui {
 
-TEST(ProcessManager, RosGraphBridgeIsReused) {
+TEST(ProcessManager, HilIsRejectedWithoutStartingHardware) {
   ProcessManager manager;
-  manager.setBridgeProbe([]() { return true; });
+  ProcState reported = ProcState::Stopped;
+  QObject::connect(&manager, &ProcessManager::bridgeChanged,
+                   [&reported](ProcState state, const QString&) { reported = state; });
 
   LaunchConfig config;
-  manager.startBridge(config);
+  config.backend = QStringLiteral("hil");
+  manager.startAll(config);
 
-  EXPECT_EQ(manager.bridgeState(), ProcState::Running);
+  EXPECT_EQ(reported, ProcState::Failed);
+  EXPECT_EQ(manager.bridgeState(), ProcState::Stopped);
+  EXPECT_FALSE(manager.hasManagedProcesses());
 }
 
 TEST(ProcessManager, ExternalBridgeIsNotStoppedByGui) {
@@ -29,23 +34,22 @@ TEST(ProcessManager, ExternalBridgeIsNotStoppedByGui) {
   EXPECT_FALSE(manager.hasManagedProcesses());
 }
 
-TEST(ProcessManager, ExternalCarlaIsNotStoppedByGui) {
-  QTcpServer server;
-  ASSERT_TRUE(server.listen(QHostAddress::LocalHost, 0));
-
+TEST(ProcessManager, MilRejectsWrongDdsDomainBeforeSpawning) {
+  const QByteArray previous = qgetenv("ROS_DOMAIN_ID");
+  qputenv("ROS_DOMAIN_ID", "43");
   ProcessManager manager;
+  ProcState reported = ProcState::Stopped;
+  QObject::connect(&manager, &ProcessManager::bridgeChanged,
+                   [&reported](ProcState state, const QString&) { reported = state; });
   LaunchConfig config;
-  config.carla_port = server.serverPort();
-  manager.startCarla(config);
+  config.backend = QStringLiteral("mil");
+  manager.startAll(config);
 
-  EXPECT_TRUE(manager.externalCarlaDetected());
+  EXPECT_EQ(reported, ProcState::Failed);
+  EXPECT_EQ(manager.bridgeState(), ProcState::Stopped);
   EXPECT_FALSE(manager.hasManagedProcesses());
-
-  manager.stopAll();
-
-  EXPECT_TRUE(server.isListening());
-  EXPECT_TRUE(manager.externalCarlaDetected());
-  EXPECT_FALSE(manager.hasManagedProcesses());
+  if (previous.isNull()) qunsetenv("ROS_DOMAIN_ID");
+  else qputenv("ROS_DOMAIN_ID", previous);
 }
 
 TEST(ProcessManager, ExternalBridgeDisappearanceRestoresStoppedState) {
@@ -72,6 +76,24 @@ TEST(ProcessManager, RejectedFlashAlwaysCompletesForUiRecovery) {
 
   EXPECT_EQ(completions, 1);
   EXPECT_FALSE(success);
+}
+
+TEST(ProcessManager, ExistingMilRuntimeForcesObserverMode) {
+  const QByteArray previous = qgetenv("ADAS_LOCAL_THREE_MACHINE");
+  qputenv("ADAS_LOCAL_THREE_MACHINE", "1");
+  {
+    ProcessManager manager;
+    EXPECT_TRUE(manager.localThreeMachineObserver());
+    LaunchConfig config;
+    config.backend = QStringLiteral("mil");
+    manager.startAll(config);
+    EXPECT_EQ(manager.bridgeState(), ProcState::Running);
+    EXPECT_FALSE(manager.hilManagerActive());
+    manager.stopAll();
+    EXPECT_FALSE(manager.hilManagerActive());
+  }
+  if (previous.isNull()) qunsetenv("ADAS_LOCAL_THREE_MACHINE");
+  else qputenv("ADAS_LOCAL_THREE_MACHINE", previous);
 }
 
 }  // namespace adas::gui

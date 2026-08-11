@@ -6,6 +6,7 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDoubleSpinBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,6 +19,7 @@
 #include "demo_presets.hpp"
 #include "format.hpp"
 #include "icons.hpp"
+#include "navigation_goal.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
 
@@ -40,18 +42,6 @@ void set_dot(QLabel* dot, bool fresh) {
   if (auto* led = qobject_cast<LedIndicator*>(dot)) {
     led->setState(fresh ? LedState::Ok : LedState::Stale);
   }
-}
-
-QPushButton* make_tool(const QString& icon_name, const QString& text,
-                       const QString& object_name = QStringLiteral("iconButton")) {
-  auto* b = new QPushButton();
-  b->setIcon(icons::get(icon_name));
-  b->setIconSize(QSize(16, 16));
-  b->setObjectName(object_name);
-  b->setFixedSize(34, 34);
-  b->setToolTip(text);
-  b->setAccessibleName(text);
-  return b;
 }
 
 QFrame* make_hud_metric(const QString& icon_name, const QString& title,
@@ -103,8 +93,12 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
   setWindowTitle(QStringLiteral("ADAS 异构双控故障验证平台"));
 
   launch_panel_ = new LaunchPanel();
-  safety_panel_ = new SafetyPanel();
+  safety_panel_ = new SafetyPanel(bridge->isMcuLessMode(), bridge->isSilMode(),
+                                  bridge->isMilMode());
   map_view_ = new MapView();
+  // GUI 地图只用于 Town 道路信息与导航选点，不显示仿真目标物装饰图层。
+  map_view_->setLayers(0);
+  scenario_run_panel_ = new ScenarioRunPanel();
   log_drawer_ = new LogDrawer();
   alert_bar_ = new QLabel();
   alert_bar_->setObjectName(QStringLiteral("alertBar"));
@@ -119,8 +113,18 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
       });
   connect(bridge_, &RosBridge::faultRequestChanged, fault_inject_panel_,
           &FaultInjectPanel::onRequestChanged);
+  if (bridge->isMcuLessMode()) {
+    fault_inject_panel_->setAvailable(
+        false,
+        QStringLiteral("当前 CARLA 本机联合模式无 CAN/MCU 接收端，故障注入已禁用"));
+  }
   launch_panel_->processManager()->setBridgeProbe(
       [bridge]() { return bridge->hasCarlaBridgeNode(); });
+  launch_panel_->processManager()->setGreenLightCheck([]() {
+    const auto& freshness = TelemetryFreshness::instance();
+    return freshness.isFresh(TelemetryFreshness::Mcu, kMcuStaleMs) &&
+           freshness.isFresh(TelemetryFreshness::Nav, kNavStaleMs);
+  });
 
   // 三栏水平 splitter：左紧凑、中拉伸、右垂直可拖（安全 + 故障注入）。
   // 右栏内部用 QSplitter(Qt::Vertical) 而不是写死的 QVBoxLayout，让操作员在
@@ -140,7 +144,7 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
 
   columns_ = new QSplitter(Qt::Horizontal, this);
   columns_->addWidget(launch_panel_);
-  columns_->addWidget(build_map_panel());
+  columns_->addWidget(build_control_panel());
   columns_->addWidget(right_column);
   columns_->setStretchFactor(0, 0);
   columns_->setStretchFactor(1, 1);   // map 主伸展
@@ -161,10 +165,16 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
   setCentralWidget(rows_);
 
   // 状态栏：中文 + LED 颜色规则（绿/黄/红/灰）
-  dot_mcu_ = make_dot(bridge->isSilMode() ? QStringLiteral("SIL 状态")
-                                          : QStringLiteral("MCU"));
-  dot_actuation_ = make_dot(bridge->isSilMode() ? QStringLiteral("SIL 执行")
-                                                 : QStringLiteral("执行器"));
+  dot_mcu_ = make_dot(bridge->isMilMode() ? QStringLiteral("模拟 MCU")
+      : bridge->isMcuLessMode()
+                          ? (bridge->isSilMode() ? QStringLiteral("SIL 状态")
+                                                 : QStringLiteral("本机闭环"))
+                          : QStringLiteral("MCU"));
+  dot_actuation_ = make_dot(bridge->isMilMode() ? QStringLiteral("模拟执行")
+                            : bridge->isMcuLessMode()
+                                ? (bridge->isSilMode() ? QStringLiteral("SIL 执行")
+                                                       : QStringLiteral("ROS2 执行"))
+                                : QStringLiteral("执行器"));
   dot_ego_ = make_dot(QStringLiteral("里程计"));
   dot_nav_ = make_dot(QStringLiteral("导航"));
   scenario_label_ = new QLabel(QStringLiteral("场景: --"));
@@ -220,6 +230,7 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
                             theme::kTextPrimary);
             }
             update_hud_mode();
+            scenario_run_panel_->onBehavior(state);
           });
   connect(bridge, &RosBridge::gateChanged, safety_panel_, &SafetyPanel::onGate);
   connect(bridge, &RosBridge::aebChanged, safety_panel_, &SafetyPanel::onAeb);
@@ -239,15 +250,19 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
               set_hud_value(hud_ttc_value_, QStringLiteral("-- s"), theme::kTextSecondary);
             }
             update_hud_mode();
+            scenario_run_panel_->onAeb(state);
           });
   connect(bridge, &RosBridge::safetyChanged, safety_panel_, &SafetyPanel::onSafety);
   connect(bridge, &RosBridge::safetyChanged, this,
           [this](int overall, const QString&) {
             last_safety_level_ = overall;
+            scenario_run_panel_->onSafety(overall);
             update_hud_mode();
             update_hud_fault();
           });
   connect(bridge, &RosBridge::laneStateChanged, safety_panel_, &SafetyPanel::onLaneState);
+  connect(bridge, &RosBridge::laneStateChanged, this,
+          [this](double, bool valid) { scenario_run_panel_->onLane(valid); });
   connect(bridge, &RosBridge::laneStateChanged, log_drawer_, &LogDrawer::onLaneTelemetry);
   connect(bridge, &RosBridge::healthSnapshotChanged,
           launch_panel_, &LaunchPanel::onHealthSnapshot);
@@ -291,6 +306,20 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
   connect(bridge, &RosBridge::egoChanged, this, &MainWindow::onEgo);
   connect(bridge, &RosBridge::egoChanged, log_drawer_, &LogDrawer::onEgoTelemetry);
   connect(bridge, &RosBridge::leadObjectChanged, this, &MainWindow::onLeadObject);
+  connect(bridge, &RosBridge::leadObjectChanged, this,
+          [this](const GuiLeadObject& lead) {
+            scenario_run_panel_->onLead(lead.valid);
+          });
+  connect(bridge, &RosBridge::objectsChanged, scenario_run_panel_,
+          &ScenarioRunPanel::onObjects);
+  connect(bridge, &RosBridge::objectSummaryChanged, this,
+          [this](int count, int primary_id) {
+            const QString primary = primary_id >= 0 ? QString::number(primary_id)
+                                                     : QStringLiteral("--");
+            set_hud_value(hud_objects_value_,
+                          QStringLiteral("%1 / lead %2").arg(count).arg(primary),
+                          count > 0 ? theme::kOk : theme::kTextSecondary);
+          });
   // Lead 信号到达也视为"前车信息"通道新鲜一次，便于 HUD 状态栏新鲜度指示
   // 与 onLeadObject 内部独立 last_lead_ms_ 解耦。
   connect(bridge, &RosBridge::leadObjectChanged, this,
@@ -298,10 +327,26 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             TelemetryFreshness::instance().markFresh(TelemetryFreshness::Lead);
           });
 
+  connect(bridge, &RosBridge::mapMetadataChanged, map_view_,
+          &MapView::setMapMetadata);
+  connect(bridge, &RosBridge::mapMetadataChanged, this,
+          [this](const QString& map_id, const QString& map_hash) {
+            latest_map_id_ = map_id;
+            latest_map_hash_ = map_hash;
+          });
   connect(bridge, &RosBridge::laneGraphChanged, map_view_, &MapView::setLanes);
   connect(bridge, &RosBridge::laneGraphChanged, this,
-          [](const QVector<GuiLane>&, const QString&) {
+          [this](const QVector<GuiLane>& lanes, const QString& map_id) {
+            latest_lanes_ = lanes;
+            latest_map_id_ = map_id;
+            if (bridge_running_) latest_map_generation_ = auto_navigation_generation_;
+            scenario_run_panel_->onMapReady(!lanes.isEmpty());
             TelemetryFreshness::instance().markFresh(TelemetryFreshness::Map);
+            tryAutoNavigation();
+            if (!auto_navigation_armed_ && pending_goal_request_id_.isEmpty() &&
+                active_goal_id_.isEmpty()) {
+              set_goal_controls_enabled(navigationInputsReady());
+            }
           });
   connect(bridge, &RosBridge::routeChanged, map_view_, &MapView::setRoute);
   connect(bridge, &RosBridge::routeChanged, this, [](const QPolygonF&) {
@@ -316,8 +361,13 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             }
             if (!status.detail.isEmpty()) text += QString("  (%1)").arg(status.detail);
             nav_status_value_->setText(text);
+            scenario_run_panel_->onNavigation(status.state);
             if (!status.goal_id.isEmpty()) active_goal_id_ = status.goal_id;
-            if (status.state >= 4U) map_view_->setGoal(0.0, 0.0, false);
+            if (status.state >= 4U) {
+              active_goal_id_.clear();
+              set_goal_controls_enabled(navigationInputsReady());
+              map_view_->setGoal(0.0, 0.0, false);
+            }
           });
   connect(bridge, &RosBridge::navigationRequestChanged, this,
           [this](const QString& id, const QString& operation, int state,
@@ -325,16 +375,16 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             const auto request_state = static_cast<RequestState>(state);
             if (operation == QStringLiteral("navigation.goal") &&
                 id == pending_goal_request_id_) {
-              if (request_state != RequestState::Sent) {
-                pending_goal_request_id_.clear();
-                map_view_->setGoalSelectionEnabled(true);
-              }
               if (request_state == RequestState::Acknowledged) {
-                active_goal_id_ = id;
+                pending_goal_request_id_.clear();
+                // 目标执行期间保持选点控件锁定；终态或取消后再开放。
+                set_goal_controls_enabled(false);
                 nav_status_value_->setText(QStringLiteral("导航: 目标已受理 · %1")
                                                .arg(id.left(8)));
               } else if (request_state == RequestState::Failed ||
                          request_state == RequestState::TimedOut) {
+                pending_goal_request_id_.clear();
+                set_goal_controls_enabled(navigationInputsReady());
                 map_view_->setGoal(0.0, 0.0, false);
                 nav_status_value_->setText(QStringLiteral("导航: %1").arg(detail));
               }
@@ -345,6 +395,7 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
               cancel_button_->setBusy(false);
               if (request_state == RequestState::Acknowledged) {
                 active_goal_id_.clear();
+                set_goal_controls_enabled(navigationInputsReady());
                 map_view_->setGoal(0.0, 0.0, false);
                 nav_status_value_->setText(QStringLiteral("导航: 已确认取消"));
               } else {
@@ -352,36 +403,21 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
               }
             }
           });
+  connect(bridge, &RosBridge::navigationGoalAccepted, this,
+          [this](const QString& request_id, const QString& goal_id) {
+            if (request_id == pending_goal_request_id_ || active_goal_id_.isEmpty()) {
+              active_goal_id_ = goal_id;
+            }
+          });
 
   connect(map_view_, &MapView::goalRequested, this, &MainWindow::onGoalRequested);
   connect(map_view_, &MapView::goalRejected, this, [this](double distance) {
     nav_status_value_->setText(
-        QStringLiteral("导航: 目标离车道 %1 m（>%2 m），请点击车道附近")
+        QStringLiteral("导航: 目标离车道 %1 m（>%2 m），请点击道路中心线附近")
             .arg(distance, 0, 'f', 1)
             .arg(MapView::kSnapMaxDistanceM, 0, 'f', 0));
   });
-  connect(map_view_, &MapView::followBroken, this,
-          [this]() { follow_check_->setChecked(false); });
-  connect(follow_check_, &QCheckBox::toggled, map_view_, &MapView::setFollowEnabled);
-  connect(fit_button_, &QPushButton::clicked, this, [this]() {
-    follow_check_->setChecked(false);
-    map_view_->fitToLanes();
-  });
-  connect(clear_trail_button_, &QPushButton::clicked, map_view_, &MapView::clearTrail);
-  connect(layer_button_, &QPushButton::clicked, this, [this]() {
-    // 循环切换调试图层：默认关 → grid+trail → grid+trail+halo+snap → 仅 grid
-    static int stage = 0;
-    stage = (stage + 1) % 4;
-    quint32 flags = 0;
-    switch (stage) {
-      case 0: flags = MapView::kLayerGrid; break;
-      case 1: flags = MapView::kLayerGrid | MapView::kLayerTrail; break;
-      case 2: flags = MapView::kLayerGrid | MapView::kLayerTrail |
-                       MapView::kLayerEgoHalo | MapView::kLayerSnapRadius; break;
-      case 3: flags = 0; break;
-    }
-    map_view_->setLayers(flags);
-  });
+
   connect(cancel_button_, &QPushButton::clicked, this, [this]() {
     if (!confirm_action(this, QStringLiteral("确认取消导航"),
                         QStringLiteral("取消导航"),
@@ -440,17 +476,89 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
 
   connect(launch_panel_, &LaunchPanel::runStateChanged, this,
           [this](bool running, const QString& scenario, const QString& town) {
+            bridge_running_ = running;
+            active_scenario_ = scenario;
+            scenario_run_panel_->setScenario(scenario);
+            scenario_run_panel_->setRunning(running);
             scenario_label_->setText(
                 running ? QStringLiteral("场景: %1 @ %2").arg(scenario, town)
                          : QStringLiteral("场景: --"));
             config_label_->setText(
                 running ? QStringLiteral("配置: 控制=%1").arg(launch_panel_->currentConfig().control_source)
                          : QStringLiteral("配置: --"));
-            if (running) map_view_->clearTrail();
+            if (running) tryAutoNavigation();
+            else {
+              TelemetryFreshness::instance().resetSession();
+              auto_navigation_armed_ = false;
+              auto_navigation_retry_pending_ = false;
+              ++auto_navigation_generation_;
+              active_goal_id_.clear();
+              pending_goal_request_id_.clear();
+              latest_lanes_.clear();
+              latest_map_id_.clear();
+              latest_map_hash_.clear();
+              latest_ego_valid_ = false;
+              set_goal_controls_enabled(false);
+              map_view_->setRoute({});
+              map_view_->setGoal(0.0, 0.0, false);
+              map_view_->setVehicle(0.0, 0.0, 0.0, false);
+              map_view_->clearTrail();
+              latest_map_generation_ = 0;
+              latest_ego_generation_ = 0;
+            }
+          });
+
+  connect(launch_panel_, &LaunchPanel::scenarioSelectionChanged, this,
+          [this](const QString& scenario, const QString&) {
+            if (bridge_running_) return;
+            active_scenario_ = scenario;
+            scenario_run_panel_->setScenario(scenario);
+          });
+  connect(launch_panel_, &LaunchPanel::scenarioRunRequested, this,
+          [this](const QString& scenario, const QString& town, bool auto_navigation,
+                 double goal_distance_m) {
+            ++auto_navigation_generation_;
+            TelemetryFreshness::instance().resetSession();
+            active_scenario_ = scenario;
+            scenario_run_panel_->setScenario(scenario);
+            scenario_run_panel_->setRunning(false);
+            auto_navigation_armed_ = auto_navigation;
+            auto_navigation_retry_pending_ = false;
+            auto_navigation_attempts_ = 0;
+            auto_navigation_distance_m_ = goal_distance_m;
+            requested_town_ = town;
+            active_goal_id_.clear();
+            pending_goal_request_id_.clear();
+            latest_lanes_.clear();
+            latest_map_id_.clear();
+            latest_map_hash_.clear();
+            latest_ego_valid_ = false;
+            latest_map_generation_ = 0;
+            latest_ego_generation_ = 0;
+            map_view_->setRoute({});
+            map_view_->setGoal(0.0, 0.0, false);
+            map_view_->setVehicle(0.0, 0.0, 0.0, false);
+            map_view_->clearTrail();
+            scenario_run_panel_->onMapReady(false);
+            if (auto_navigation) {
+              nav_status_value_->setText(
+                  QStringLiteral("导航: 场景启动后将沿 Town 车道自动规划 %1 m")
+                      .arg(goal_distance_m, 0, 'f', 0));
+            }
           });
 
   connect(launch_panel_, &LaunchPanel::demoPresetLaunched, this,
           &MainWindow::onDemoPresetLaunched);
+  connect(scenario_run_panel_, &ScenarioRunPanel::acceptanceChanged, this,
+          [this](bool passed, const QString& summary) {
+            if (!bridge_running_) return;
+            log_drawer_->appendFaultEvent(
+                QDateTime::currentMSecsSinceEpoch(), passed ? 0 : 1,
+                QStringLiteral("场景验收"),
+                passed ? QStringLiteral("验收条件全部满足")
+                       : QStringLiteral("场景验收已重置"),
+                summary, passed);
+          });
 
   connect(&stale_timer_, &QTimer::timeout, this, &MainWindow::onStaleCheck);
   stale_timer_.start(200);
@@ -471,6 +579,12 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
       settings.value(QStringLiteral("window/columns_v2")).toByteArray());
   rows_->restoreState(
       settings.value(QStringLiteral("window/rows_v2")).toByteArray());
+  scenario_run_panel_->setScenario(launch_panel_->currentConfig().scenario);
+  set_goal_controls_enabled(false);
+}
+
+bool MainWindow::startConfiguredSystem(bool interactive) {
+  return launch_panel_ && launch_panel_->startConfiguredSystem(interactive);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -494,7 +608,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
   QMainWindow::closeEvent(event);
 }
 
-QWidget* MainWindow::build_map_panel() {
+QWidget* MainWindow::build_control_panel() {
   auto* panel = new QWidget();
   panel->setObjectName(QStringLiteral("root"));
   auto* root = new QVBoxLayout(panel);
@@ -515,16 +629,21 @@ QWidget* MainWindow::build_map_panel() {
                                  &hud_ttc_value_, QStringLiteral("-- s")), 1);
   hud->addWidget(make_hud_metric(QStringLiteral("car"), QStringLiteral("前车距离"),
                                  &hud_lead_gap_value_, QStringLiteral("-- m")), 1);
+  hud->addWidget(make_hud_metric(QStringLiteral("cars"), QStringLiteral("可见目标 / 主前车"),
+                                 &hud_objects_value_, QStringLiteral("0 / lead --")), 2);
   hud->addWidget(make_hud_metric(QStringLiteral("shield"), QStringLiteral("故障状态"),
                                  &hud_fault_value_, QStringLiteral("正常")), 2);
   root->addLayout(hud);
   update_hud_mode();
   update_hud_fault();
 
-  // 地图工具栏：导航摘要 + 紧凑图标操作。
+  root->addWidget(scenario_run_panel_);
+
+  // GUI 中只保留简化 Town 道路图作为导航选点控件；车辆/目标物的场景效果
+  // 与完整 ADAS 展示仍以 CARLA spectator 窗口为准。
   auto* toolbar = new QHBoxLayout();
   toolbar->setSpacing(5);
-  auto* title = new IconLabel(QStringLiteral("map"), QStringLiteral("实时导航"));
+  auto* title = new IconLabel(QStringLiteral("route"), QStringLiteral("导航操控"));
   title->setStyleSheet(QStringLiteral(
       "color:%1;font-size:14px;font-weight:700;letter-spacing:0px;")
       .arg(theme::kTextPrimary));
@@ -535,10 +654,6 @@ QWidget* MainWindow::build_map_panel() {
                      "border-radius:5px;font-size:11px;padding:4px 8px;")
           .arg(theme::kTextSecondary, theme::kMdSurfaceContainerLow,
                theme::kCardBorder));
-  follow_check_ = new QCheckBox(QStringLiteral("跟车视角"));
-  fit_button_ = make_tool(QStringLiteral("expand"), QStringLiteral("适配全图"));
-  clear_trail_button_ = make_tool(QStringLiteral("eraser"), QStringLiteral("清除尾迹"));
-  layer_button_ = make_tool(QStringLiteral("sliders"), QStringLiteral("切换地图图层"));
   cancel_button_ = new BusyButton();
   cancel_button_->setIcon(icons::get(QStringLiteral("ban")));
   cancel_button_->setIconSize(QSize(16, 16));
@@ -547,16 +662,103 @@ QWidget* MainWindow::build_map_panel() {
   cancel_button_->setToolTip(QStringLiteral("取消导航"));
   toolbar->addWidget(title);
   toolbar->addWidget(nav_status_value_, 1);
-  toolbar->addWidget(follow_check_);
-  toolbar->addWidget(fit_button_);
-  toolbar->addWidget(clear_trail_button_);
-  toolbar->addWidget(layer_button_);
+  auto* fit_map_button = new QPushButton();
+  fit_map_button->setIcon(icons::get(QStringLiteral("expand")));
+  fit_map_button->setObjectName(QStringLiteral("iconButton"));
+  fit_map_button->setFixedSize(34, 34);
+  fit_map_button->setToolTip(QStringLiteral("适配 Town 全图"));
+  connect(fit_map_button, &QPushButton::clicked, map_view_, &MapView::fitToLanes);
+  toolbar->addWidget(fit_map_button);
   toolbar->addWidget(cancel_button_);
   root->addLayout(toolbar);
 
-  root->addWidget(map_view_, 1);
+  auto* map_hint = new QLabel(
+      QStringLiteral("Town 道路地图 · 点击道路选择导航目标（自动吸附到车道）"));
+  map_hint->setStyleSheet(QStringLiteral("color:%1;font-size:11px;")
+                              .arg(theme::kTextSecondary));
+  root->addWidget(map_hint);
+  root->addWidget(map_view_, 3);
+
+  auto* control_card = new QFrame();
+  control_card->setObjectName(QStringLiteral("card"));
+  auto* controls = new QVBoxLayout(control_card);
+  controls->setContentsMargins(10, 8, 10, 8);
+  controls->setSpacing(6);
+
+  goal_x_input_ = new QDoubleSpinBox();
+  goal_y_input_ = new QDoubleSpinBox();
+  for (auto* input : {goal_x_input_, goal_y_input_}) {
+    input->setRange(-100000.0, 100000.0);
+    input->setDecimals(1);
+    input->setSingleStep(5.0);
+    input->setSuffix(QStringLiteral(" m"));
+  }
+  send_coordinate_goal_button_ = new QPushButton(QStringLiteral("下发坐标目标"));
+  send_coordinate_goal_button_->setIcon(icons::get(QStringLiteral("route")));
+  connect(send_coordinate_goal_button_, &QPushButton::clicked, this, [this]() {
+    onGoalRequested(goal_x_input_->value(), goal_y_input_->value());
+  });
+  auto* coordinate_row = new QHBoxLayout();
+  coordinate_row->setSpacing(6);
+  coordinate_row->addWidget(new IconLabel(
+      QStringLiteral("flag"), QStringLiteral("坐标目标")));
+  coordinate_row->addWidget(new QLabel(QStringLiteral("X")));
+  coordinate_row->addWidget(goal_x_input_, 1);
+  coordinate_row->addWidget(new QLabel(QStringLiteral("Y")));
+  coordinate_row->addWidget(goal_y_input_, 1);
+  coordinate_row->addWidget(send_coordinate_goal_button_, 1);
+  controls->addLayout(coordinate_row);
+
+  forward_distance_input_ = new QDoubleSpinBox();
+  forward_distance_input_->setRange(10.0, 2000.0);
+  forward_distance_input_->setValue(150.0);
+  forward_distance_input_->setSingleStep(10.0);
+  forward_distance_input_->setSuffix(QStringLiteral(" m"));
+  send_forward_goal_button_ = new QPushButton(QStringLiteral("沿当前朝向下发目标"));
+  send_forward_goal_button_->setIcon(icons::get(QStringLiteral("flag")));
+  connect(send_forward_goal_button_, &QPushButton::clicked, this, [this]() {
+    if (!latest_ego_valid_) {
+      nav_status_value_->setText(QStringLiteral("导航: 尚未收到有效自车位姿"));
+      return;
+    }
+    const double distance = forward_distance_input_->value();
+    const auto goal = resolve_navigation_goal_ahead(
+        latest_lanes_, latest_ego_x_, latest_ego_y_, latest_ego_yaw_, distance);
+    if (!goal.valid) {
+      nav_status_value_->setText(
+          QStringLiteral("导航: 无法生成车道前向目标（%1）").arg(goal.detail));
+      return;
+    }
+    onGoalRequested(goal.x, goal.y);
+  });
+  auto* forward_row = new QHBoxLayout();
+  forward_row->setSpacing(6);
+  forward_row->addWidget(new IconLabel(
+      QStringLiteral("car"), QStringLiteral("自车前向")));
+  forward_row->addWidget(forward_distance_input_, 1);
+  forward_row->addWidget(send_forward_goal_button_, 2);
+  controls->addLayout(forward_row);
+  control_card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  root->addWidget(control_card);
 
   return panel;
+}
+
+void MainWindow::set_goal_controls_enabled(bool enabled) {
+  if (map_view_) map_view_->setGoalSelectionEnabled(enabled);
+  if (send_coordinate_goal_button_) send_coordinate_goal_button_->setEnabled(enabled);
+  if (send_forward_goal_button_) send_forward_goal_button_->setEnabled(enabled);
+  if (goal_x_input_) goal_x_input_->setEnabled(enabled);
+  if (goal_y_input_) goal_y_input_->setEnabled(enabled);
+  if (forward_distance_input_) forward_distance_input_->setEnabled(enabled);
+}
+
+bool MainWindow::navigationInputsReady() const {
+  return bridge_running_ && latest_ego_valid_ && !latest_lanes_.isEmpty() &&
+         latest_map_generation_ == auto_navigation_generation_ &&
+         latest_ego_generation_ == auto_navigation_generation_ &&
+         (requested_town_.isEmpty() ||
+          latest_map_id_.contains(requested_town_, Qt::CaseInsensitive));
 }
 
 void MainWindow::update_hud_mode() {
@@ -671,49 +873,142 @@ void MainWindow::onLeadObject(const GuiLeadObject& lead) {
 
 void MainWindow::onEgo(double x, double y, double yaw_rad, double speed_mps,
                        double yaw_rate_rps) {
-  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Ego);
   // NaN/Inf 守卫：bridge 在异常情况下可能发布 NaN/Inf odom，绝不让相机和 HUD 被污染
   // （一旦 setVehicle 拿到 NaN，map 拖拽/缩放立刻坏掉）。
   const bool pose_ok = std::isfinite(x) && std::isfinite(y) &&
                        std::isfinite(yaw_rad);
   if (pose_ok) {
+    TelemetryFreshness::instance().markFresh(TelemetryFreshness::Ego);
+    latest_ego_x_ = x;
+    latest_ego_y_ = y;
+    latest_ego_yaw_ = yaw_rad;
+    latest_ego_valid_ = true;
+    if (bridge_running_) latest_ego_generation_ = auto_navigation_generation_;
     map_view_->setVehicle(x, y, yaw_rad, true);
     safety_panel_->onEgo(x, y, yaw_rad, speed_mps, yaw_rate_rps);
   } else {
+    latest_ego_valid_ = false;
     map_view_->setVehicle(0.0, 0.0, 0.0, false);
   }
   if (std::isfinite(speed_mps)) {
+    scenario_run_panel_->onEgo(speed_mps);
     set_hud_value(hud_speed_value_,
                   QStringLiteral("%1 km/h")
                       .arg(std::max(0.0, speed_mps) * 3.6, 0, 'f', 1),
                   theme::kTextPrimary, true);
   }
+  if (pose_ok) tryAutoNavigation();
+  if (!auto_navigation_armed_ && pending_goal_request_id_.isEmpty() &&
+      active_goal_id_.isEmpty()) {
+    set_goal_controls_enabled(navigationInputsReady());
+  }
 }
 
 void MainWindow::onDemoPresetLaunched(const QString& scenario,
                                       const QString& town) {
-  // 仅提示：预设是"启动哪个场景"，不挂起导航目标。如要导航，请点击地图选点。
+  // 仅提示：预设是"启动哪个场景"，不挂起导航目标。
   nav_status_value_->setText(
-      QStringLiteral("演示场景: %1 @ %2（导航请手动点击地图）")
+      QStringLiteral("演示场景: %1 @ %2（画面请查看 CARLA）")
           .arg(scenario, town));
 }
 
 void MainWindow::onGoalRequested(double world_x, double world_y) {
-  if (!confirm_action(this, QStringLiteral("确认导航目标"),
+  if (!navigationInputsReady()) {
+    nav_status_value_->setText(
+        QStringLiteral("导航: 等待本次 Town 地图、自车位姿和 bridge 就绪"));
+    return;
+  }
+  auto_navigation_armed_ = false;
+  submitGoal(world_x, world_y, true);
+}
+
+bool MainWindow::submitGoal(double world_x, double world_y,
+                            bool require_confirmation) {
+  if (require_confirmation &&
+      !confirm_action(this, QStringLiteral("确认导航目标"),
                       QStringLiteral("下发导航目标"),
                       QStringLiteral("目标坐标：(%1, %2) m\nSoC 将立即规划并可能进入自动行驶。")
                           .arg(world_x, 0, 'f', 1).arg(world_y, 0, 'f', 1),
-                      ConfirmSeverity::Warning)) return;
+                      ConfirmSeverity::Warning)) {
+    return false;
+  }
   map_view_->setGoal(world_x, world_y, true);
-  map_view_->setGoalSelectionEnabled(false);
+  set_goal_controls_enabled(false);
   pending_goal_request_id_ = bridge_->requestGoal(world_x, world_y);
   if (pending_goal_request_id_.isEmpty()) {
-    map_view_->setGoalSelectionEnabled(true);
+    set_goal_controls_enabled(navigationInputsReady());
     map_view_->setGoal(0.0, 0.0, false);
-    nav_status_value_->setText(QStringLiteral("导航: 已有目标请求处理中"));
+    nav_status_value_->setText(
+        QStringLiteral("导航: 服务不可用或已有请求处理中，请稍后重试"));
+    return false;
   } else {
     nav_status_value_->setText(QStringLiteral("导航: 请求已发送 · %1")
                                     .arg(pending_goal_request_id_.left(8)));
+  }
+  return true;
+}
+
+void MainWindow::tryAutoNavigation() {
+  if (!auto_navigation_armed_ || !bridge_running_ || !latest_ego_valid_ ||
+      latest_lanes_.isEmpty() || !pending_goal_request_id_.isEmpty() ||
+      !active_goal_id_.isEmpty() || auto_navigation_retry_pending_ ||
+      latest_map_generation_ != auto_navigation_generation_ ||
+      latest_ego_generation_ != auto_navigation_generation_) {
+    return;
+  }
+  if (!requested_town_.isEmpty() &&
+      !latest_map_id_.contains(requested_town_, Qt::CaseInsensitive)) {
+    nav_status_value_->setText(
+        QStringLiteral("导航: 等待本次 %1 地图（当前 %2）")
+            .arg(requested_town_, latest_map_id_.isEmpty()
+                                      ? QStringLiteral("--") : latest_map_id_));
+    return;
+  }
+  const auto goal = resolve_navigation_goal_ahead(
+      latest_lanes_, latest_ego_x_, latest_ego_y_, latest_ego_yaw_,
+      auto_navigation_distance_m_);
+  if (!goal.valid) {
+    nav_status_value_->setText(
+        QStringLiteral("导航: 自动目标等待车道图完善（%1）").arg(goal.detail));
+    if (++auto_navigation_attempts_ <= 10) {
+      auto_navigation_retry_pending_ = true;
+      const quint64 generation = auto_navigation_generation_;
+      QTimer::singleShot(1000, this, [this, generation]() {
+        if (generation != auto_navigation_generation_) return;
+        auto_navigation_retry_pending_ = false;
+        tryAutoNavigation();
+      });
+    } else {
+      auto_navigation_armed_ = false;
+      nav_status_value_->setText(
+          QStringLiteral("导航: 自动目标生成失败，请在 Town 地图手动选点"));
+    }
+    return;
+  }
+  nav_status_value_->setText(
+      QStringLiteral("导航: 自动目标 %1，正在下发").arg(goal.detail));
+  if (submitGoal(goal.x, goal.y, false)) {
+    auto_navigation_armed_ = false;
+    auto_navigation_retry_pending_ = false;
+    log_drawer_->appendFaultEvent(
+        QDateTime::currentMSecsSinceEpoch(), 0, QStringLiteral("场景联动"),
+        QStringLiteral("自动导航目标已下发"),
+        QStringLiteral("%1 · (%2, %3)")
+            .arg(active_scenario_)
+            .arg(goal.x, 0, 'f', 1)
+            .arg(goal.y, 0, 'f', 1),
+        true);
+  } else if (++auto_navigation_attempts_ <= 10) {
+    set_goal_controls_enabled(navigationInputsReady());
+    auto_navigation_retry_pending_ = true;
+    const quint64 generation = auto_navigation_generation_;
+    QTimer::singleShot(1000, this, [this, generation]() {
+      if (generation != auto_navigation_generation_) return;
+      auto_navigation_retry_pending_ = false;
+      tryAutoNavigation();
+    });
+  } else {
+    auto_navigation_armed_ = false;
   }
 }
 

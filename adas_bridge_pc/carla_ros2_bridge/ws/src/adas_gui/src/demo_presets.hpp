@@ -27,31 +27,24 @@ struct DemoPreset {
   QString note;             // 悬停提示 / 讲解要点
 };
 
-// 演示预设清单。默认 Town04（scenarios.py 的高速环路出生点），控制源 ros2。
+// 演示预设直接从 catalog 生成，保证新增场景无需再手工维护第二份按钮清单。
+// catalog 不可用时才回退旧 ID 列表。
 inline std::vector<DemoPreset> demo_presets() {
-  return {
-      {QStringLiteral("LKA 直行"), QStringLiteral("lka"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("无前车巡航；观察横向误差有界、弯道前馈")},
-      {QStringLiteral("ACC 跟车"), QStringLiteral("acc"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("前车 8→5→10→7 m/s 变速；观察时距自适应跟随")},
-      {QStringLiteral("ACC 停车再走"), QStringLiteral("acc_stop_and_go"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("前车停→走；观察自车起停跟随时距与起步响应")},
-      {QStringLiteral("ACC 慢速卡车"), QStringLiteral("acc_slow_truck"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("慢速前车 3 m/s；观察长跟时距、无误加速")},
-      {QStringLiteral("AEB 前车急停"), QStringLiteral("aeb"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("t=15s 前车全力急刹；观察 AEB WARNING→BRAKING")},
-      {QStringLiteral("AEB 静止障碍"), QStringLiteral("aeb_stationary"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("前车起步即静止；观察对静态障碍的 AEB 触发与 TTC")},
-      {QStringLiteral("AEB 横穿行人"), QStringLiteral("aeb_pedestrian"),
-       QStringLiteral("Town04"), QStringLiteral("ros2"),
-       QStringLiteral("逼近 40m 时行人右侧横穿；观察行人识别 + 紧急制动")},
-  };
+  std::vector<DemoPreset> result;
+  const auto catalog = load_scenario_catalog();
+  if (!catalog.isEmpty()) {
+    result.reserve(static_cast<std::size_t>(catalog.size()));
+    for (const auto& entry : catalog) {
+      result.push_back({entry.display_name, entry.id, entry.default_town,
+                        QStringLiteral("ros2"), entry.description});
+    }
+    return result;
+  }
+  for (const auto& id : legacy_scenarios()) {
+    result.push_back({id, id, QStringLiteral("Town04"),
+                      QStringLiteral("ros2"), QStringLiteral("兼容场景")});
+  }
+  return result;
 }
 
 }  // namespace adas::gui

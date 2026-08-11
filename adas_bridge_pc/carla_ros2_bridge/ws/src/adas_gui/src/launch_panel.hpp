@@ -40,6 +40,8 @@ class LaunchPanel : public QWidget {
   bool eventFilter(QObject* watched, QEvent* event) override;
 
   LaunchConfig currentConfig() const;
+  // interactive=false 用于显式 --autostart 验收：FAIL 仍阻断，WARN 记日志后继续。
+  bool startConfiguredSystem(bool interactive = true);
   // 暴露 ProcessManager 供 MainWindow 转发 logLine 至底部日志抽屉。
   ProcessManager* processManager() { return &manager_; }
 
@@ -54,6 +56,9 @@ class LaunchPanel : public QWidget {
   // 导航目标必须由用户在地图上手动点击（MapView::goalRequested），
   // 保证"场景"与"导航"两个概念分离，避免 arm 期内的手动选点被覆盖。
   void demoPresetLaunched(const QString& scenario, const QString& town);
+  void scenarioSelectionChanged(const QString& scenario, const QString& town);
+  void scenarioRunRequested(const QString& scenario, const QString& town,
+                            bool auto_navigation, double goal_distance_m);
 
  private:
   void build_ui();
@@ -62,6 +67,10 @@ class LaunchPanel : public QWidget {
   void save_settings() const;
   void restore_settings();
   void update_buttons();
+  void rebuildScenarioChoices(const QString& preferred = {});
+  void updateScenarioSummary();
+  QString selectedBackend() const;
+  QString selectedScenario() const;
   bool confirmFlashMcu(const QString& firmware_path);  // 烧录前二次确认
   void onFlashMcuClicked();     // 选文件 + 弹确认 + 调 manager_
   void onNeedsOrinCredentials(const QString& host, const QString& user);  // 弹密码框
@@ -71,12 +80,16 @@ class LaunchPanel : public QWidget {
   bool runPreflightGate();
 
   ProcessManager manager_;
+  QComboBox* backend_combo_;
   QComboBox* scenario_combo_;
+  QLabel* scenario_summary_;
   QComboBox* town_combo_;
   QComboBox* source_combo_;
   QLineEdit* carla_root_edit_;
+  QPushButton* carla_browse_button_;
   QCheckBox* low_quality_check_;
   QCheckBox* offscreen_check_;
+  QCheckBox* auto_navigation_check_;
   QCheckBox* start_full_stack_check_;  // 默认不勾：只跑 PC 本地栈
   BusyButton* start_all_button_;
   BusyButton* stop_all_button_;

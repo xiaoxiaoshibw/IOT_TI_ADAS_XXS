@@ -166,13 +166,32 @@ inline QString probe_gpu_vendor() {
 inline QVector<PreflightItem> run_preflight(const LaunchConfig& config) {
   QVector<PreflightItem> items;
 
-  if (QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
+  const int current_domain = qEnvironmentVariableIntValue("ROS_DOMAIN_ID");
+  const int expected_domain = backend_uses_sil_domain(config.backend) ? 145 : 43;
+  items.push_back({QStringLiteral("dds_profile"), QStringLiteral("DDS 运行域"),
+                   current_domain == expected_domain ? PreflightLevel::Ok
+                                                     : PreflightLevel::Fail,
+                   QStringLiteral("backend=%1 要求 ROS_DOMAIN_ID=%2，当前=%3；"
+                                  "请用 --backend %1 重启 GUI")
+                       .arg(config.backend).arg(expected_domain).arg(current_domain)});
+  // 域不匹配必须阻断启动，但体检仍继续收集其它故障。否则用户修完 DDS
+  // 重启后才看见 CARLA/Orin/本地工作区的下一层问题，形成逐个踩坑。
+
+  if (config.backend == QStringLiteral("hil")) {
+    items.push_back({QStringLiteral("hil_stage"), QStringLiteral("HIL 适配状态"),
+                     PreflightLevel::Fail,
+                     QStringLiteral("HIL 后端当前仅保留接口，尚未适配；请以 --backend mil 启动")});
+    return items;
+  }
+
+  if (!backend_uses_carla(config.backend) ||
+      QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
           .compare(QStringLiteral("sil"), Qt::CaseInsensitive) == 0) {
     // SIL 不依赖 CARLA、GPU、Orin、CAN 或 F280025C；启动器本身会在
     // ProcessManager 内定位 scripts/run_sil_fallback.sh，并把真实错误写入底部日志。
-    items.push_back({QStringLiteral("sil_runtime"), QStringLiteral("SIL 运行环境"),
+    items.push_back({QStringLiteral("sil_runtime"), QStringLiteral("MIL 运行环境"),
                      PreflightLevel::Ok,
-                     QStringLiteral("本地闭环模式：跳过 CARLA / Orin / MCU / CAN 体检")});
+                     QStringLiteral("MIL 本机模拟硬件：domain145 + sim_vehicle + vcan + MCU host-runner")});
     return items;
   }
 
@@ -196,6 +215,16 @@ inline QVector<PreflightItem> run_preflight(const LaunchConfig& config) {
   items.push_back(classify_direct_iface(QString::fromStdString(iface)));
 
   items.push_back(classify_can_adapter(config.control_source, probe_can_adapter_present()));
+
+  if (config.backend == QStringLiteral("carla_local_soc")) {
+    const QString setup = QDir(config.repo_root).filePath(
+        QStringLiteral("adas_soc/install/setup.bash"));
+    items.push_back({QStringLiteral("local_soc"), QStringLiteral("本机 SoC 工作区"),
+                     QFileInfo::exists(setup) ? PreflightLevel::Ok : PreflightLevel::Fail,
+                     QFileInfo::exists(setup)
+                         ? setup
+                         : QStringLiteral("缺少 %1，请先构建 adas_soc").arg(setup)});
+  }
 
   return items;
 }

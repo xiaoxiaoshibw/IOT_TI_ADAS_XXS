@@ -254,6 +254,8 @@ def start_carla_direct(args: argparse.Namespace) -> int:
         f"-carla-rpc-port={args.port}",
         f"-quality-level={args.quality_level}",
     ]
+    if args.render_offscreen:
+        cmd.append("-RenderOffScreen")
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_f = open(log_path, "a", buffering=1)
@@ -344,6 +346,7 @@ def route_to_supervisor(action_args: argparse.Namespace) -> Optional[int]:
         "host": action_args.host, "port": action_args.port,
         "town": action_args.town, "scenario": action_args.scenario,
         "quality_level": action_args.quality_level,
+        "render_offscreen": action_args.render_offscreen,
         "timeout": action_args.timeout,
         "shutdown_timeout": action_args.shutdown_timeout,
         "log_file": action_args.log_file,
@@ -452,6 +455,8 @@ def _common_parser() -> argparse.ArgumentParser:
     common.add_argument("--scenario", default="free")
     common.add_argument("--quality-level", default=DEFAULT_QUALITY,
                         choices=["Low", "Epic"])
+    common.add_argument("--render-offscreen", action="store_true",
+                        help="以 -RenderOffScreen 启动 CARLA")
     common.add_argument("--timeout", type=float, default=60.0,
                         help="启动 readiness 超时（秒）")
     common.add_argument("--shutdown-timeout", type=float, default=5.0,

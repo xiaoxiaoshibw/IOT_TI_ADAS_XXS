@@ -53,17 +53,22 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 
-from adas_msgs.msg import (ActuationCommand, LaneConnection, LaneGraph,
-                           LaneState, MapLane, SteeringReport, TrackedObject,
-                           TrackedObjectArray)
+from adas_msgs.msg import (ActuationCommand, AebStatus, BehaviorState,
+                           LaneConnection, LaneGraph, LaneState, MapLane,
+                           NavigationStatus, SafetyStatus, SteeringReport,
+                           TrackedObject, TrackedObjectArray)
 from geometry_msgs.msg import Pose
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import String
 
 from adas_carla_bridge.carla_world import CarlaWorld
 from adas_carla_bridge.can_protocol import CanalystReceiver, SocketCanReceiver
 from adas_carla_bridge.map_export import export_lane_graph
-from adas_carla_bridge.scenarios import ORDER, SCENARIOS
+from adas_carla_bridge.scenario_loader import (
+    ScenarioLoadError,
+    known_scenario_ids,
+    load_scenario,
+)
 
 TOPIC_ODOM = '/adas/localization/kinematic_state'
 TOPIC_LANE = '/adas/perception/lane_state'
@@ -74,6 +79,12 @@ TOPIC_CPP_CAN_ACTUATION = '/adas/pc/mcu_actuation'
 TOPIC_MAP = '/adas/map/lane_graph'
 TOPIC_FAULT_COMMAND = '/adas/_debug/fault_inject_cmd'
 TOPIC_FAULT_ACK = '/adas/_debug/fault_inject_ack'
+TOPIC_ROUTE = '/adas/planning/global_route'
+TOPIC_NAV_STATUS = '/adas/navigation/status'
+TOPIC_BEHAVIOR = '/adas/planning/behavior'
+TOPIC_AEB_STATUS = '/adas/control/aeb/status'
+TOPIC_SAFETY_STATUS = '/adas/system/safety_status'
+TOPIC_CARLA_VISUALIZATION = '/adas/ui/carla_visualization_cmd'
 
 # 地图一次性发布：小队列 + transient_local，晚订阅的 global_planner 也能收到最后一帧。
 # reliability 显式写死 RELIABLE：订阅端是 reliable，若这里依赖 RMW 默认值、一旦被
@@ -126,6 +137,15 @@ class CarlaBridgeNode(Node):
         self._valid_recovery_frames = 0
         self._can_receiver = None
         self._fault_sequence = 0
+        # CARLA 是唯一场景展示端。以下缓存由 ROS 回调更新，由主 CARLA tick
+        # 线程读取后交给 CarlaWorld 绘制，避免从 executor 线程调用 CARLA API。
+        self._visual_lock = threading.Lock()
+        self._visual = {
+            'route': [], 'nav_state': 0, 'remaining_m': float('nan'),
+            'behavior_state': -1, 'target_speed_mps': float('nan'),
+            'aeb_state': 0, 'ttc_s': float('nan'), 'safety_level': 0,
+            'pending_goal': None,
+        }
 
         self.pub_odom = self.create_publisher(Odometry, TOPIC_ODOM, SENSOR_QOS)
         self.pub_lane = self.create_publisher(LaneState, TOPIC_LANE, SENSOR_QOS)
@@ -137,6 +157,21 @@ class CarlaBridgeNode(Node):
         self.pub_fault_ack = self.create_publisher(String, TOPIC_FAULT_ACK, 10)
         self.create_subscription(String, TOPIC_FAULT_COMMAND,
                                  self._fault_inject_cb, 10)
+
+        visual_qos = QoSProfile(depth=1)
+        visual_qos.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
+        visual_qos.reliability = QoSReliabilityPolicy.RELIABLE
+        self.create_subscription(Path, TOPIC_ROUTE, self._route_cb, visual_qos)
+        self.create_subscription(NavigationStatus, TOPIC_NAV_STATUS,
+                                 self._nav_status_cb, visual_qos)
+        self.create_subscription(BehaviorState, TOPIC_BEHAVIOR,
+                                 self._behavior_cb, 10)
+        self.create_subscription(AebStatus, TOPIC_AEB_STATUS,
+                                 self._aeb_cb, 10)
+        self.create_subscription(SafetyStatus, TOPIC_SAFETY_STATUS,
+                                 self._safety_cb, 10)
+        self.create_subscription(String, TOPIC_CARLA_VISUALIZATION,
+                                 self._visualization_command_cb, visual_qos)
 
         # 最新帧缓存（主线程写入，20 Hz 定时器读取）
         self._latest_frame = None
@@ -195,6 +230,75 @@ class CarlaBridgeNode(Node):
         if not valid and (invalid_count == 1 or invalid_count % 100 == 0):
             self.get_logger().error(
                 '拒绝非法执行帧：%s（累计 %d）' % (reason, invalid_count))
+
+    def _route_cb(self, msg):
+        points = [(float(p.pose.position.x), float(p.pose.position.y))
+                  for p in msg.poses
+                  if math.isfinite(float(p.pose.position.x)) and
+                  math.isfinite(float(p.pose.position.y))]
+        # 大地图路径限制绘制点数，保留首尾点并均匀抽样，避免 debug draw
+        # 占满 CARLA RPC 队列。
+        if len(points) > 300:
+            endpoint = points[-1]
+            stride = int(math.ceil(len(points) / 300.0))
+            points = points[::stride]
+            if points[-1] != endpoint:
+                points.append(endpoint)
+        with self._visual_lock:
+            self._visual['route'] = points
+
+    def _nav_status_cb(self, msg):
+        with self._visual_lock:
+            self._visual['nav_state'] = int(msg.state)
+            self._visual['remaining_m'] = float(msg.remaining_distance_m)
+            if int(msg.state) in (NavigationStatus.ARRIVED,
+                                  NavigationStatus.FAILED,
+                                  NavigationStatus.CANCELED):
+                self._visual['route'] = []
+                self._visual['pending_goal'] = None
+
+    def _behavior_cb(self, msg):
+        with self._visual_lock:
+            self._visual['behavior_state'] = int(msg.state)
+            self._visual['target_speed_mps'] = float(msg.target_speed_mps)
+
+    def _aeb_cb(self, msg):
+        with self._visual_lock:
+            self._visual['aeb_state'] = int(msg.state)
+            self._visual['ttc_s'] = float(msg.ttc_s)
+
+    def _safety_cb(self, msg):
+        with self._visual_lock:
+            self._visual['safety_level'] = int(msg.overall)
+
+    def _visualization_command_cb(self, msg):
+        try:
+            command = json.loads(msg.data)
+            operation = str(command.get('operation', ''))
+            if operation == 'goal':
+                x = float(command['x'])
+                y = float(command['y'])
+                if not math.isfinite(x) or not math.isfinite(y):
+                    raise ValueError('non-finite CARLA visualization goal')
+                goal = (x, y)
+            elif operation == 'cancel':
+                goal = None
+            else:
+                raise ValueError('unsupported visualization operation')
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.get_logger().warning('忽略非法 CARLA 展示命令：%s' % error)
+            return
+        with self._visual_lock:
+            self._visual['pending_goal'] = goal
+            if goal is None:
+                self._visual['route'] = []
+
+    def get_visualization_state(self):
+        """返回可由 CARLA 主线程安全消费的展示快照。"""
+        with self._visual_lock:
+            state = dict(self._visual)
+            state['route'] = list(self._visual['route'])
+            return state
 
     def _fault_inject_cb(self, msg):
         request_id = ''
@@ -367,7 +471,7 @@ class CarlaBridgeNode(Node):
 def carla_loop(node, world, args, scenario):
     """主线程步进环：tick → sense → publish → 读执行量 → apply → 记 CSV。"""
     duration = float(args.duration if args.duration is not None
-                     else scenario.get('duration', 0.0))
+                     else scenario.get('duration_s', 0.0))
     log_dir = os.path.abspath(args.log_dir)
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, 'carla_%s_%s.csv' % (
@@ -397,6 +501,8 @@ def carla_loop(node, world, args, scenario):
             throttle, brake, steer = world.apply_ego(
                 act['throttle'], act['brake'], act['steer'])
             world.update_spectator()
+            world.draw_adas_visualization(
+                node.get_visualization_state(), frame, act, sim_t)
 
             writer.writerow([
                 '%.3f' % sim_t, seq,
@@ -435,7 +541,15 @@ def carla_loop(node, world, args, scenario):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description='CARLA ↔ ADAS SoC 栈 ROS2 桥（IOT_TI HIL 闭环 PC 端）')
-    parser.add_argument('--scenario', default='acc', choices=ORDER)
+    parser.add_argument('--scenario', default='acc',
+                        help=('catalog scenario ID (known: %s)'
+                              % ','.join(known_scenario_ids())))
+    parser.add_argument('--scenario-file', default='',
+                        help='schema-v1 JSON file; takes priority over --scenario')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='deterministic seed override; 0 means no perturbation')
+    parser.add_argument('--expected-actor-count', type=int, default=None,
+                        help='fail startup unless exactly this many actors spawn')
     parser.add_argument('--control-source', choices=['ros2', 'can', 'can_cpp'],
                         default='ros2',
                         help=('ros2=订阅 actuation_cmd；can=Python SocketCAN；'
@@ -478,44 +592,75 @@ def build_arg_parser():
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    try:
+        scenario = load_scenario(
+            scenario_id=args.scenario, scenario_file=args.scenario_file,
+            seed=args.seed)
+    except ScenarioLoadError as error:
+        print('场景加载失败：%s' % error, flush=True)
+        return 2
+    if args.expected_actor_count is not None and args.expected_actor_count < 0:
+        print('--expected-actor-count 必须非负', flush=True)
+        return 2
+    expected_actor_count = (
+        len(scenario['actors']) if args.expected_actor_count is None
+        else args.expected_actor_count)
+    args.scenario = scenario['id']
+
     carla = _import_carla()
-    scenario = SCENARIOS[args.scenario]
 
     print('场景：%s' % scenario['name'], flush=True)
     for line in scenario.get('notes', []):
         print('  · %s' % line, flush=True)
+    print('  schema=%d id=%s seed=%d expected_actors=%d source=%s' % (
+        scenario['schema_version'], scenario['id'], scenario['seed'],
+        expected_actor_count, scenario.get('_source_file') or 'legacy'),
+        flush=True)
 
     rclpy.init()
-    world = CarlaWorld(
-        carla, args.carla_host, args.carla_port, scenario,
-        town=args.town, fixed_dt=args.fixed_dt,
-        no_rendering=args.no_rendering, spawn_index=args.spawn_index)
-    node = CarlaBridgeNode(args)
-
-    if not args.no_map:
-        graph_dict = export_lane_graph(
-            world.map, sample_distance_m=args.map_sample_m)
-        node.publish_map(graph_dict)
-
-    executor = SingleThreadedExecutor()
-    executor.add_node(node)
-    spin_thread = threading.Thread(target=executor.spin, name='ros-spin',
-                                   daemon=True)
-    spin_thread.start()
-
+    world = None
+    node = None
+    executor = None
+    exit_code = 0
     try:
+        world = CarlaWorld(
+            carla, args.carla_host, args.carla_port, scenario,
+            town=args.town or scenario['town'], fixed_dt=args.fixed_dt,
+            no_rendering=args.no_rendering, spawn_index=args.spawn_index)
+        if world.scripted_actor_count != expected_actor_count:
+            raise RuntimeError('actor count mismatch: spawned=%d expected=%d' % (
+                world.scripted_actor_count, expected_actor_count))
+        print('  spawned_actors=%d' % world.scripted_actor_count, flush=True)
+
+        node = CarlaBridgeNode(args)
+        if not args.no_map:
+            graph_dict = export_lane_graph(
+                world.map, sample_distance_m=args.map_sample_m)
+            node.publish_map(graph_dict)
+
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        spin_thread = threading.Thread(
+            target=executor.spin, name='ros-spin', daemon=True)
+        spin_thread.start()
         carla_loop(node, world, args, scenario)
     except KeyboardInterrupt:
         pass
+    except (RuntimeError, OSError) as error:
+        print('CARLA 场景启动/运行失败：%s' % error, flush=True)
+        exit_code = 2
     finally:
-        try:
+        if world is not None:
             world.close()
-        finally:
+        if executor is not None:
             executor.shutdown()
+        if node is not None:
             node.close()
             node.destroy_node()
+        if rclpy.ok():
             rclpy.shutdown()
+    return exit_code
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

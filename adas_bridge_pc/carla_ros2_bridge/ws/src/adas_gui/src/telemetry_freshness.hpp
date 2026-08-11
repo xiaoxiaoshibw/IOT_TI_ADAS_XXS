@@ -47,6 +47,10 @@ class TelemetryFreshness {
   // ageMs >= 0 且 ageMs <= limit_ms。
   bool isFresh(Channel c, qint64 limit_ms) const;
 
+  // A new GUI-owned run must not inherit freshness from transient/late data
+  // belonging to the previous run.
+  void resetSession();
+
   // 测试用：清空所有时间戳。
   void resetForTest();
 

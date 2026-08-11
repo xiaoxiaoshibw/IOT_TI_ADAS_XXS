@@ -39,6 +39,10 @@ MANEUVER_LANE_CHANGE_RIGHT = 4
 # 采样噪声都在此阈值内）。30° 足以区分真实转弯与直行连接段的轻微航向抖动。
 TURN_YAW_THRESHOLD_RAD = math.radians(30.0)
 
+# generate_waypoints() 的末采样点通常已靠近车道出口，但不会保证恰好落在边界上。
+# 沿 next() 向前扫描少量步数，既能越过同一 lane 内的采样余量，也能防住坏地图环路。
+MAX_FORWARD_SCAN_STEPS = 32
+
 
 def _norm_angle(a):
     while a > math.pi:
@@ -89,12 +93,17 @@ def _forward_maneuver(last_wp, dest_wps):
 
 
 def _group_waypoints(waypoints):
-    """按物理车道分组并沿 s 排序。返回 {lane_key: [waypoint, ...]}。"""
+    """按物理车道分组并沿行驶方向排序。返回 {lane_key: [waypoint, ...]}。
+
+    OpenDRIVE 右侧车道（负 lane_id）沿 reference line、即 s 递增方向行驶；
+    左侧车道（正 lane_id）反向行驶，因此必须按 s 递减排序。CARLA Waypoint.s
+    始终是 road reference line 的纵向坐标，不能对两侧车道一律升序。
+    """
     groups = {}
     for wp in waypoints:
         groups.setdefault(_lane_key(wp), []).append(wp)
     for key in groups:
-        groups[key].sort(key=lambda w: w.s)
+        groups[key].sort(key=lambda w: w.s, reverse=key[2] > 0)
     return groups
 
 
@@ -103,27 +112,90 @@ def _same_direction(a_lane_id, b_lane_id):
     return (a_lane_id > 0) == (b_lane_id > 0)
 
 
-def _forward_connections(last_wp, sample_distance_m, groups):
-    """last_wp 前方 next() 落到的车道 → STRAIGHT/LEFT/RIGHT 连接（转向按航向变化判，见 _forward_maneuver）。"""
-    connections = []
-    # 预置自身 lane_key：长直车道末点 next(2m) 可能仍落在同一 (road,section,lane)，
-    # 那是 from==to 自环，SoC add_connection 会拒——这里直接跳过，不产退化连接。
-    seen = {_lane_key(last_wp)}
+def _waypoint_token(waypoint):
+    """为前向扫描生成稳定 token；不依赖 CARLA Python 对象是否可哈希。"""
+    transform = waypoint.transform
+    return (_lane_key(waypoint), round(float(waypoint.s), 6),
+            round(float(transform.location.x), 4),
+            round(float(transform.location.y), 4))
+
+
+def _next_waypoints(waypoint, distance_m):
+    """调用 CARLA next()，把地图边界异常统一视为无后继。"""
     try:
-        nexts = last_wp.next(max(sample_distance_m, 0.5))
+        return list(waypoint.next(distance_m))
     except RuntimeError:
-        nexts = []
-    for nwp in nexts:
-        key = _lane_key(nwp)
-        if key in seen or key not in groups:
-            continue
-        seen.add(key)
-        connections.append({
-            'to_key': key,
-            'maneuver': _forward_maneuver(last_wp, groups[key]),
-            'extra_cost_m': 0.0,
-        })
+        return []
+
+
+def _forward_connections(last_wp, sample_distance_m, groups):
+    """last_wp 前方车道 → STRAIGHT/LEFT/RIGHT 连接。
+
+    末采样点的 next(sample_distance) 仍可能落在同一 lane，尤其是短 section 或
+    generate_waypoints() 未在边界采样时。此处继续沿行驶方向扫描，直到首次进入图中的
+    另一车道；因此既不产生自环，也不会把短连接段的出口拓扑截断。
+    """
+    connections = []
+    source_key = _lane_key(last_wp)
+    step_m = max(sample_distance_m, 0.5)
+    frontier = [last_wp]
+    seen_waypoints = {_waypoint_token(last_wp)}
+    seen_destinations = set()
+
+    for _ in range(MAX_FORWARD_SCAN_STEPS):
+        next_frontier = []
+        for current in frontier:
+            for nwp in _next_waypoints(current, step_m):
+                token = _waypoint_token(nwp)
+                if token in seen_waypoints:
+                    continue
+                seen_waypoints.add(token)
+                key = _lane_key(nwp)
+
+                # 仍在源 lane，或命中了 generate_waypoints() 未包含的中间 lane：
+                # 继续扫描，而不是直接丢掉整条分支。
+                if key == source_key or key not in groups:
+                    next_frontier.append(nwp)
+                    continue
+                if key in seen_destinations:
+                    continue
+                seen_destinations.add(key)
+                connections.append({
+                    'to_key': key,
+                    'maneuver': _forward_maneuver(last_wp, groups[key]),
+                    'extra_cost_m': 0.0,
+                })
+        if not next_frontier:
+            break
+        frontier = next_frontier
     return connections
+
+
+def _short_lane_centerline(waypoint, sample_distance_m):
+    """为只采到一个点的短 lane 补一个前向几何点。
+
+    SoC LaneGraph 要求中心线至少两点。直接删除短路口 connector 会同时删除其入/出边，
+    令可达路线断裂。优先使用 CARLA next() 在前方取得真实点；若短 lane 位于地图尽头，
+    则沿 waypoint 自带的行驶航向外推 0.5m，保证得到非退化且方向正确的最小线段。
+    """
+    first = _to_right_handed(waypoint.transform)
+    probe_m = min(max(float(sample_distance_m), 0.1), 0.5)
+    candidates = []
+    for candidate in _next_waypoints(waypoint, probe_m):
+        point = _to_right_handed(candidate.transform)
+        distance = math.hypot(point[0] - first[0], point[1] - first[1])
+        if distance <= 1e-3:
+            continue
+        heading_delta = abs(_norm_angle(point[2] - first[2]))
+        candidates.append((heading_delta, distance, _lane_key(candidate),
+                           float(candidate.s), point))
+    if candidates:
+        # 路口出口可能有多个分支；选航向最连续且最近的一点作为 connector 几何末端。
+        return [first, min(candidates, key=lambda item: item[:-1])[-1]]
+
+    length_m = 0.5
+    return [first, (first[0] + length_m * math.cos(first[2]),
+                    first[1] + length_m * math.sin(first[2]), first[2])]
 
 
 def _lane_change_connections(last_wp, groups):
@@ -172,17 +244,15 @@ def build_lane_graph(waypoints, map_name='', sample_distance_m=DEFAULT_SAMPLE_DI
     因此可用假对象离线单测，不依赖真实 CARLA 世界。
     """
     groups = _group_waypoints(waypoints)
-    # 中心线至少 2 点才能构成可行驶车道段（SoC add_lane 拒单点车道）。CARLA 对短于
-    # 采样间距的路口连接线/短 section 只采到 1 点，此处过滤掉，否则订阅端整张地图判 FAILED。
-    # 一并过滤掉指向这些车道的连接：下面 _forward_connections/_lane_change_connections
-    # 用过滤后的 groups 做成员判断，落到被过滤车道的连接自然不会生成。
-    groups = {key: wps for key, wps in groups.items() if len(wps) >= 2}
     lanes = []
     key_to_id = {key: encode_lane_key(*key) for key in groups}
 
     for key, wps in groups.items():
         lane_id = key_to_id[key]
-        centerline = [_to_right_handed(w.transform) for w in wps]
+        if len(wps) == 1:
+            centerline = _short_lane_centerline(wps[0], sample_distance_m)
+        else:
+            centerline = [_to_right_handed(w.transform) for w in wps]
         last_wp = wps[-1]
         outgoing = []
         for conn in (_forward_connections(last_wp, sample_distance_m, groups)

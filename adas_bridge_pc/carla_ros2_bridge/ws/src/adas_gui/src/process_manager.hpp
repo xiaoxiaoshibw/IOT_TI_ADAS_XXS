@@ -47,7 +47,8 @@ class ManagedProcess : public QObject {
 
   void start(const QString& program, const QStringList& arguments);
   void stop();  // SIGTERM 进程组，超时 SIGKILL
-  void kill() { process_.kill(); }
+  void killProcessGroup();
+  bool stopAndWait(int graceful_ms = 5000);
   bool waitForFinished(int ms) { return process_.waitForFinished(ms); }
   ProcState state() const { return state_; }
   bool active() const {
@@ -71,7 +72,8 @@ class ManagedProcess : public QObject {
   QTimer kill_timer_;
   ProcState state_{ProcState::Stopped};
   qint64 started_at_ms_{-1};
-  QByteArray line_buffer_;
+  QByteArray stdout_line_buffer_;
+  QByteArray stderr_line_buffer_;
 };
 
 // 编排：CARLA(含端口探测) + 桥，提供一键启动/全部停止。
@@ -99,13 +101,27 @@ class ProcessManager : public QObject {
   bool hilManagerActive() const { return hil_manager_.state() != QProcess::NotRunning; }
   bool hasManagedProcesses() const {
     return hilManagerActive() || stop_helper_.state() != QProcess::NotRunning ||
-           carla_.active() || bridge_.active();
+           carla_command_.state() != QProcess::NotRunning || carla_owned_ ||
+           soc_.active() || bridge_.active();
   }
-  bool hasManagedCarla() const { return hilManagerActive() || carla_.active(); }
-  bool hasManagedBridge() const { return hilManagerActive() || bridge_.active(); }
+  bool hasManagedCarla() const { return hilManagerActive() || carla_owned_ ||
+                                       carla_command_.state() != QProcess::NotRunning; }
+  bool hasManagedBridge() const { return hilManagerActive() || bridge_.active() || soc_.active(); }
+  bool configurationLocked() const {
+    return hasManagedProcesses() || readiness_running_ || bridge_pending_ ||
+           soc_pending_ || stop_carla_after_children_ || full_stack_running();
+  }
   bool externalCarlaDetected() const { return external_carla_; }
   bool externalBridgeDetected() const { return external_bridge_; }
   bool silMode() const { return sil_mode_; }
+  bool milMode() const {
+    return qEnvironmentVariable("ADAS_GUI_BACKEND") == QStringLiteral("mil");
+  }
+  bool carlaLocalMode() const {
+    return qEnvironmentVariable("ADAS_GUI_BACKEND") ==
+           QStringLiteral("carla_local_soc");
+  }
+  bool localThreeMachineObserver() const { return local_three_observer_; }
   // 由 RosBridge 提供同步 ROS graph 探针；启动前必须再次检查，避免 GUI
   // 重启后把仍在运行的外部 carla_bridge 再启动一份。
   void setBridgeProbe(std::function<bool()> probe) { bridge_probe_ = std::move(probe); }
@@ -113,9 +129,9 @@ class ProcessManager : public QObject {
   void setExternalBridgeDetected(bool detected);
 
   ProcState carlaState() const {
-    if (carla_.state() == ProcState::Stopped && external_carla_) return ProcState::Running;
-    if (carla_.state() == ProcState::Stopped && hilManagerActive()) return ProcState::Starting;
-    return carla_.state();
+    if (carla_state_ == ProcState::Stopped && external_carla_) return ProcState::Running;
+    if (carla_state_ == ProcState::Stopped && hilManagerActive()) return ProcState::Starting;
+    return carla_state_;
   }
   bool carlaReady() const { return carla_ready_; }
   ProcState bridgeState() const {
@@ -170,11 +186,23 @@ class ProcessManager : public QObject {
   void on_readiness_finished(int exit_code, QProcess::ExitStatus exit_status);
   void start_release_stack(const LaunchConfig& config, const QString& script);
   void start_sil_stack(const LaunchConfig& config);
+  void start_local_three_machine(const LaunchConfig& config);
+  void start_local_soc_stack(const LaunchConfig& config);
+  void start_carla_command(const QString& action, const LaunchConfig& config);
+  void on_carla_command_finished(int exit_code, QProcess::ExitStatus status);
+  void set_carla_state(ProcState state, const QString& detail = {});
+  void maybe_stop_carla_after_children();
   void stop_release_stack(const QString& script);
   void forward_hil_output(QProcess& process, QByteArray& buffer, bool stderr);
 
-  ManagedProcess carla_;
   ManagedProcess bridge_;
+  ManagedProcess soc_;
+  QProcess carla_command_;
+  QByteArray carla_command_stdout_;
+  QByteArray carla_command_stderr_;
+  QString carla_command_action_;
+  ProcState carla_state_{ProcState::Stopped};
+  bool carla_owned_{false};
   QProcess hil_manager_;
   QProcess stop_helper_;
   OrinStackManager orin_;  // ssh 远端命令 + 本地 dslite.sh 烧录
@@ -183,8 +211,7 @@ class ProcessManager : public QObject {
   QByteArray stop_output_buffer_;
   QByteArray stop_error_buffer_;
   bool hil_stop_requested_{false};
-  // 系统级单实例锁：本机（含 CLI 脚本）同一时刻只允许一个 CARLA 在启动/运行。
-  SingleInstanceLock carla_lock_{carla_lock_path()};
+  // CARLA 单实例/所有权统一交给 scripts/carla_invoker.py；GUI 不再持第二把锁。
   // carla_readiness.py 子进程：一次性校验 RPC/版本/世界/多帧稳定窗口，
   // 不是常驻轮询（脚本内部自带 interval/stabilization 重试逻辑）。
   QProcess readiness_probe_;
@@ -199,9 +226,14 @@ class ProcessManager : public QObject {
   LaunchConfig pending_config_;
   bool carla_ready_{false};
   bool bridge_pending_{false};  // 等 CARLA 就绪后自动启桥
+  bool soc_pending_{false};     // CARLA 本机联合：桥进程起来后启动本机 SoC
+  bool stop_carla_after_children_{false};
+  quint64 shutdown_generation_{0};
   bool external_carla_{false};
   bool external_bridge_{false};
   bool sil_mode_{false};
+  bool local_three_observer_{false};
+  QString managed_backend_;
   std::function<bool()> bridge_probe_;
 
   // ---- 全流程编排上下文 ----

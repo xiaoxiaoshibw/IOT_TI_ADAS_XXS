@@ -83,8 +83,8 @@ class PcCompanion(Node):
         graph = LaneGraph()
         graph.header.stamp = self.get_clock().now().to_msg()
         graph.header.frame_id = 'map'
-        graph.map_id = 'local-three-machine-track'
-        graph.map_hash = 'local-three-machine-v1'
+        graph.map_id = 'mil-local-track'
+        graph.map_hash = 'mil-local-v1'
         lane = MapLane()
         lane.id = 1
         lane.speed_limit_mps = 12.0

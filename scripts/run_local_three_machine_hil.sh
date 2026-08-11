@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local PC + Orin stack + F280025C host-runner HIL on vcan0 only.
+# Legacy filename; runs the local MIL simulated-hardware loop on vcan0 only.
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

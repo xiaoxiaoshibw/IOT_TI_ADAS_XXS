@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own and verify one local PC/Orin/MCU HIL process topology."""
+"""Own and verify the local MIL simulated-hardware process topology."""
 
 import argparse
 import fcntl
@@ -575,7 +575,7 @@ def main():
                     break
                 time.sleep(0.2)
         elif not args.check or args.keep_running:
-            print('local three-machine HIL running; Ctrl-C to stop', flush=True)
+            print('MIL local simulated-hardware loop running; Ctrl-C to stop', flush=True)
             while all(run.alive(role) for role in managed_roles):
                 time.sleep(0.5)
             rc = 1

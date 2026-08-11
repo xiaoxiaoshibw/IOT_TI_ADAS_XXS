@@ -77,6 +77,12 @@ void OrinStackManager::cancel() {
   }
 }
 
+void OrinStackManager::kill() {
+  if (!serialized_ || !proc_) return;
+  timeout_timer_.stop();
+  proc_->kill();
+}
+
 int OrinStackManager::start(Op op, const QString& host, const QString& user,
                             const QString& password, const QString& firmware_path,
                             int can_bitrate) {

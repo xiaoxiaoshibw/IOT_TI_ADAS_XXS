@@ -33,6 +33,7 @@ class FaultInjectPanel : public QWidget {
  public slots:
   void onRequestChanged(const QString& request_id, int state,
                         const QString& detail);
+  void setAvailable(bool available, const QString& reason = {});
 
  private:
   BusyButton* makeButton(const QString& text, const QString& tooltip,
@@ -48,6 +49,7 @@ class FaultInjectPanel : public QWidget {
   QString pending_request_id_;
   QList<BusyButton*> all_buttons_;
   QTextEdit* log_view_{nullptr};
+  bool available_{true};
 };
 
 }  // namespace adas::gui

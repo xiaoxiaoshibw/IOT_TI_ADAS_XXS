@@ -84,7 +84,20 @@ inline void setenv_if_unset(const char* key, const std::string& value) {
 inline void apply_dds_defaults() {
   // Local three-machine HIL deliberately exercises the process-wide default
   // RMW on ROS_DOMAIN_ID=145. Do not inject production direct-link DDS knobs.
+  const char* backend = std::getenv("ADAS_GUI_BACKEND");
+  const bool sil_backend = backend != nullptr &&
+      (std::string(backend) == "mil" ||
+       std::string(backend) == "carla_local_soc" ||
+       std::string(backend) == "local_three_machine" ||
+       std::string(backend) == "sil_fallback");
+  // 兼容旧入口：它会在 shell 里完整设置 DDS；这里不得偷偷改写 RMW。
   if (std::getenv("ADAS_LOCAL_THREE_MACHINE") != nullptr) return;
+  if (sil_backend) {
+    // 显式 backend 必须在 rclcpp::init 前确定 DDS 域；GUI 运行中不能热切域。
+    if (std::getenv("ROS_DOMAIN_ID") == nullptr) ::setenv("ROS_DOMAIN_ID", "145", 0);
+    setenv_if_unset("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp");
+    return;
+  }
   setenv_if_unset("ROS_DOMAIN_ID", "43");
   setenv_if_unset("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp");
   // 抑制 Humble(Orin)↔Jazzy(PC) 跨版本 type-hash 装饰性刷屏（不影响数据）。

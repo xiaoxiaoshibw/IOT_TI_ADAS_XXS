@@ -68,7 +68,9 @@ struct GuiActuation {
 struct GuiNavStatus {
   quint8 state{0};
   QString detail;
+  QString map_id;
   QString goal_id;
+  QString route_id;
   float remaining_distance_m{0.0f};
   bool ever_received{false};
 };
@@ -95,6 +97,9 @@ class RosBridge : public QObject {
  public:
   explicit RosBridge(QObject* parent = nullptr);
   ~RosBridge() override;
+  // MainWindow 完成所有 Qt 信号连接后再开始 spin，避免 transient-local 的
+  // 一次性地图在订阅回调与 UI 连接之间到达而永久丢失。
+  void start();
 
   // GUI 线程调用；rclcpp publisher 线程安全。导航目标/取消是 GUI 允许发布的
   // 唯二话题——它们只是导航请求，最终控制仍由 SoC 规划链与 MCU 仲裁。
@@ -104,6 +109,8 @@ class RosBridge : public QObject {
   // SIL 适配仍沿用原 GUI 的 ROS 观察面；仅在 ADAS_GUI_MODE=sil 时把
   // vehicle_interface 的闭环输出映射为原来的 MCU/执行器显示模型。
   bool isSilMode() const { return sil_mode_; }
+  bool isMilMode() const { return mil_mode_; }
+  bool isMcuLessMode() const { return mcu_less_mode_; }
   // 故障注入命令（审计整改 TOP10-2）：向 `/adas/_debug/fault_inject_cmd`
   // 发布 JSON `{cmd,param,label,ts_ms,source}`。桥节点订阅后通过 PC CANalyst-II
   // 发送 0x301 帧到 MCU。仅当 MCU 烧录 ADAS_TEST_BUILD=1 时生效。
@@ -115,9 +122,12 @@ class RosBridge : public QObject {
   void dtcHistoryChanged(const QString& json);
   void laneGraphChanged(const QVector<adas::gui::GuiLane>& lanes,
                         const QString& map_id);
+  void mapMetadataChanged(const QString& map_id, const QString& map_hash);
   void routeChanged(const QPolygonF& route);
   void navStatusChanged(const adas::gui::GuiNavStatus& status);
   void leadObjectChanged(const adas::gui::GuiLeadObject& lead);
+  void objectsChanged(const QVector<adas::gui::GuiMapObject>& objects);
+  void objectSummaryChanged(int visible_count, int primary_lead_id);
   // 自车运动状态：位置、航向、车速、横摆角速度（里程计限流 10 Hz）
   void egoChanged(double x, double y, double yaw_rad,
                   double speed_mps, double yaw_rate_rps);
@@ -130,6 +140,8 @@ class RosBridge : public QObject {
   void navigationRequestChanged(const QString& request_id,
                                 const QString& operation, int state,
                                 const QString& detail);
+  void navigationGoalAccepted(const QString& request_id,
+                              const QString& goal_id);
   void faultRequestChanged(const QString& request_id, int state,
                            const QString& detail);
 
@@ -158,6 +170,7 @@ class RosBridge : public QObject {
   rclcpp::Client<adas_msgs::srv::CancelNavigation>::SharedPtr client_cancel_;
   // 审计整改 TOP10-2：故障注入命令 publisher
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_fault_inject_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_carla_visualization_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_fault_ack_;
   rclcpp::TimerBase::SharedPtr health_timer_;
   QTimer request_timer_;
@@ -171,6 +184,7 @@ class RosBridge : public QObject {
   Clock::time_point last_gate_{};
   Clock::time_point last_aeb_{};
   Clock::time_point last_safety_{};
+  Clock::time_point last_objects_{};
   bool ever_nav_{false};
   bool ever_mcu_{false};
   GuiMcuStatus latest_mcu_;
@@ -183,7 +197,9 @@ class RosBridge : public QObject {
   std::chrono::steady_clock::time_point last_pose_emit_{};
   std::chrono::steady_clock::time_point last_sil_status_emit_{};
   bool sil_mode_{false};
-  std::atomic<bool> running_{true};
+  bool mil_mode_{false};
+  bool mcu_less_mode_{false};
+  std::atomic<bool> running_{false};
   std::thread spin_thread_;
 };
 

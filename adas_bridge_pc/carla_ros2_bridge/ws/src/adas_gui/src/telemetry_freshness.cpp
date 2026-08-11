@@ -24,8 +24,10 @@ bool TelemetryFreshness::isFresh(Channel c, qint64 limit_ms) const {
   return a >= 0 && a <= limit_ms;
 }
 
-void TelemetryFreshness::resetForTest() {
+void TelemetryFreshness::resetSession() {
   last_ms_.fill(-1);
 }
+
+void TelemetryFreshness::resetForTest() { resetSession(); }
 
 }  // namespace adas::gui

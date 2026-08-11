@@ -169,6 +169,8 @@ class Supervisor:
                 f"-carla-rpc-port={payload['port']}",
                 f"-quality-level={payload.get('quality_level', 'Epic')}",
             ]
+            if payload.get('render_offscreen', False):
+                cmd.append('-RenderOffScreen')
             self.carla_log_file.parent.mkdir(parents=True, exist_ok=True)
             log_f = open(self.carla_log_file, "a", buffering=1)
             self.carla_proc = subprocess.Popen(

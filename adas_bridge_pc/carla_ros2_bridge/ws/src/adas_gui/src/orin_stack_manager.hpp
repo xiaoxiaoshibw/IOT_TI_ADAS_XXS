@@ -57,6 +57,7 @@ class OrinStackManager : public QObject {
   bool busy() const { return serialized_; }
   void cancel();  // 发 SIGTERM 到当前进程；不会发 SIGKILL（避免烧录中途
                   // 强杀导致 F280025C brick）
+  void kill();    // 仅供上层显式超时策略使用：立即强制终止当前子进程
 
   // 单条命令超时（毫秒）。sshpass 在某些 Orin 故障下（如 sudo -n 缺
   // NOPASSWD、RTNETLINK 失败但 ssh 会话没正常关闭）会卡住不退出，必须

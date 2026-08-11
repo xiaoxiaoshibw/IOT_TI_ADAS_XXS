@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <unordered_set>
 
 #include "adas_common/geometry.hpp"
 
@@ -57,21 +59,100 @@ void SimVehicleCore::set_initial_state(double station_m, double lateral_m, doubl
 }
 
 void SimVehicleCore::set_lead_script(const LeadScript& script) {
-  lead_script_ = script;
-  lead_station_ = script.initial_station_m;
-  lead_v_ = std::max(0.0, script.initial_speed_mps);
+  ScriptedActor actor;
+  actor.id = 1;
+  actor.classification = ScriptedActorClass::Car;
+  actor.initial_station_m = script.initial_station_m;
+  actor.initial_speed_mps = script.initial_speed_mps;
+  actor.accel_limit_mps2 = script.accel_mps2;
+  actor.speed_profile = {{0.0, script.initial_speed_mps}};
+  actor.speed_profile.insert(actor.speed_profile.end(), script.events.begin(),
+                             script.events.end());
+  upsert_legacy_actor(actor, script.enabled);
 }
 
 void SimVehicleCore::set_pedestrian_script(const PedestrianScript& script) {
-  ped_script_ = script;
-  ped_walking_ = false;
-  ped_done_ = false;
-  ped_lateral_ = script.start_lateral_m;
+  ScriptedActor actor;
+  actor.id = 2;
+  actor.classification = ScriptedActorClass::Pedestrian;
+  actor.initial_station_m = script.station_m;
+  actor.initial_lateral_m = script.start_lateral_m;
+  actor.initial_speed_mps = script.speed_mps;
+  actor.accel_limit_mps2 = std::max(script.speed_mps, 0.1);
+  actor.speed_profile = {{0.0, script.speed_mps}};
+  actor.trigger_ego_gap_m = script.trigger_ego_gap_m;
+  actor.crossing_end_lateral_m = script.end_lateral_m;
+  actor.crossing_speed_mps = script.speed_mps;
+  upsert_legacy_actor(actor, script.enabled);
 }
 
 void SimVehicleCore::set_adjacent_car_script(const AdjacentCarScript& script) {
-  adj_script_ = script;
-  adj_station_ = script.initial_station_m;
+  ScriptedActor actor;
+  actor.id = 3;
+  actor.classification = ScriptedActorClass::Car;
+  actor.initial_station_m = script.initial_station_m;
+  actor.initial_lateral_m = script.lateral_m;
+  actor.initial_speed_mps = script.speed_mps;
+  actor.accel_limit_mps2 = 2.0;
+  actor.speed_profile = {{0.0, script.speed_mps}};
+  actor.spawn_time_s = script.spawn_time_s;
+  upsert_legacy_actor(actor, script.enabled);
+}
+
+void SimVehicleCore::upsert_legacy_actor(const ScriptedActor& actor, bool enabled) {
+  std::vector<ScriptedActor> configs;
+  configs.reserve(actors_.size() + 1);
+  for (const auto& runtime : actors_) {
+    if (runtime.config.id != actor.id) configs.push_back(runtime.config);
+  }
+  if (enabled) configs.push_back(actor);
+  set_scripted_actors(configs);
+}
+
+void SimVehicleCore::set_scripted_actors(const std::vector<ScriptedActor>& actors) {
+  if (actors.size() > kMaxScriptedActors) {
+    throw std::invalid_argument("scripted actor count exceeds safety limit");
+  }
+  std::unordered_set<std::uint32_t> ids;
+  std::vector<ActorRuntime> next;
+  next.reserve(actors.size());
+  for (const auto& actor : actors) {
+    if (actor.id == 0 || !ids.insert(actor.id).second) {
+      throw std::invalid_argument("scripted actor IDs must be positive and unique");
+    }
+    if (!std::isfinite(actor.initial_station_m) ||
+        !std::isfinite(actor.initial_lateral_m) ||
+        !std::isfinite(actor.initial_speed_mps) || actor.initial_speed_mps < 0.0 ||
+        !std::isfinite(actor.accel_limit_mps2) || actor.accel_limit_mps2 <= 0.0 ||
+        actor.spawn_time_s < 0.0 ||
+        (actor.disappear_time_s >= 0.0 &&
+         actor.disappear_time_s <= actor.spawn_time_s) ||
+        actor.speed_profile.empty()) {
+      throw std::invalid_argument("invalid scripted actor scalar fields");
+    }
+    double previous_time = -1.0;
+    for (const auto& point : actor.speed_profile) {
+      if (!std::isfinite(point.first) || !std::isfinite(point.second) ||
+          point.first <= previous_time || point.second < 0.0) {
+        throw std::invalid_argument("invalid scripted actor speed profile");
+      }
+      previous_time = point.first;
+    }
+    if (actor.speed_profile.front().first != 0.0 ||
+        actor.speed_profile.front().second != actor.initial_speed_mps) {
+      throw std::invalid_argument("speed profile must start at initial speed at t=0");
+    }
+    ActorRuntime runtime;
+    runtime.config = actor;
+    runtime.station_m = actor.initial_station_m;
+    runtime.lateral_m = actor.initial_lateral_m;
+    runtime.speed_mps = actor.initial_speed_mps;
+    next.push_back(std::move(runtime));
+  }
+  std::sort(next.begin(), next.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.config.id < rhs.config.id;
+  });
+  actors_ = std::move(next);
 }
 
 void SimVehicleCore::step(const common::ActuationData& actuation, double dt) {
@@ -80,47 +161,50 @@ void SimVehicleCore::step(const common::ActuationData& actuation, double dt) {
   }
   sim_time_ += dt;
 
-  // ── 行人推进（触发后沿法向匀速横穿）──
-  if (ped_script_.enabled && !ped_done_) {
-    if (!ped_walking_) {
-      // 自车逼近横穿点到触发距离 → 开始横穿（用自车最近点弧长近似自车 station）
-      const std::size_t ego_idx = ac::find_nearest_index(centerline_, x_, y_);
-      const double ego_station =
-          centerline_.empty() ? 0.0
-                              : track_length_m_ * static_cast<double>(ego_idx) /
-                                    static_cast<double>(centerline_.size() - 1);
-      if (ped_script_.station_m - ego_station < ped_script_.trigger_ego_gap_m) {
-        ped_walking_ = true;
-      }
+  // ── 通用 actor 推进：固定车道车辆/骑行者沿 station，行人沿 lateral ──
+  const double ego_station = ego_station_m();
+  for (auto& actor : actors_) {
+    const auto& config = actor.config;
+    if (actor.done || sim_time_ < config.spawn_time_s) continue;
+    if (config.disappear_time_s >= 0.0 && sim_time_ >= config.disappear_time_s) {
+      actor.done = true;
+      continue;
     }
-    if (ped_walking_) {
-      const double dir = ped_script_.end_lateral_m > ped_script_.start_lateral_m ? 1.0 : -1.0;
-      ped_lateral_ += dir * ped_script_.speed_mps * dt;
-      if ((dir > 0.0 && ped_lateral_ >= ped_script_.end_lateral_m) ||
-          (dir < 0.0 && ped_lateral_ <= ped_script_.end_lateral_m)) {
-        ped_done_ = true;
+    if (config.classification == ScriptedActorClass::Pedestrian) {
+      if (!actor.crossing_started &&
+          (config.trigger_ego_gap_m < 0.0 ||
+           config.initial_station_m - ego_station <= config.trigger_ego_gap_m)) {
+        actor.crossing_started = true;
       }
+      if (actor.crossing_started) {
+        const double direction = config.crossing_end_lateral_m >=
+                                         config.initial_lateral_m
+                                     ? 1.0
+                                     : -1.0;
+        actor.lateral_m += direction * config.crossing_speed_mps * dt;
+        if ((direction > 0.0 && actor.lateral_m >= config.crossing_end_lateral_m) ||
+            (direction < 0.0 && actor.lateral_m <= config.crossing_end_lateral_m)) {
+          actor.done = true;
+        }
+      }
+      continue;
     }
-  }
 
-  // ── 邻道车推进（spawn 后恒速）──
-  if (adj_script_.enabled && sim_time_ >= adj_script_.spawn_time_s) {
-    adj_station_ += adj_script_.speed_mps * dt;
-  }
-
-  // ── 前车推进（沿中心线，事件表变速）──
-  if (lead_script_.enabled) {
-    double target_v = lead_script_.initial_speed_mps;
-    for (const auto& ev : lead_script_.events) {
-      if (sim_time_ >= ev.first) {
-        target_v = ev.second;
-      }
+    double target_speed = config.initial_speed_mps;
+    const double actor_time = sim_time_ - config.spawn_time_s;
+    for (const auto& point : config.speed_profile) {
+      if (actor_time >= point.first) target_speed = point.second;
     }
-    target_v = std::max(0.0, target_v);
-    const double dv = std::clamp(target_v - lead_v_, -lead_script_.accel_mps2 * dt,
-                                 lead_script_.accel_mps2 * dt);
-    lead_v_ = std::max(0.0, lead_v_ + dv);
-    lead_station_ += lead_v_ * dt;
+    if (config.hard_brake_start_s >= 0.0 &&
+        actor_time >= config.hard_brake_start_s &&
+        actor_time < config.hard_brake_end_s) {
+      target_speed = 0.0;
+    }
+    const double limit = config.accel_limit_mps2 * dt;
+    actor.speed_mps = std::max(
+        0.0, actor.speed_mps + std::clamp(target_speed - actor.speed_mps,
+                                           -limit, limit));
+    actor.station_m += actor.speed_mps * dt;
   }
   // 转向执行一阶惯性
   const double steer_target =
@@ -153,52 +237,102 @@ common::KinematicState SimVehicleCore::state() const {
   return s;
 }
 
-LeadState SimVehicleCore::lead_state() const {
-  LeadState ls;
-  if (!lead_script_.enabled || centerline_.size() < 2 || lead_station_ > track_length_m_) {
-    return ls;  // 未启用或驶出赛道末端 → present=false
+double SimVehicleCore::ego_station_m() const {
+  if (centerline_.size() < 2) return 0.0;
+  const std::size_t index = ac::find_nearest_index(centerline_, x_, y_);
+  return track_length_m_ * static_cast<double>(index) /
+         static_cast<double>(centerline_.size() - 1);
+}
+
+common::TrajPoint SimVehicleCore::point_at_station(double station_m) const {
+  if (centerline_.empty()) return {};
+  if (station_m >= 0.0) {
+    return ac::point_at_arclength(centerline_, 0,
+                                  std::min(station_m, track_length_m_));
   }
-  const ac::TrajPoint p = ac::point_at_arclength(centerline_, 0, lead_station_);
-  ls.present = true;
-  ls.x = p.x;
-  ls.y = p.y;
-  ls.yaw = p.yaw;
-  ls.v_mps = lead_v_;
-  ls.station_m = lead_station_;
-  return ls;
+  auto point = centerline_.front();
+  point.x += std::cos(point.yaw) * station_m;
+  point.y += std::sin(point.yaw) * station_m;
+  return point;
+}
+
+std::vector<ScriptedObjectState> SimVehicleCore::snapshot_objects() const {
+  std::vector<ScriptedObjectState> result;
+  result.reserve(actors_.size());
+  if (centerline_.size() < 2) return result;
+  for (const auto& actor : actors_) {
+    const auto& config = actor.config;
+    if (actor.done || sim_time_ < config.spawn_time_s ||
+        (config.disappear_time_s >= 0.0 && sim_time_ >= config.disappear_time_s) ||
+        actor.station_m > track_length_m_) {
+      continue;
+    }
+    const auto point = point_at_station(actor.station_m);
+    ScriptedObjectState state;
+    state.id = config.id;
+    state.classification = config.classification;
+    state.x = point.x - std::sin(point.yaw) * actor.lateral_m;
+    state.y = point.y + std::cos(point.yaw) * actor.lateral_m;
+    state.yaw = point.yaw;
+    state.v_mps = actor.speed_mps;
+    state.station_m = actor.station_m;
+    state.lateral_m = actor.lateral_m;
+    if (config.classification == ScriptedActorClass::Pedestrian) {
+      const double direction = config.crossing_end_lateral_m >=
+                                       config.initial_lateral_m
+                                   ? 1.0
+                                   : -1.0;
+      state.yaw = ac::normalize_angle(point.yaw + direction * ac::kPi / 2.0);
+      state.v_mps = actor.crossing_started ? config.crossing_speed_mps : 0.0;
+    }
+    result.push_back(state);
+  }
+  return result;
+}
+
+LeadState SimVehicleCore::lead_state() const {
+  LeadState state;
+  const auto objects = snapshot_objects();
+  const auto found = std::find_if(objects.begin(), objects.end(),
+                                  [](const auto& object) { return object.id == 1; });
+  if (found == objects.end()) return state;
+  state.present = true;
+  state.x = found->x;
+  state.y = found->y;
+  state.yaw = found->yaw;
+  state.v_mps = found->v_mps;
+  state.station_m = found->station_m;
+  return state;
 }
 
 LeadState SimVehicleCore::adjacent_car_state() const {
-  LeadState ls;
-  if (!adj_script_.enabled || sim_time_ < adj_script_.spawn_time_s ||
-      centerline_.size() < 2 || adj_station_ > track_length_m_) {
-    return ls;  // present=false
-  }
-  const ac::TrajPoint p = ac::point_at_arclength(centerline_, 0, adj_station_);
-  ls.present = true;
-  ls.x = p.x - std::sin(p.yaw) * adj_script_.lateral_m;
-  ls.y = p.y + std::cos(p.yaw) * adj_script_.lateral_m;
-  ls.yaw = p.yaw;
-  ls.v_mps = adj_script_.speed_mps;
-  ls.station_m = adj_station_;
-  return ls;
+  LeadState state;
+  const auto objects = snapshot_objects();
+  const auto found = std::find_if(objects.begin(), objects.end(),
+                                  [](const auto& object) { return object.id == 3; });
+  if (found == objects.end()) return state;
+  state.present = true;
+  state.x = found->x;
+  state.y = found->y;
+  state.yaw = found->yaw;
+  state.v_mps = found->v_mps;
+  state.station_m = found->station_m;
+  return state;
 }
 
 PedestrianState SimVehicleCore::pedestrian_state() const {
-  PedestrianState ps;
-  if (!ped_script_.enabled || ped_done_ || centerline_.size() < 2) {
-    return ps;  // present=false
-  }
-  const ac::TrajPoint p = ac::point_at_arclength(centerline_, 0, ped_script_.station_m);
-  // 沿路径法向 (-sin, cos) 偏移（左正）
-  ps.present = true;
-  ps.x = p.x - std::sin(p.yaw) * ped_lateral_;
-  ps.y = p.y + std::cos(p.yaw) * ped_lateral_;
-  const double dir = ped_script_.end_lateral_m > ped_script_.start_lateral_m ? 1.0 : -1.0;
-  ps.yaw = ac::normalize_angle(p.yaw + dir * ac::kPi / 2.0);  // 行走方向 = 法向
-  ps.v_mps = ped_walking_ ? ped_script_.speed_mps : 0.0;
-  ps.lateral_m = ped_lateral_;
-  return ps;
+  PedestrianState state;
+  const auto objects = snapshot_objects();
+  const auto found = std::find_if(objects.begin(), objects.end(),
+                                  [](const auto& object) { return object.id == 2; });
+  if (found == objects.end()) return state;
+  state.present = true;
+  state.x = found->x;
+  state.y = found->y;
+  state.yaw = found->yaw;
+  state.v_mps = found->v_mps;
+  state.lateral_m = found->lateral_m;
+  return state;
 }
 
 common::LaneStateData SimVehicleCore::lane_state() const {

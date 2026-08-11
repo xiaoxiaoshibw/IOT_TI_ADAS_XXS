@@ -14,12 +14,14 @@
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
 #include "icons.hpp"
 #include "preflight_check.hpp"
+#include "scenario_workflow.hpp"
 #include "ros_bridge.hpp"
 #include "secure_settings.hpp"
 #include "theme.hpp"
@@ -56,9 +58,7 @@ void set_led_state(QLabel* holder, LedState state) {
 }
 
 QString default_carla_root() {
-  const QByteArray env = qgetenv("CARLA_ROOT");
-  if (!env.isEmpty()) return QString::fromLocal8Bit(env);
-  return QDir::homePath() + QStringLiteral("/CARLA_0.9.16");
+  return discover_carla_root();
 }
 
 QString environment_or(const char* name, const QString& fallback) {
@@ -158,7 +158,7 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
               if (state == ProcState::Stopped || state == ProcState::Failed)
                 runtime_label_->setText(QStringLiteral("--"));
             }
-            emit runStateChanged(running, scenario_combo_->currentText(),
+            emit runStateChanged(running, selectedScenario(),
                                  town_combo_->currentText());
             if (state == ProcState::Running || state == ProcState::Failed) {
               start_bridge_button_->setBusy(false);
@@ -189,21 +189,7 @@ LaunchPanel::LaunchPanel(QWidget* parent) : QWidget(parent) {
   });
 
   connect(start_all_button_, &QPushButton::clicked, this, [this]() {
-    if (!runPreflightGate()) return;
-    const auto config = currentConfig();
-    if (!confirm_action(this, QStringLiteral("确认启动完整系统"),
-                        QStringLiteral("启动 %1 / %2")
-                            .arg(config.scenario, config.town),
-                        config.start_full_stack
-                            ? QStringLiteral("将启动 PC 仿真，并通过 SSH 请求 Orin HIL 栈启动。")
-                            : QStringLiteral("将启动本机 CARLA/SIL 与 ROS2 bridge。"),
-                        ConfirmSeverity::Warning)) return;
-    start_all_button_->setBusy(true, QStringLiteral("启动中"),
-                               QStringLiteral("等待 bridge 运行或启动失败"));
-    active_start_button_ = start_all_button_;
-    save_settings();
-    manager_.startAll(config);
-    update_buttons();
+    startConfiguredSystem(/*interactive=*/true);
   });
   connect(stop_all_button_, &QPushButton::clicked, this, [this]() {
     if (!confirm_action(this, QStringLiteral("确认停止完整系统"),
@@ -280,14 +266,114 @@ LaunchPanel::~LaunchPanel() {
   manager_.stopAll();
 }
 
+bool LaunchPanel::startConfiguredSystem(bool interactive) {
+  const auto config = currentConfig();
+  if (interactive) {
+    if (!runPreflightGate()) return false;
+    if (!confirm_action(this, QStringLiteral("确认启动完整系统"),
+                        QStringLiteral("%1 · %2 @ %3")
+                            .arg(backend_display_name(config.backend), config.scenario,
+                                 config.town),
+                        QStringLiteral("场景文件：%1\nseed=%2，预计目标=%3\n"
+                                       "%4\n运行中配置将锁定，停止后可切换场景。")
+                            .arg(config.scenario_file)
+                            .arg(config.seed)
+                            .arg(config.expected_actor_count)
+                            .arg(config.auto_navigation
+                                     ? QStringLiteral("将按场景 profile 自动生成并下发车道导航目标")
+                                     : QStringLiteral("不会自动导航，请在 Town 地图手动选点")),
+                        ConfirmSeverity::Warning)) return false;
+  } else {
+    const auto items = run_preflight(config);
+    for (const auto& item : items) {
+      if (item.level == PreflightLevel::Fail) {
+        emit manager_.logLine(QStringLiteral("PREFLIGHT"),
+                              QStringLiteral("[FAIL] %1：%2").arg(item.label, item.detail));
+        return false;
+      }
+      if (item.level == PreflightLevel::Warn) {
+        emit manager_.logLine(QStringLiteral("PREFLIGHT"),
+                              QStringLiteral("[WARN] %1：%2；--autostart 继续")
+                                  .arg(item.label, item.detail));
+      }
+    }
+  }
+  start_all_button_->setBusy(true, QStringLiteral("启动中"),
+                             QStringLiteral("等待 bridge 运行或启动失败"));
+  active_start_button_ = start_all_button_;
+  save_settings();
+  const auto profile = scenario_workflow_profile(config.scenario);
+  emit scenarioRunRequested(config.scenario, config.town,
+                            config.auto_navigation && profile.requires_navigation,
+                            profile.recommended_goal_distance_m);
+  manager_.startAll(config);
+  update_buttons();
+  return true;
+}
+
+QString LaunchPanel::selectedBackend() const {
+  return backend_combo_->currentData().toString();
+}
+
+QString LaunchPanel::selectedScenario() const {
+  return scenario_combo_->currentData().toString();
+}
+
+void LaunchPanel::rebuildScenarioChoices(const QString& preferred) {
+  const QString wanted = preferred.isEmpty() ? selectedScenario() : preferred;
+  const QSignalBlocker blocker(scenario_combo_);
+  scenario_combo_->clear();
+  const auto catalog = load_scenario_catalog();
+  if (catalog.isEmpty()) {
+    for (const QString& id : legacy_scenarios()) scenario_combo_->addItem(id, id);
+  } else {
+    for (const auto& entry : catalog) {
+      if (!scenario_supports_backend(entry, selectedBackend())) continue;
+      scenario_combo_->addItem(
+          QStringLiteral("%1  ·  %2").arg(entry.display_name, entry.id), entry.id);
+    }
+  }
+  int index = scenario_combo_->findData(wanted);
+  if (index < 0) index = scenario_combo_->findData(QStringLiteral("free"));
+  if (index < 0 && scenario_combo_->count() > 0) index = 0;
+  scenario_combo_->setCurrentIndex(index);
+  updateScenarioSummary();
+}
+
+void LaunchPanel::updateScenarioSummary() {
+  const auto entry = scenario_catalog_entry(selectedScenario());
+  if (entry.id.isEmpty() || entry.file.isEmpty()) {
+    scenario_summary_->setText(QStringLiteral("兼容场景 · 无 catalog 元数据"));
+    return;
+  }
+  scenario_summary_->setText(
+      QStringLiteral("%1\n预计目标 %2 · seed=%3 · %4")
+          .arg(entry.description)
+          .arg(entry.expected_actor_count)
+          .arg(entry.default_seed)
+          .arg(QFileInfo(entry.file).fileName()));
+  const int town = town_combo_->findText(entry.default_town);
+  if (town >= 0) town_combo_->setCurrentIndex(town);
+}
+
 LaunchConfig LaunchPanel::currentConfig() const {
   LaunchConfig config;
+  config.backend = selectedBackend();
+  config.repo_root = find_repo_root();
   config.carla_root = carla_root_edit_->text().trimmed();
-  config.scenario = scenario_combo_->currentText();
-  config.town = town_combo_->currentText();
+  config.scenario = selectedScenario();
+  const auto entry = scenario_catalog_entry(config.scenario, config.repo_root);
+  config.scenario_file = entry.file;
+  config.seed = entry.default_seed;
+  config.expected_actor_count = entry.expected_actor_count;
+  config.town = entry.default_town.isEmpty() ? town_combo_->currentText()
+                                              : entry.default_town;
   config.control_source = source_combo_->currentText();
   config.low_quality = low_quality_check_->isChecked();
-  config.render_offscreen = offscreen_check_->isChecked();
+  // The product contract requires CARLA to be the authoritative visible
+  // scene.  Headless rendering is intentionally unavailable from this GUI.
+  config.render_offscreen = false;
+  config.auto_navigation = auto_navigation_check_->isChecked();
   // Orin 远程启动默认不勾（比赛前一天手动 systemctl start 更稳）。
   // 勾上时 GUI 会 SSH 上 Orin 跑 CAN 链路 + adas-hil 编排，需要 SecureSettings
   // 里有密码。
@@ -309,8 +395,9 @@ void LaunchPanel::build_ui() {
   product->setStyleSheet(QStringLiteral(
       "color:%1;font-size:15px;font-weight:700;letter-spacing:0px;")
       .arg(theme::kTextPrimary));
-  auto* mode = new QLabel(manager_.silMode() ? QStringLiteral("SIL")
-                                             : QStringLiteral("HIL / SIL"));
+  auto* mode = new QLabel(manager_.milMode() ? QStringLiteral("MIL")
+                              : manager_.carlaLocalMode() ? QStringLiteral("CARLA")
+                                                          : QStringLiteral("HIL"));
   mode->setStyleSheet(QStringLiteral(
       "color:%1;background:%2;border:1px solid %3;border-radius:5px;"
       "padding:3px 7px;font-size:10px;font-weight:700;")
@@ -343,8 +430,21 @@ void LaunchPanel::build_ui() {
   form->setHorizontalSpacing(8);
   form->setVerticalSpacing(6);
   form->setContentsMargins(0, 0, 0, 0);
+  backend_combo_ = new QComboBox();
+  for (const QString& backend : known_backends()) {
+    backend_combo_->addItem(backend_display_name(backend), backend);
+  }
+  backend_combo_->setToolTip(QStringLiteral(
+      "MIL=本机 sim_vehicle + SoC + vcan + F280025C host-runner 模拟硬件闭环；"
+      "CARLA 本机联合=CARLA 窗口展示 + 本机 SoC 控制闭环；"
+      "未完成的 HIL 适配不作为可选运行配置。后端决定 ROS_DOMAIN_ID，"
+      "如需切换必须用 --backend 重启 GUI，"
+      "运行中不能在下拉框热切换。"));
   scenario_combo_ = new QComboBox();
-  scenario_combo_->addItems(known_scenarios());
+  scenario_summary_ = new QLabel();
+  scenario_summary_->setWordWrap(true);
+  scenario_summary_->setStyleSheet(QStringLiteral("color:%1;font-size:10px;")
+                                       .arg(theme::kTextSecondary));
   town_combo_ = new QComboBox();
   town_combo_->addItems(known_towns());
   town_combo_->setEnabled(false);
@@ -354,12 +454,12 @@ void LaunchPanel::build_ui() {
   source_combo_->setEnabled(false);
   source_combo_->installEventFilter(this);
   carla_root_edit_ = new QLineEdit(default_carla_root());
-  auto* browse = new QPushButton();
-  browse->setIcon(icons::get(QStringLiteral("folder-open")));
-  browse->setIconSize(QSize(14, 14));
-  browse->setFixedWidth(32);
-  browse->setObjectName(QStringLiteral("textButton"));
-  connect(browse, &QPushButton::clicked, this, [this]() {
+  carla_browse_button_ = new QPushButton();
+  carla_browse_button_->setIcon(icons::get(QStringLiteral("folder-open")));
+  carla_browse_button_->setIconSize(QSize(14, 14));
+  carla_browse_button_->setFixedWidth(32);
+  carla_browse_button_->setObjectName(QStringLiteral("textButton"));
+  connect(carla_browse_button_, &QPushButton::clicked, this, [this]() {
     const QString dir = QFileDialog::getExistingDirectory(
         this, QStringLiteral("选择 CARLA 目录"), carla_root_edit_->text());
     if (!dir.isEmpty()) carla_root_edit_->setText(dir);
@@ -367,11 +467,18 @@ void LaunchPanel::build_ui() {
   auto* root_row = new QHBoxLayout();
   root_row->setSpacing(4);
   root_row->addWidget(carla_root_edit_, 1);
-  root_row->addWidget(browse);
+  root_row->addWidget(carla_browse_button_);
   low_quality_check_ = new QCheckBox(QStringLiteral("低画质"));
   low_quality_check_->setToolTip(QStringLiteral("降低 CARLA 画质，适合较弱 GPU"));
   offscreen_check_ = new QCheckBox(QStringLiteral("离屏渲染"));
-  offscreen_check_->setToolTip(QStringLiteral("CARLA 不创建独立渲染窗口"));
+  offscreen_check_->setChecked(false);
+  offscreen_check_->setEnabled(false);
+  offscreen_check_->setVisible(false);
+  offscreen_check_->setToolTip(QStringLiteral("GUI 模式强制显示 CARLA 窗口"));
+  auto_navigation_check_ = new QCheckBox(QStringLiteral("自动导航"));
+  auto_navigation_check_->setToolTip(QStringLiteral(
+      "场景启动且 Town 地图/自车位姿就绪后，沿有向车道图自动生成安全目标；"
+      "关闭后可只用中间地图手动选点。"));
   start_full_stack_check_ = new QCheckBox(QStringLiteral("包含 Orin 远程启动"));
   start_full_stack_check_->setToolTip(QStringLiteral(
       "勾上后 GUI 会 SSH 上 Orin（%1@%2）跑 CAN 链路 + adas-hil.service。"
@@ -382,8 +489,11 @@ void LaunchPanel::build_ui() {
   option_row->setSpacing(8);
   option_row->addWidget(low_quality_check_);
   option_row->addWidget(offscreen_check_);
+  option_row->addWidget(auto_navigation_check_);
   option_row->addStretch(1);
+  form->addRow(QStringLiteral("后端"), backend_combo_);
   form->addRow(QStringLiteral("场景"), scenario_combo_);
+  form->addRow(QString(), scenario_summary_);
   form->addRow(QStringLiteral("地图"), town_combo_);
   form->addRow(QStringLiteral("控制源"), source_combo_);
   form->addRow(QStringLiteral("CARLA 目录"), root_row);
@@ -391,6 +501,16 @@ void LaunchPanel::build_ui() {
   form->addRow(QStringLiteral("远程"), start_full_stack_check_);
   config_box->layout()->addWidget(config_body);
   root->addWidget(config_box);
+
+  connect(backend_combo_, &QComboBox::currentIndexChanged, this, [this]() {
+    rebuildScenarioChoices(selectedScenario());
+    update_buttons();
+  });
+  connect(scenario_combo_, &QComboBox::currentIndexChanged, this, [this]() {
+    updateScenarioSummary();
+    emit scenarioSelectionChanged(selectedScenario(), town_combo_->currentText());
+  });
+  rebuildScenarioChoices(QStringLiteral("free"));
 
   // ===== 卡片 2: 进程状态 =====
   auto* status_box = make_card(QStringLiteral("signal"), QStringLiteral("进程状态"));
@@ -424,9 +544,13 @@ void LaunchPanel::build_ui() {
   bridge_row->setSpacing(6);
   bridge_row->addWidget(bridge_light_);
   bridge_row->addWidget(bridge_state_label_, 1);
-  status_grid->addRow(manager_.silMode() ? QStringLiteral("SIL 仿真") : QStringLiteral("CARLA"),
+  status_grid->addRow(manager_.milMode() ? QStringLiteral("MIL 仿真")
+                          : manager_.carlaLocalMode() ? QStringLiteral("CARLA")
+                                                      : QStringLiteral("HIL"),
                       carla_row);
-  status_grid->addRow(manager_.silMode() ? QStringLiteral("SIL 栈") : QStringLiteral("桥接"),
+  status_grid->addRow(manager_.milMode() ? QStringLiteral("模拟硬件栈")
+                          : manager_.carlaLocalMode() ? QStringLiteral("本机 SoC/Bridge")
+                                                      : QStringLiteral("HIL 桥接"),
                       bridge_row);
   status_grid->addRow(QStringLiteral("时长"), runtime_label_);
   status_box->layout()->addWidget(status_body);
@@ -441,17 +565,21 @@ void LaunchPanel::build_ui() {
   health_grid->setVerticalSpacing(2);
   health_grid->setColumnStretch(1, 1);
   const QList<QPair<QString, QString>> health_rows = {
-      {QStringLiteral("carla"), manager_.silMode() ? QStringLiteral("SIL 仿真")
-                                                     : QStringLiteral("CARLA")},
-      {QStringLiteral("bridge"), manager_.silMode() ? QStringLiteral("SIL 控制栈")
-                                                      : QStringLiteral("ROS2 Bridge")},
-      {QStringLiteral("orin_stack"), QStringLiteral("Orin控制栈")},
-      {QStringLiteral("can_gateway"), manager_.silMode() ? QStringLiteral("SIL 执行输出")
+      {QStringLiteral("carla"), manager_.milMode() ? QStringLiteral("MIL 仿真")
+                              : manager_.carlaLocalMode() ? QStringLiteral("CARLA 世界")
+                                                          : QStringLiteral("HIL")},
+      {QStringLiteral("bridge"), manager_.milMode() ? QStringLiteral("MIL 控制栈")
+                               : manager_.carlaLocalMode() ? QStringLiteral("CARLA Bridge")
+                                                           : QStringLiteral("HIL Bridge")},
+      {QStringLiteral("orin_stack"), manager_.milMode() ? QStringLiteral("本机 SoC 栈")
+                                   : manager_.carlaLocalMode() ? QStringLiteral("本机 SoC 栈")
+                                                               : QStringLiteral("Orin 控制栈")},
+      {QStringLiteral("can_gateway"), manager_.milMode() ? QStringLiteral("虚拟 CAN Gateway")
                                                            : QStringLiteral("CAN Gateway")},
       {QStringLiteral("safety_monitor"), QStringLiteral("Safety Monitor")},
-      {QStringLiteral("mcu"), manager_.silMode() ? QStringLiteral("SIL MCU 模型")
+      {QStringLiteral("mcu"), manager_.milMode() ? QStringLiteral("模拟 F280025C")
                                                    : QStringLiteral("F280025C MCU")},
-      {QStringLiteral("can_link"), manager_.silMode() ? QStringLiteral("SIL 数据链路")
+      {QStringLiteral("can_link"), manager_.milMode() ? QStringLiteral("vcan 模拟链路")
                                                         : QStringLiteral("CAN链路")},
       {QStringLiteral("odometry"), QStringLiteral("里程计")},
       {QStringLiteral("navigation"), QStringLiteral("导航模块")},
@@ -483,11 +611,9 @@ void LaunchPanel::build_ui() {
   primary_row->setSpacing(6);
   start_all_button_ = make_button(QStringLiteral("play"), QStringLiteral("启动完整系统"),
                                   QStringLiteral("primaryButton"));
-  start_all_button_->setToolTip(QStringLiteral(
-      "启动 PC 本地：CARLA → readiness → bridge。\n"
-      "Orin 端需比赛前手动 systemctl start adas-hil.service。\n"
-      "若下方勾选「包含 Orin 远程启动」，GUI 会 SSH 上 Orin 跑 CAN + adas-hil。"
-      ));
+  start_all_button_->setToolTip(manager_.milMode()
+      ? QStringLiteral("启动 MIL 本机闭环：sim_vehicle → SoC 控制栈 → vcan → 模拟 F280025C。")
+      : QStringLiteral("HIL 当前仅保留接口，尚未适配，不会执行 SSH/CAN/MCU 动作。"));
   stop_all_button_  = make_button(QStringLiteral("stop"), QStringLiteral("停止完整系统"),
                                    QStringLiteral("dangerButton"));
   primary_row->addWidget(start_all_button_, 2);
@@ -507,6 +633,9 @@ void LaunchPanel::build_ui() {
                                                   : QStringLiteral("chevron-right")));
   });
   outer->addWidget(advanced_toggle_);
+  // MIL 是一个整体闭环，拆开启动仿真/桥/烧录没有有效语义；HIL 尚未适配。
+  // 两种后端当前都只暴露受控的「启动/停止完整系统」。
+  advanced_toggle_->hide();
 
   advanced_box_ = new QWidget();
   auto* adv_layout = new QVBoxLayout(advanced_box_);
@@ -543,9 +672,12 @@ void LaunchPanel::build_preset_card(QVBoxLayout* root) {
   body_layout->setContentsMargins(0, 0, 0, 0);
   body_layout->setSpacing(4);
 
-  auto* hint = new QLabel(QStringLiteral(
-      "只启动 CARLA 场景，不设置导航。\n"
-      "要导航请在中间地图上点击车道附近选点。"));
+  auto* hint = new QLabel(manager_.milMode()
+      ? QStringLiteral("选择本机模拟场景并一键启动 MIL 闭环。\n"
+                       "导航目标可在中间地图的车道附近点击设置。")
+      : manager_.carlaLocalMode()
+          ? QStringLiteral("catalog 全场景入口；CARLA 展示，Town 地图负责导航选点。")
+          : QStringLiteral("HIL 场景入口已保留，当前版本尚未适配硬件。"));
   hint->setWordWrap(true);
   hint->setStyleSheet(QStringLiteral("color:%1;font-size:10px;")
                            .arg(theme::kTextSecondary));
@@ -581,7 +713,7 @@ void LaunchPanel::build_preset_card(QVBoxLayout* root) {
 void LaunchPanel::applyPreset(const DemoPreset& preset) {
   // 桥运行期间预设被禁用（见 update_buttons），此处只在停止态触发。
   const auto pick = [](QComboBox* combo, const QString& value) {
-    const int index = combo->findText(value);
+    const int index = combo->findData(value);
     if (index >= 0) combo->setCurrentIndex(index);
   };
   pick(scenario_combo_, preset.scenario);
@@ -589,8 +721,11 @@ void LaunchPanel::applyPreset(const DemoPreset& preset) {
   if (!runPreflightGate()) return;
   if (!confirm_action(this, QStringLiteral("确认启动演示场景"),
                       QStringLiteral("启动 %1").arg(preset.label),
-                      QStringLiteral("场景：%1，地图：%2；不会自动下发导航目标。")
-                          .arg(preset.scenario, preset.town),
+                      QStringLiteral("场景：%1，地图：%2；%3")
+                          .arg(preset.scenario, preset.town,
+                               auto_navigation_check_->isChecked()
+                                   ? QStringLiteral("将自动生成并下发车道导航目标。")
+                                   : QStringLiteral("请在 Town 地图手动选择目标。")),
                       ConfirmSeverity::Warning)) return;
   auto* button = qobject_cast<BusyButton*>(sender());
   if (button) {
@@ -603,7 +738,12 @@ void LaunchPanel::applyPreset(const DemoPreset& preset) {
   // 不再 emit demoGoalArmed：导航目标由用户在地图上手动选点（MapView::goalRequested）
   // 设定。预设只负责"启动哪个 CARLA 场景"。
   emit demoPresetLaunched(preset.scenario, preset.town);
-  manager_.startAll(currentConfig());
+  const auto config = currentConfig();
+  const auto profile = scenario_workflow_profile(config.scenario);
+  emit scenarioRunRequested(config.scenario, config.town,
+                            config.auto_navigation && profile.requires_navigation,
+                            profile.recommended_goal_distance_m);
+  manager_.startAll(config);
   update_buttons();
 }
 
@@ -626,16 +766,8 @@ void LaunchPanel::setHealthRow(const QString& id, HealthState state,
 
 void LaunchPanel::onHealthSnapshot(const QVector<GuiHealthStatus>& statuses) {
   for (const auto& status : statuses) {
-    if (status.id == QStringLiteral("carla")) {
-      const bool detected = status.state != HealthState::Unknown &&
-                            status.state != HealthState::Offline;
-      manager_.setExternalCarlaDetected(detected);
-    }
-    if (status.id == QStringLiteral("bridge")) {
-      const bool detected = status.state == HealthState::Healthy ||
-                            status.state == HealthState::Degraded;
-      manager_.setExternalBridgeDetected(detected);
-    }
+    // 健康快照只负责观测显示，绝不能反向改写进程所有权/运行会话。
+    // 旧逻辑把任意 ROS graph 残留当成 bridge Running，进而永久锁死场景框。
     // 受管 CARLA 的 RPC 探测比 ROS graph 推断更直接；端口就绪时不被覆盖。
     if (status.id == QStringLiteral("carla") && manager_.carlaReady()) continue;
     if (status.id == QStringLiteral("bridge") &&
@@ -736,72 +868,104 @@ bool LaunchPanel::runPreflightGate() {
 
 void LaunchPanel::save_settings() const {
   QSettings settings(QStringLiteral("adas"), QStringLiteral("adas_gui"));
-  settings.setValue(QStringLiteral("launch/scenario"), scenario_combo_->currentText());
+  // backend 决定 rclcpp 初始化前的 DDS profile，不跨启动持久化；通过
+  // --backend/ADAS_GUI_BACKEND 显式选择，避免一次本地测试污染下次 CARLA HIL。
+  settings.remove(QStringLiteral("launch/backend"));
+  settings.setValue(QStringLiteral("launch/scenario"), selectedScenario());
   settings.setValue(QStringLiteral("launch/town"), town_combo_->currentText());
   settings.setValue(QStringLiteral("launch/control_source"), source_combo_->currentText());
   settings.setValue(QStringLiteral("launch/carla_root"), carla_root_edit_->text());
   settings.setValue(QStringLiteral("launch/low_quality"), low_quality_check_->isChecked());
   settings.setValue(QStringLiteral("launch/offscreen"), offscreen_check_->isChecked());
+  settings.setValue(QStringLiteral("launch/auto_navigation"),
+                    auto_navigation_check_->isChecked());
 }
 
 void LaunchPanel::restore_settings() {
   QSettings settings(QStringLiteral("adas"), QStringLiteral("adas_gui"));
-  const auto pick = [](QComboBox* combo, const QString& value) {
+  const auto pick_text = [](QComboBox* combo, const QString& value) {
     const int index = combo->findText(value);
     if (index >= 0) combo->setCurrentIndex(index);
   };
-  pick(scenario_combo_,
-       settings.value(QStringLiteral("launch/scenario"),
-                      environment_or("ADAS_GUI_SCENARIO", QStringLiteral("free"))).toString());
-  pick(town_combo_,
+  QString default_backend =
+      environment_or("ADAS_GUI_BACKEND", QStringLiteral("carla_local_soc"));
+  if (default_backend.isEmpty()) {
+    default_backend = QStringLiteral("carla_local_soc");
+  }
+  // 旧配置迁移只影响本次启动，不再向 UI 暴露旧四后端。
+  if (!known_backends().contains(default_backend)) {
+    default_backend = QStringLiteral("carla_local_soc");
+  }
+  const int backend_index = backend_combo_->findData(default_backend);
+  if (backend_index >= 0) backend_combo_->setCurrentIndex(backend_index);
+  const QString requested_scenario = qEnvironmentVariableIsSet("ADAS_GUI_SCENARIO")
+      ? qEnvironmentVariable("ADAS_GUI_SCENARIO")
+      : settings.value(QStringLiteral("launch/scenario"), QStringLiteral("free")).toString();
+  rebuildScenarioChoices(requested_scenario);
+  pick_text(town_combo_,
        settings.value(QStringLiteral("launch/town"), QStringLiteral("Town04")).toString());
-  pick(source_combo_,
+  pick_text(source_combo_,
        settings.value(QStringLiteral("launch/control_source"),
                       environment_or("ADAS_GUI_CONTROL_SOURCE",
                                      QStringLiteral("ros2"))).toString());
-  carla_root_edit_->setText(
-      settings.value(QStringLiteral("launch/carla_root"), default_carla_root()).toString());
+  QString saved_root = settings.value(QStringLiteral("launch/carla_root")).toString();
+  if (!QFileInfo::exists(QDir(saved_root).filePath(QStringLiteral("CarlaUE4.sh")))) {
+    saved_root = default_carla_root();
+  }
+  carla_root_edit_->setText(saved_root);
   low_quality_check_->setChecked(
       settings.value(QStringLiteral("launch/low_quality"), false).toBool());
-  offscreen_check_->setChecked(
-      settings.value(QStringLiteral("launch/offscreen"), false).toBool());
+  offscreen_check_->setChecked(false);
+  auto_navigation_check_->setChecked(
+      settings.value(QStringLiteral("launch/auto_navigation"), true).toBool());
 }
 
 void LaunchPanel::update_buttons() {
+  const bool observer = manager_.localThreeMachineObserver();
+  const bool config_locked = manager_.configurationLocked();
   const bool carla_busy = manager_.carlaState() == ProcState::Starting ||
                           manager_.carlaState() == ProcState::Running;
   const bool bridge_busy = manager_.bridgeState() == ProcState::Starting ||
                            manager_.bridgeState() == ProcState::Running;
-  start_all_button_->setEnabled(!start_all_button_->isBusy() && !bridge_busy);
-  start_all_button_->setToolTip(bridge_busy
-      ? QStringLiteral("bridge 正在启动或运行，请先停止当前系统")
+  start_all_button_->setEnabled(!observer && !start_all_button_->isBusy() && !config_locked);
+  start_all_button_->setToolTip(observer
+      ? QStringLiteral("外部本地三机编排器已持有进程；当前 GUI 仅观察")
+      : config_locked
+      ? QStringLiteral("GUI-owned 会话正在启动或运行，请先停止当前系统")
       : QStringLiteral("启动前将执行体检并要求二次确认"));
   for (auto* button : preset_buttons_) {
-    button->setEnabled(!button->isBusy() && !bridge_busy);
-    if (bridge_busy) button->setToolTip(QStringLiteral("当前 bridge 正在运行，不能切换场景"));
+    button->setEnabled(!observer && !button->isBusy() && !config_locked);
+    if (config_locked) button->setToolTip(QStringLiteral("当前 GUI-owned 会话运行中，不能切换场景"));
   }
-  start_carla_button_->setEnabled(!start_carla_button_->isBusy() &&
+  start_carla_button_->setEnabled(!observer && !start_carla_button_->isBusy() &&
                                   !carla_busy && !manager_.carlaReady());
   if (carla_busy || manager_.carlaReady()) {
     start_carla_button_->setToolTip(QStringLiteral("CARLA/SIL 已启动或正在启动"));
   }
-  start_bridge_button_->setEnabled(!start_bridge_button_->isBusy() && !bridge_busy);
+  start_bridge_button_->setEnabled(!observer && !start_bridge_button_->isBusy() && !bridge_busy);
   if (bridge_busy) start_bridge_button_->setToolTip(QStringLiteral("bridge 已运行或正在启动"));
-  stop_bridge_button_->setEnabled(!stop_bridge_button_->isBusy() &&
+  stop_bridge_button_->setEnabled(!observer && !stop_bridge_button_->isBusy() &&
                                   manager_.hasManagedBridge());
   if (!manager_.hasManagedBridge()) {
     stop_bridge_button_->setToolTip(QStringLiteral("没有由本 GUI 管理的 bridge 可停止"));
   }
-  const bool can_stop = manager_.hasManagedProcesses() ||
-                        manager_.externalCarlaDetected() ||
-                        manager_.externalBridgeDetected();
-  stop_all_button_->setEnabled(!stop_all_button_->isBusy() && can_stop);
+  const bool can_stop = manager_.hasManagedProcesses();
+  stop_all_button_->setEnabled(!observer && !stop_all_button_->isBusy() && can_stop);
   stop_all_button_->setToolTip(
       can_stop
           ? QStringLiteral("停止本机受管 CARLA/bridge；Orin HIL/CAN 常驻服务与外部实例保持运行")
           : QStringLiteral("没有受管进程可停止"));
   // 运行配置在桥/CARLA 运行期间锁定，避免界面显示与实际运行场景不一致
-  scenario_combo_->setEnabled(!bridge_busy);
+  scenario_combo_->setEnabled(!observer && !config_locked);
+  carla_root_edit_->setEnabled(!observer && !config_locked);
+  carla_browse_button_->setEnabled(!observer && !config_locked);
+  low_quality_check_->setEnabled(!observer && !config_locked);
+  auto_navigation_check_->setEnabled(!observer && !config_locked);
+  start_full_stack_check_->setEnabled(!observer && !config_locked);
+  // 后端在 rclcpp::init 前决定 DDS domain/RMW，GUI 内热切换必然造成“界面是
+  // local_three_machine、进程仍在 domain43”这类不可用组合。这里只展示当前
+  // 启动后端；场景仍可在停止态自由切换。
+  backend_combo_->setEnabled(false);
 }
 
 bool LaunchPanel::eventFilter(QObject* watched, QEvent* event) {

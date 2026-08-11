@@ -49,7 +49,13 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_can_protocol_py test/test_can_protocol.py)
   ament_add_pytest_test(test_bridge_safety test/test_bridge_safety.py)
   ament_add_pytest_test(test_carla_world_reference test/test_carla_world_reference.py)
+  ament_add_pytest_test(test_carla_world_actor_set
+    test/test_carla_world_actor_set.py)
   ament_add_pytest_test(test_map_export test/test_map_export.py)
+  ament_add_pytest_test(test_scenario_loader_python
+    test/test_scenario_loader_python.py)
+  ament_add_pytest_test(test_stack_loopback_structure
+    test/test_stack_loopback.py)
 endif()
 
 ament_export_include_directories(include)

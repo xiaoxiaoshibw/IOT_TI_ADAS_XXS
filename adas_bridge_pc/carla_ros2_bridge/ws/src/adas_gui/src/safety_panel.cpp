@@ -12,6 +12,7 @@
 #include <QSizePolicy>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 
 #include "format.hpp"
@@ -69,7 +70,10 @@ void add_kv(QGridLayout* grid, int row, const QString& key, QLabel* value) {
 
 }  // namespace
 
-SafetyPanel::SafetyPanel(QWidget* parent) : QWidget(parent) {
+SafetyPanel::SafetyPanel(bool mcu_less_mode, bool sil_mode, bool simulated_hardware,
+                         QWidget* parent)
+    : QWidget(parent), mcu_less_mode_(mcu_less_mode), sil_mode_(sil_mode),
+      simulated_hardware_(simulated_hardware) {
   build_ui();
 }
 
@@ -87,15 +91,17 @@ void SafetyPanel::build_ui() {
   title->setStyleSheet(QStringLiteral(
       "color:%1;font-size:15px;font-weight:700;letter-spacing:0px;")
       .arg(theme::kTextPrimary));
-  auto* live = new QLabel(QStringLiteral("LIVE"));
-  live->setStyleSheet(QStringLiteral(
+  live_value_ = new QLabel(QStringLiteral("WAIT"));
+  live_value_->setObjectName(QStringLiteral("safetyLiveIndicator"));
+  live_value_->setProperty("telemetryFresh", false);
+  live_value_->setStyleSheet(QStringLiteral(
       "color:%1;background:%2;border:1px solid %3;border-radius:5px;"
       "padding:3px 7px;font-size:10px;font-weight:700;")
-      .arg(QStringLiteral("#8fe3ad"), theme::color_with_alpha(theme::kOk, 45),
+      .arg(theme::kTextSecondary, theme::color_with_alpha(theme::kStale, 45),
            theme::kCardBorder));
   heading->addWidget(title);
   heading->addStretch(1);
-  heading->addWidget(live);
+  heading->addWidget(live_value_);
   outer->addLayout(heading);
 
   banner_ = new StatusBanner();
@@ -130,11 +136,21 @@ void SafetyPanel::build_ui() {
   protocol_value_ = make_value_label();
   handover_value_ = make_value_label();
   manual_value_   = make_value_label();
+  source_value_->setObjectName(QStringLiteral("safetySourceValue"));
+  primary_value_->setObjectName(QStringLiteral("safetyPrimaryValue"));
+  mcu_value_->setObjectName(QStringLiteral("safetyMcuValue"));
+  can_value_->setObjectName(QStringLiteral("safetyCanValue"));
+  protocol_value_->setObjectName(QStringLiteral("safetyProtocolValue"));
+  handover_value_->setObjectName(QStringLiteral("safetyHandoverValue"));
+  manual_value_->setObjectName(QStringLiteral("safetyManualValue"));
   add_kv(source_grid, 0, QStringLiteral("当前控制源"), source_value_);
   add_kv(source_grid, 1, QStringLiteral("主源健康"),  primary_value_);
-  add_kv(source_grid, 2, QStringLiteral("MCU 在线"),   mcu_value_);
-  add_kv(source_grid, 3, QStringLiteral("CAN 链路"),   can_value_);
-  add_kv(source_grid, 4, QStringLiteral("协议版本"),   protocol_value_);
+  add_kv(source_grid, 2, simulated_hardware_ ? QStringLiteral("模拟 MCU 在线")
+      : mcu_less_mode_ ? QStringLiteral("控制栈在线") : QStringLiteral("MCU 在线"), mcu_value_);
+  add_kv(source_grid, 3, simulated_hardware_ ? QStringLiteral("vcan 链路")
+      : mcu_less_mode_ ? QStringLiteral("ROS2 链路") : QStringLiteral("CAN 链路"), can_value_);
+  add_kv(source_grid, 4, mcu_less_mode_ ? QStringLiteral("传输协议")
+                                        : QStringLiteral("协议版本"), protocol_value_);
   add_kv(source_grid, 5, QStringLiteral("当前源持续"), handover_value_);
   add_kv(source_grid, 6, QStringLiteral("驾驶员接管"), manual_value_);
   source_card->layout()->addWidget(source_body);
@@ -150,6 +166,9 @@ void SafetyPanel::build_ui() {
   aeb_value_  = make_value_label();
   ttc_value_  = make_value_label();
   safety_value_ = make_value_label();
+  aeb_value_->setObjectName(QStringLiteral("safetyAebValue"));
+  ttc_value_->setObjectName(QStringLiteral("safetyTtcValue"));
+  safety_value_->setObjectName(QStringLiteral("safetyChainValue"));
   add_kv(aeb_grid, 0, QStringLiteral("AEB 状态"), aeb_value_);
   add_kv(aeb_grid, 1, QStringLiteral("TTC"),      ttc_value_);
   add_kv(aeb_grid, 2, QStringLiteral("安全链等级"), safety_value_);
@@ -164,31 +183,41 @@ void SafetyPanel::build_ui() {
   veh_grid->setVerticalSpacing(4);
   veh_grid->setColumnStretch(1, 1);
   speed_value_    = make_value_label();
+  speed_value_->setObjectName(QStringLiteral("safetySpeedValue"));
   speed_value_->setStyleSheet(QStringLiteral("color:%1;font-size:18px;font-weight:700;")
                                   .arg(theme::kTextPrimary));
   behavior_value_ = make_value_label();
+  behavior_value_->setObjectName(QStringLiteral("safetyBehaviorValue"));
   // 大号车速独占第一行
   veh_grid->addWidget(make_key_label(QStringLiteral("车速")), 0, 0, Qt::AlignTop);
   veh_grid->addWidget(speed_value_, 0, 1);
   gate_value_     = make_value_label();
   steer_value_    = make_value_label();
+  gate_value_->setObjectName(QStringLiteral("safetyGateValue"));
+  steer_value_->setObjectName(QStringLiteral("safetySteerValue"));
   add_kv(veh_grid, 1, QStringLiteral("行为/Gate"), behavior_value_);
   add_kv(veh_grid, 2, QStringLiteral("Gate 源"),    gate_value_);
-  add_kv(veh_grid, 3, QStringLiteral("位置/航向"), pose_value_ = make_value_label());
+  pose_value_ = make_value_label();
+  pose_value_->setObjectName(QStringLiteral("safetyPoseValue"));
+  add_kv(veh_grid, 3, QStringLiteral("位置/航向"), pose_value_);
   add_kv(veh_grid, 4, QStringLiteral("方向盘"),    steer_value_);
   lateral_value_ = make_value_label();
+  lateral_value_->setObjectName(QStringLiteral("safetyLateralValue"));
   add_kv(veh_grid, 5, QStringLiteral("横向误差"), lateral_value_);
 
   auto* bar_row = new QHBoxLayout();
   bar_row->setSpacing(8);
   throttle_bar_ = new SegmentedBar();
+  throttle_bar_->setObjectName(QStringLiteral("safetyThrottleBar"));
   throttle_bar_->setRange(0, 100);
   throttle_bar_->setColor(QColor("#66bb6a"));
   throttle_bar_->setIconName(QStringLiteral("bolt"));
   brake_bar_ = new SegmentedBar();
+  brake_bar_->setObjectName(QStringLiteral("safetyBrakeBar"));
   brake_bar_->setRange(0, 100);
   brake_bar_->setColor(QColor(theme::kDanger));
   brake_bar_->setIconName(QStringLiteral("circle-stop"));
+  update_actuation_bars(0, 0, false);
   bar_row->addWidget(throttle_bar_, 1);
   bar_row->addWidget(brake_bar_, 1);
   veh_grid->addWidget(make_key_label(QStringLiteral("油门/制动")), 6, 0, Qt::AlignTop);
@@ -220,28 +249,71 @@ void SafetyPanel::set_value_label(QLabel* label, const QString& text, const char
                color ? QStringLiteral("font-weight:600;") : QString()));
 }
 
+void SafetyPanel::update_live_indicator(bool fresh) {
+  live_value_->setText(fresh ? QStringLiteral("LIVE") : QStringLiteral("STALE"));
+  live_value_->setProperty("telemetryFresh", fresh);
+  live_value_->setStyleSheet(QStringLiteral(
+      "color:%1;background:%2;border:1px solid %3;border-radius:5px;"
+      "padding:3px 7px;font-size:10px;font-weight:700;")
+      .arg(fresh ? QStringLiteral("#8fe3ad") : QString::fromLatin1(theme::kTextSecondary),
+           theme::color_with_alpha(fresh ? theme::kOk : theme::kStale, 45),
+           theme::kCardBorder));
+}
+
+void SafetyPanel::update_actuation_bars(int throttle_percent, int brake_percent,
+                                        bool fresh) {
+  const int throttle = std::clamp(throttle_percent, 0, 100);
+  const int brake = std::clamp(brake_percent, 0, 100);
+  throttle_bar_->setValue(throttle);
+  brake_bar_->setValue(brake);
+  throttle_bar_->setColor(QColor(fresh ? "#66bb6a" : theme::kStale));
+  brake_bar_->setColor(QColor(fresh ? theme::kDanger : theme::kStale));
+  throttle_bar_->setProperty("telemetryFresh", fresh);
+  brake_bar_->setProperty("telemetryFresh", fresh);
+  throttle_bar_->setProperty("displayValue", throttle);
+  brake_bar_->setProperty("displayValue", brake);
+  const QString tooltip = fresh
+      ? QStringLiteral("最新执行反馈")
+      : QStringLiteral("执行反馈超时，当前值未知；显示归零");
+  throttle_bar_->setToolTip(tooltip);
+  brake_bar_->setToolTip(tooltip);
+}
+
 void SafetyPanel::update_link_lights(const GuiMcuStatus& status, bool fresh) {
   // MCU 在线：状态遥测在 500ms 内有效即"在线"；否则按状态机退化
   set_value_label(mcu_value_, fresh ? QStringLiteral("● 在线")
                                      : QStringLiteral("○ 离线"),
                   fresh ? theme::kOk : theme::kStale);
-  // CAN 链路：用反馈年龄 + protocol_version_ok 推断
-  const bool can_ok = status.feedback_age_s >= 0.0f && status.feedback_age_s < 0.5f
-                          && status.protocol_version_ok;
-  set_value_label(can_value_, can_ok ? QStringLiteral("● 正常")
-                                     : QStringLiteral("○ 异常"),
-                  can_ok ? theme::kOk : theme::kWarn);
-  mcu_value_->setToolTip(QStringLiteral("心跳年龄 %1 s；命令年龄 %2 s")
-                             .arg(status.heartbeat_age_s, 0, 'f', 3)
+  // CAN 链路必须同时满足状态遥测新鲜、反馈年龄和协议匹配。状态遥测
+  // 断流时不能继续沿用缓存值显示绿色，也不能把未知误报成已确认异常。
+  const bool can_ok = fresh && status.feedback_age_s >= 0.0f &&
+                      status.feedback_age_s < 0.5f && status.protocol_version_ok;
+  set_value_label(can_value_, !fresh ? QStringLiteral("○ 未知")
+                                     : can_ok ? QStringLiteral("● 正常")
+                                              : QStringLiteral("○ 异常"),
+                  !fresh ? theme::kStale : can_ok ? theme::kOk : theme::kWarn);
+  can_value_->setProperty("telemetryFresh", fresh);
+  can_value_->setProperty("linkOk", can_ok);
+  if (!fresh) {
+    mcu_value_->setToolTip(QStringLiteral("状态遥测超时"));
+    can_value_->setToolTip(QStringLiteral("状态遥测超时，缓存链路值不作为当前状态"));
+    return;
+  }
+  const QString telemetry = mcu_less_mode_
+      ? QStringLiteral("本机控制栈遥测")
+      : QStringLiteral("心跳年龄 %1 s").arg(status.heartbeat_age_s, 0, 'f', 3);
+  mcu_value_->setToolTip(QStringLiteral("%1；命令年龄 %2 s")
+                             .arg(telemetry)
                              .arg(status.command_age_s, 0, 'f', 3));
-  can_value_->setToolTip(QStringLiteral("反馈年龄 %1 s；协议 v%2 %3；固件 %4")
-                             .arg(status.feedback_age_s, 0, 'f', 3)
-                             .arg(status.protocol_version)
-                             .arg(status.protocol_version_ok
-                                      ? QStringLiteral("匹配")
-                                      : QStringLiteral("不匹配"))
-                             .arg(status.test_build ? QStringLiteral("TEST")
-                                                    : QStringLiteral("PROD")));
+  can_value_->setToolTip(mcu_less_mode_
+      ? QStringLiteral("本机 DDS 执行输出新鲜")
+      : QStringLiteral("反馈年龄 %1 s；协议 v%2 %3；固件 %4")
+            .arg(status.feedback_age_s, 0, 'f', 3)
+            .arg(status.protocol_version)
+            .arg(status.protocol_version_ok ? QStringLiteral("匹配")
+                                             : QStringLiteral("不匹配"))
+            .arg(status.test_build ? QStringLiteral("TEST")
+                                   : QStringLiteral("PROD")));
 }
 
 void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
@@ -257,6 +329,7 @@ void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
   // 不再冻结更符合直觉。
   const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
 
+  update_live_indicator(true);
   banner_->setText(QString("%1 · %2")
                        .arg(QString::fromLatin1(state_name(status.system_state)))
                        .arg(QString::fromLatin1(source_name(status.active_source))));
@@ -344,16 +417,26 @@ void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
                   status.manual_override ? QStringLiteral("● 接管中") : QStringLiteral("--"),
                   status.manual_override ? theme::kWarn : nullptr);
 
-  source_value_->setText(QString::fromLatin1(source_name(status.active_source)));
+  set_value_label(source_value_, QString::fromLatin1(source_name(status.active_source)));
   set_value_label(primary_value_, status.primary_fresh ? QStringLiteral("● 健康")
                                                         : QStringLiteral("○ 超时"),
                    status.primary_fresh ? theme::kOk : theme::kDanger);
-  protocol_value_->setText(QString("v%1 %2%3")
-                               .arg(status.protocol_version)
-                               .arg(status.protocol_version_ok ? "OK" : "MISMATCH")
-                               .arg(status.test_build ? "  [TEST]" : ""));
-  protocol_value_->setToolTip(
-      QStringLiteral("CAN v3 协议；TEST 标记表示允许 0x301 故障注入"));
+  if (mcu_less_mode_) {
+    set_value_label(protocol_value_, QStringLiteral("ROS2 DDS"));
+    protocol_value_->setToolTip(sil_mode_ ? QStringLiteral("SIL 本机 DDS 闭环")
+                                          : QStringLiteral("CARLA 与本机 SoC DDS 闭环"));
+  } else {
+    set_value_label(protocol_value_, QString("v%1 %2%3")
+                                           .arg(status.protocol_version)
+                                           .arg(status.protocol_version_ok ? "OK" : "MISMATCH")
+                                           .arg(status.test_build ? "  [TEST]" : ""));
+    protocol_value_->setToolTip(
+        QStringLiteral("CAN v3 协议；TEST 标记表示允许 0x301 故障注入"));
+  }
+  if (last_source_change_ms_ >= 0) {
+    set_value_label(handover_value_, QString::fromStdString(format_age(
+        static_cast<float>(now_ms - last_source_change_ms_) / 1000.0f)));
+  }
   update_link_lights(status, /*fresh=*/true);
 
   // 故障码 DTC 行：主源超时即告警
@@ -368,18 +451,30 @@ void SafetyPanel::onMcuStatus(const GuiMcuStatus& status) {
 }
 
 void SafetyPanel::onActuation(const GuiActuation& actuation) {
+  if (!std::isfinite(actuation.steer) || !std::isfinite(actuation.throttle) ||
+      !std::isfinite(actuation.brake)) {
+    set_value_label(steer_value_, QStringLiteral("-- %"), theme::kStale);
+    update_actuation_bars(0, 0, false);
+    return;
+  }
   TelemetryFreshness::instance().markFresh(TelemetryFreshness::Actuation);
-  steer_value_->setText(QString("%1 %").arg(actuation.steer * 100.0f, 0, 'f', 0));
-  throttle_bar_->setValue(static_cast<int>(actuation.throttle * 100.0f + 0.5f));
-  brake_bar_->setValue(static_cast<int>(actuation.brake * 100.0f + 0.5f));
+  set_value_label(steer_value_,
+                  QString("%1 %").arg(std::clamp(actuation.steer, -1.0f, 1.0f) *
+                                           100.0f,
+                                       0, 'f', 0));
+  update_actuation_bars(
+      static_cast<int>(std::clamp(actuation.throttle, 0.0f, 1.0f) * 100.0f + 0.5f),
+      static_cast<int>(std::clamp(actuation.brake, 0.0f, 1.0f) * 100.0f + 0.5f),
+      true);
 }
 
 void SafetyPanel::onBehavior(int state, double target_speed_mps, int target_lane) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Behavior);
   QString text = QString::fromLatin1(behavior_state_name(static_cast<std::uint8_t>(state)));
   text += QString(" %1 km/h").arg(target_speed_mps * 3.6, 0, 'f', 0);
   if (target_lane != 0) text += target_lane < 0 ? QStringLiteral(" ←左邻道")
                                                 : QStringLiteral(" →右邻道");
-  behavior_value_->setText(text);
+  set_value_label(behavior_value_, text);
 }
 
 void SafetyPanel::onGate(int source, bool limited, const QString& reason) {
@@ -387,10 +482,11 @@ void SafetyPanel::onGate(int source, bool limited, const QString& reason) {
   QString text = QString::fromLatin1(gate_source_name(static_cast<std::uint8_t>(source)));
   if (limited) text += QStringLiteral(" 限幅");
   if (!reason.isEmpty()) text += QString(" (%1)").arg(reason);
-  gate_value_->setText(text);
+  set_value_label(gate_value_, text);
 }
 
 void SafetyPanel::onAeb(int state, double ttc_s, double required_decel_mps2) {
+  TelemetryFreshness::instance().markFresh(TelemetryFreshness::Aeb);
   QString text = QString::fromLatin1(aeb_state_name(static_cast<std::uint8_t>(state)));
   if (state >= 2 && ttc_s < 1.0e5) {
     text += QString(" 需 %1 m/s²").arg(required_decel_mps2, 0, 'f', 1);
@@ -467,18 +563,22 @@ void SafetyPanel::onEgo(double x, double y, double yaw_rad, double speed_mps,
   // 并让 stale 检查按预期工作。
   if (std::isfinite(speed_mps)) {
     speed_value_->setText(QString("%1 km/h").arg(speed_mps * 3.6, 0, 'f', 1));
+    speed_value_->setStyleSheet(QStringLiteral("color:%1;font-size:18px;font-weight:700;")
+                                    .arg(theme::kTextPrimary));
   } else {
     speed_value_->setText(QStringLiteral("-- km/h"));
+    speed_value_->setStyleSheet(QStringLiteral("color:%1;font-size:18px;font-weight:700;")
+                                    .arg(theme::kStale));
   }
   if (std::isfinite(x) && std::isfinite(y) &&
       std::isfinite(yaw_rad) && std::isfinite(yaw_rate_rps)) {
-    pose_value_->setText(QString("(%1, %2) m  %3°/%4°/s")
-                             .arg(x, 0, 'f', 1)
-                             .arg(y, 0, 'f', 1)
-                             .arg(yaw_rad * 180.0 / M_PI, 0, 'f', 0)
-                             .arg(yaw_rate_rps * 180.0 / M_PI, 0, 'f', 0));
+    set_value_label(pose_value_, QString("(%1, %2) m  %3°/%4°/s")
+                                    .arg(x, 0, 'f', 1)
+                                    .arg(y, 0, 'f', 1)
+                                    .arg(yaw_rad * 180.0 / M_PI, 0, 'f', 0)
+                                    .arg(yaw_rate_rps * 180.0 / M_PI, 0, 'f', 0));
   } else {
-    pose_value_->setText(QStringLiteral("--"));
+    set_value_label(pose_value_, QStringLiteral("--"), theme::kStale);
   }
 }
 
@@ -523,33 +623,61 @@ void SafetyPanel::onDtcHistory(const QString& json) {
 
 void SafetyPanel::onStaleCheck(qint64 now_ms) {
   const auto& f = TelemetryFreshness::instance();
-  if (have_status_) {
-    const bool mcu_fresh = f.isFresh(TelemetryFreshness::Mcu, kMcuStaleMs);
-    if (!mcu_fresh) {
+  const bool mcu_fresh = have_status_ &&
+                         f.isFresh(TelemetryFreshness::Mcu, kMcuStaleMs);
+  update_live_indicator(mcu_fresh);
+  if (!mcu_fresh) {
+    if (have_status_) {
       banner_->setText(QStringLiteral("遥测断流"));
       banner_->setBannerColor(QColor(theme::kStale));
       banner_->setIconName(QStringLiteral("wifi"));
-      update_link_lights(last_status_, false);
-    } else {
-      update_link_lights(last_status_, true);
+    }
+    update_link_lights(last_status_, false);
+    set_value_label(source_value_, QStringLiteral("--"), theme::kStale);
+    set_value_label(primary_value_, QStringLiteral("○ 未知"), theme::kStale);
+    set_value_label(protocol_value_, QStringLiteral("--"), theme::kStale);
+    protocol_value_->setToolTip(QStringLiteral("状态遥测超时"));
+    set_value_label(handover_value_, QStringLiteral("--"), theme::kStale);
+    set_value_label(manual_value_, QStringLiteral("○ 未知"), theme::kStale);
+  } else {
+    update_link_lights(last_status_, true);
+    if (last_source_change_ms_ >= 0) {
+      set_value_label(handover_value_, QString::fromStdString(
+          format_age(static_cast<float>(now_ms - last_source_change_ms_) / 1000.0f)));
+    }
+    if (last_manual_override_ && manual_override_since_ms_ >= 0) {
+      set_value_label(manual_value_,
+                      QStringLiteral("● 接管中 %1").arg(QString::fromStdString(
+                          format_age(static_cast<float>(now_ms - manual_override_since_ms_) /
+                                     1000.0f))),
+                      theme::kWarn);
     }
   }
   if (!f.isFresh(TelemetryFreshness::Actuation, kActuationStaleMs)) {
-    throttle_bar_->setValue(0);
-    brake_bar_->setValue(100);
+    set_value_label(steer_value_, QStringLiteral("-- %"), theme::kStale);
+    update_actuation_bars(0, 0, false);
   }
   if (!f.isFresh(TelemetryFreshness::Ego, kEgoStaleMs)) {
     speed_value_->setText(QStringLiteral("-- km/h"));
+    speed_value_->setStyleSheet(QStringLiteral("color:%1;font-size:18px;font-weight:700;")
+                                    .arg(theme::kStale));
+    set_value_label(pose_value_, QStringLiteral("--"), theme::kStale);
   }
-  if (have_status_ && last_source_change_ms_ >= 0) {
-    handover_value_->setText(QString::fromStdString(
-        format_age(static_cast<float>(now_ms - last_source_change_ms_) / 1000.0f)));
+  if (!f.isFresh(TelemetryFreshness::Behavior, kAuxTelemetryStaleMs)) {
+    set_value_label(behavior_value_, QStringLiteral("--"), theme::kStale);
   }
-  if (last_manual_override_ && manual_override_since_ms_ >= 0) {
-    set_value_label(manual_value_,
-                    QStringLiteral("● 接管中 %1").arg(QString::fromStdString(
-                        format_age(static_cast<float>(now_ms - manual_override_since_ms_) / 1000.0f))),
-                    theme::kWarn);
+  if (!f.isFresh(TelemetryFreshness::Gate, kAuxTelemetryStaleMs)) {
+    set_value_label(gate_value_, QStringLiteral("--"), theme::kStale);
+  }
+  if (!f.isFresh(TelemetryFreshness::Aeb, kAuxTelemetryStaleMs)) {
+    set_value_label(aeb_value_, QStringLiteral("--"), theme::kStale);
+    set_value_label(ttc_value_, QStringLiteral("-- s"), theme::kStale);
+  }
+  if (!f.isFresh(TelemetryFreshness::Safety, kAuxTelemetryStaleMs)) {
+    set_value_label(safety_value_, QStringLiteral("--"), theme::kStale);
+  }
+  if (!f.isFresh(TelemetryFreshness::Lane, kAuxTelemetryStaleMs)) {
+    set_value_label(lateral_value_, QStringLiteral("-- m"), theme::kStale);
   }
 }
 

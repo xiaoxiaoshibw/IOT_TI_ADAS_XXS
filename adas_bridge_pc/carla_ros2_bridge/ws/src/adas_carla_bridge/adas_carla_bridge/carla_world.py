@@ -145,6 +145,7 @@ class CarlaWorld:
         self.carla = carla
         self.scenario = scenario
         self.fixed_dt = float(fixed_dt)
+        self.no_rendering = bool(no_rendering)
 
         self.client = carla.Client(host, port)
         self.client.set_timeout(CARLA_TIMEOUT_S)
@@ -175,6 +176,7 @@ class CarlaWorld:
         self.walker = None
         self.sim_t0 = None
         self._last_steer_cmd = 0.0    # 左正（右手系），转角回读兜底用
+        self._last_visualization_t = float('-inf')
         try:
             self.ego = self._spawn(
                 EGO_BLUEPRINT, self._owned_role('ego'), spawn_index)
@@ -773,6 +775,125 @@ class CarlaWorld:
                 self.carla.Transform(cam_loc, cam_rot))
         except RuntimeError:
             pass
+
+    # ── CARLA 世界内 ADAS 展示（GUI 仅负责控制）──
+
+    @staticmethod
+    def _behavior_name(state):
+        return {
+            0: 'LANE FOLLOW', 1: 'FOLLOW LEAD', 2: 'OVERTAKE WAIT',
+            3: 'OVERTAKING', 4: 'RETURN LANE', 5: 'STOPPING',
+            6: 'EMERGENCY', 7: 'APPROACH STOP', 8: 'STOPPED',
+            9: 'WAIT LIGHT', 10: 'JUNCTION',
+        }.get(int(state), 'WAITING')
+
+    @staticmethod
+    def _nav_name(state):
+        return {
+            0: 'IDLE', 1: 'WAIT MAP', 2: 'PLANNING', 3: 'DRIVING',
+            4: 'ARRIVED', 5: 'FAILED', 6: 'CANCELED',
+        }.get(int(state), 'UNKNOWN')
+
+    def _debug_location(self, ros_x, ros_y, z=0.35):
+        """ROS/ADAS 右手系 (x,y) → CARLA 左手系 (x,-y)。"""
+        return self.carla.Location(x=float(ros_x), y=-float(ros_y), z=float(z))
+
+    def draw_adas_visualization(self, state, frame, actuation, sim_t):
+        """在 CARLA 世界绘制路线、终点、目标标签和驾驶状态。
+
+        所有元素使用短 lifetime 并周期刷新，路线取消或场景退出后会自然消失，
+        不会把旧一次运行的 debug primitive 留在世界中。
+        """
+        if self.no_rendering or sim_t - self._last_visualization_t < 0.20:
+            return
+        self._last_visualization_t = sim_t
+        debug = self.world.debug
+        life = 0.28
+        blue = self.carla.Color(40, 150, 255)
+        green = self.carla.Color(40, 230, 110)
+        amber = self.carla.Color(255, 180, 30)
+        red = self.carla.Color(255, 45, 45)
+        white = self.carla.Color(245, 245, 245)
+
+        route = state.get('route', [])
+        pending_goal = state.get('pending_goal')
+        if len(route) >= 2:
+            points = [self._debug_location(x, y) for x, y in route]
+            for start, end in zip(points, points[1:]):
+                debug.draw_line(start, end, thickness=0.16, color=blue,
+                                life_time=life, persistent_lines=False)
+            goal = points[-1]
+            debug.draw_point(goal, size=0.28, color=green,
+                             life_time=life, persistent_lines=False)
+            debug.draw_string(
+                self.carla.Location(x=goal.x, y=goal.y, z=goal.z + 1.0),
+                'NAV GOAL', draw_shadow=True, color=green,
+                life_time=life, persistent_lines=False)
+        elif pending_goal is not None:
+            # 服务已受理、路线尚在规划时也立即在 CARLA 中显示目标。
+            goal = self._debug_location(pending_goal[0], pending_goal[1])
+            debug.draw_point(goal, size=0.28, color=green,
+                             life_time=life, persistent_lines=False)
+            debug.draw_string(
+                self.carla.Location(x=goal.x, y=goal.y, z=goal.z + 1.0),
+                'GOAL - PLANNING', draw_shadow=True, color=green,
+                life_time=life, persistent_lines=False)
+
+        # 目标物本身由 CARLA actor 展示；这里只叠加稳定感知 ID/类别，证明
+        # 感知结果与仿真 actor 对得上，而不是在 GUI 中另画一套替身。
+        class_names = {1: 'CAR', 2: 'TRUCK', 3: 'PEDESTRIAN', 4: 'BICYCLE'}
+        for scripted in self.scripted_actors:
+            try:
+                loc = scripted.actor.get_location()
+                label_loc = self.carla.Location(
+                    x=loc.x, y=loc.y, z=loc.z +
+                    (2.4 if scripted.classification != CLASS_PEDESTRIAN else 1.8))
+                debug.draw_string(
+                    label_loc,
+                    'OBJ %d  %s' % (scripted.actor_id,
+                                     class_names.get(scripted.classification,
+                                                     'UNKNOWN')),
+                    draw_shadow=True, color=amber, life_time=life,
+                    persistent_lines=False)
+            except RuntimeError:
+                continue
+
+        ego_tf = self.ego.get_transform()
+        ego_label = self.carla.Location(
+            x=ego_tf.location.x, y=ego_tf.location.y, z=ego_tf.location.z + 2.8)
+        speed_kph = max(0.0, float(frame['ego']['v'])) * 3.6
+        target = float(state.get('target_speed_mps', float('nan')))
+        remaining = float(state.get('remaining_m', float('nan')))
+        line1 = 'EGO  %4.1f km/h  |  %s' % (
+            speed_kph, self._behavior_name(state.get('behavior_state', -1)))
+        if math.isfinite(target):
+            line1 += '  TARGET %.0f' % (max(0.0, target) * 3.6)
+        line2 = 'NAV %s' % self._nav_name(state.get('nav_state', 0))
+        if math.isfinite(remaining) and remaining >= 0.0:
+            line2 += '  %.0f m' % remaining
+        line2 += '  |  %s' % ('CONTROL STALE' if actuation.get('stale') else
+                              'CONTROL OK')
+        aeb_state = int(state.get('aeb_state', 0))
+        safety_level = int(state.get('safety_level', 0))
+        status_color = red if aeb_state >= 3 or safety_level >= 2 else (
+            amber if aeb_state == 2 or safety_level == 1 else white)
+        debug.draw_string(ego_label, line1, draw_shadow=True, color=white,
+                          life_time=life, persistent_lines=False)
+        debug.draw_string(
+            self.carla.Location(x=ego_label.x, y=ego_label.y,
+                                z=ego_label.z + 0.45),
+            line2, draw_shadow=True, color=status_color,
+            life_time=life, persistent_lines=False)
+        if aeb_state >= 2:
+            ttc = float(state.get('ttc_s', float('nan')))
+            aeb_text = 'AEB EMERGENCY' if aeb_state >= 3 else 'AEB WARNING'
+            if math.isfinite(ttc) and ttc < 1.0e5:
+                aeb_text += '  TTC %.1fs' % ttc
+            debug.draw_string(
+                self.carla.Location(x=ego_label.x, y=ego_label.y,
+                                    z=ego_label.z + 0.9),
+                aeb_text, draw_shadow=True, color=red if aeb_state >= 3 else amber,
+                life_time=life, persistent_lines=False)
 
     def close(self):
         if self.ego is not None:

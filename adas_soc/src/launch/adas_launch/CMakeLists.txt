@@ -17,6 +17,8 @@ install(PROGRAMS
 
 if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_scenario_overlay test/test_scenario_overlay.py)
   add_launch_test(test/test_invalid_parameters.py TIMEOUT 30)
   add_launch_test(test/test_sil_lifecycle_mrm.py TIMEOUT 90)
   add_launch_test(test/test_sil_aeb.py TIMEOUT 80)

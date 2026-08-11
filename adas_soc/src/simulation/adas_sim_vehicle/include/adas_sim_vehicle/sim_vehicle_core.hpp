@@ -4,6 +4,9 @@
 #ifndef ADAS_SIM_VEHICLE__SIM_VEHICLE_CORE_HPP_
 #define ADAS_SIM_VEHICLE__SIM_VEHICLE_CORE_HPP_
 
+#include <cstdint>
+#include <limits>
+#include <utility>
 #include <vector>
 
 #include "adas_common/types.hpp"
@@ -71,8 +74,49 @@ struct PedestrianState {
   double lateral_m{0.0};
 };
 
+// 与 TrackedObject 分类数值保持一致，但 core 本身不依赖 ROS 消息。
+enum class ScriptedActorClass : std::uint8_t {
+  Unknown = 0,
+  Car = 1,
+  Truck = 2,
+  Pedestrian = 3,
+  Bicycle = 4,
+};
+
+// 通用固定车道 actor。spawn/disappear 主要供确定性单测与后续 schema 使用；
+// schema v1 文件默认从 t=0 出现并一直存在到驶出赛道。
+struct ScriptedActor {
+  std::uint32_t id{0};
+  ScriptedActorClass classification{ScriptedActorClass::Unknown};
+  double initial_station_m{0.0};
+  double initial_lateral_m{0.0};
+  double initial_speed_mps{0.0};
+  double accel_limit_mps2{3.0};
+  std::vector<std::pair<double, double>> speed_profile;
+  double spawn_time_s{0.0};
+  double disappear_time_s{-1.0};
+  double hard_brake_start_s{-1.0};
+  double hard_brake_end_s{-1.0};
+  double trigger_ego_gap_m{-1.0};
+  double crossing_end_lateral_m{0.0};
+  double crossing_speed_mps{0.0};
+};
+
+struct ScriptedObjectState {
+  std::uint32_t id{0};
+  ScriptedActorClass classification{ScriptedActorClass::Unknown};
+  double x{0.0};
+  double y{0.0};
+  double yaw{0.0};
+  double v_mps{0.0};
+  double station_m{0.0};
+  double lateral_m{0.0};
+};
+
 class SimVehicleCore {
  public:
+  static constexpr std::size_t kMaxScriptedActors = 64;
+
   SimVehicleCore(const VehicleParams& params, const std::vector<TrackSegment>& segments,
                  double lane_width_m, double sample_step_m = 0.5);
 
@@ -85,6 +129,11 @@ class SimVehicleCore {
   void set_pedestrian_script(const PedestrianScript& script);
   // 注入脚本化邻道车（可选）
   void set_adjacent_car_script(const AdjacentCarScript& script);
+
+  // 原子替换整个 actor 集合；非法/超限输入抛 invalid_argument，不保留半套场景。
+  void set_scripted_actors(const std::vector<ScriptedActor>& actors);
+  // 只返回当前可见目标，始终按稳定 ID 升序。
+  std::vector<ScriptedObjectState> snapshot_objects() const;
 
   // 推进一个物理步（自车 + 前车）
   void step(const common::ActuationData& actuation, double dt);
@@ -114,22 +163,22 @@ class SimVehicleCore {
   double steer_{0.0};
   double yaw_rate_{0.0};
 
-  // 前车状态
-  LeadScript lead_script_;
-  double lead_station_{0.0};
-  double lead_v_{0.0};
   double sim_time_{0.0};
   double track_length_m_{0.0};
 
-  // 行人状态
-  PedestrianScript ped_script_;
-  bool ped_walking_{false};
-  bool ped_done_{false};
-  double ped_lateral_{0.0};
+  struct ActorRuntime {
+    ScriptedActor config;
+    double station_m{0.0};
+    double lateral_m{0.0};
+    double speed_mps{0.0};
+    bool crossing_started{false};
+    bool done{false};
+  };
+  std::vector<ActorRuntime> actors_;
 
-  // 邻道车状态
-  AdjacentCarScript adj_script_;
-  double adj_station_{0.0};
+  void upsert_legacy_actor(const ScriptedActor& actor, bool enabled);
+  double ego_station_m() const;
+  common::TrajPoint point_at_station(double station_m) const;
 };
 
 }  // namespace adas::sim

@@ -7,7 +7,26 @@ import rclpy
 from adas_msgs.msg import ActuationCommand
 from std_msgs.msg import String
 
-from adas_carla_bridge.bridge_node import CarlaBridgeNode, validate_actuation_values
+from adas_carla_bridge.bridge_node import (
+    CarlaBridgeNode,
+    build_arg_parser,
+    main,
+    validate_actuation_values,
+)
+
+
+def test_scenario_cli_accepts_file_seed_and_expected_count():
+    args = build_arg_parser().parse_args([
+        '--scenario-file', 'scenarios/dense_overtake_v1.json',
+        '--seed', '7', '--expected-actor-count', '20'])
+
+    assert args.scenario_file.endswith('dense_overtake_v1.json')
+    assert args.seed == 7
+    assert args.expected_actor_count == 20
+
+
+def test_negative_expected_actor_count_fails_before_carla_connect():
+    assert main(['--expected-actor-count', '-1']) == 2
 
 
 def test_valid_actuation_is_accepted():

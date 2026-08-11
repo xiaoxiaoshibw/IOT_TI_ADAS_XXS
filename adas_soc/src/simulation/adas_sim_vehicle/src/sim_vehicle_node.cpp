@@ -1,5 +1,6 @@
 // adas_sim_vehicle 节点壳：参数装配 + 消息转换 + 定时器，算法全部在 core
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -46,6 +47,82 @@ class SimVehicleNode : public rclcpp::Node {
                              declare_parameter<double>("initial.lateral_offset_m", 0.0),
                              declare_parameter<double>("initial.speed_mps", 0.0));
 
+    // schema-v1 场景由 launch Python 审计后展平为基础类型数组。节点仍执行
+    // 严格等长/offset 校验，避免半套 actor 参数进入仿真。
+    const bool scripted_enabled =
+        declare_parameter<bool>("scripted.enabled", false);
+    const auto actor_ids = declare_parameter<std::vector<std::int64_t>>(
+        "scripted.ids", std::vector<std::int64_t>{});
+    const auto actor_classes = declare_parameter<std::vector<std::int64_t>>(
+        "scripted.classifications", std::vector<std::int64_t>{});
+    const auto actor_stations = declare_parameter<std::vector<double>>(
+        "scripted.initial_station_m", std::vector<double>{});
+    const auto actor_laterals = declare_parameter<std::vector<double>>(
+        "scripted.initial_lateral_m", std::vector<double>{});
+    const auto actor_speeds = declare_parameter<std::vector<double>>(
+        "scripted.initial_speed_mps", std::vector<double>{});
+    const auto actor_accels = declare_parameter<std::vector<double>>(
+        "scripted.accel_limit_mps2", std::vector<double>{});
+    const auto profile_offsets = declare_parameter<std::vector<std::int64_t>>(
+        "scripted.profile_offsets", std::vector<std::int64_t>{});
+    const auto profile_times = declare_parameter<std::vector<double>>(
+        "scripted.profile_times_s", std::vector<double>{});
+    const auto profile_speeds = declare_parameter<std::vector<double>>(
+        "scripted.profile_speeds_mps", std::vector<double>{});
+    const auto brake_starts = declare_parameter<std::vector<double>>(
+        "scripted.hard_brake_start_s", std::vector<double>{});
+    const auto brake_ends = declare_parameter<std::vector<double>>(
+        "scripted.hard_brake_end_s", std::vector<double>{});
+    const auto trigger_gaps = declare_parameter<std::vector<double>>(
+        "scripted.trigger_ego_gap_m", std::vector<double>{});
+    const auto crossing_ends = declare_parameter<std::vector<double>>(
+        "scripted.crossing_end_lateral_m", std::vector<double>{});
+    const auto crossing_speeds = declare_parameter<std::vector<double>>(
+        "scripted.crossing_speed_mps", std::vector<double>{});
+    if (scripted_enabled) {
+      const std::size_t count = actor_ids.size();
+      const bool actor_arrays_ok =
+          actor_classes.size() == count && actor_stations.size() == count &&
+          actor_laterals.size() == count && actor_speeds.size() == count &&
+          actor_accels.size() == count && brake_starts.size() == count &&
+          brake_ends.size() == count && trigger_gaps.size() == count &&
+          crossing_ends.size() == count && crossing_speeds.size() == count;
+      const bool profile_ok = profile_offsets.size() == count + 1 &&
+                              !profile_offsets.empty() &&
+                              profile_offsets.front() == 0 &&
+                              profile_offsets.back() ==
+                                  static_cast<std::int64_t>(profile_times.size()) &&
+                              profile_times.size() == profile_speeds.size();
+      if (!actor_arrays_ok || !profile_ok) {
+        throw std::invalid_argument("scripted actor arrays/offsets are inconsistent");
+      }
+      std::vector<ScriptedActor> actors;
+      actors.reserve(count);
+      for (std::size_t i = 0; i < count; ++i) {
+        if (actor_ids[i] <= 0 || actor_classes[i] < 0 || actor_classes[i] > 4 ||
+            profile_offsets[i] < 0 || profile_offsets[i + 1] < profile_offsets[i]) {
+          throw std::invalid_argument("scripted actor ID/class/profile offset is invalid");
+        }
+        ScriptedActor actor;
+        actor.id = static_cast<std::uint32_t>(actor_ids[i]);
+        actor.classification = static_cast<ScriptedActorClass>(actor_classes[i]);
+        actor.initial_station_m = actor_stations[i];
+        actor.initial_lateral_m = actor_laterals[i];
+        actor.initial_speed_mps = actor_speeds[i];
+        actor.accel_limit_mps2 = actor_accels[i];
+        actor.hard_brake_start_s = brake_starts[i];
+        actor.hard_brake_end_s = brake_ends[i];
+        actor.trigger_ego_gap_m = trigger_gaps[i];
+        actor.crossing_end_lateral_m = crossing_ends[i];
+        actor.crossing_speed_mps = crossing_speeds[i];
+        for (std::int64_t j = profile_offsets[i]; j < profile_offsets[i + 1]; ++j) {
+          actor.speed_profile.emplace_back(profile_times[j], profile_speeds[j]);
+        }
+        actors.push_back(std::move(actor));
+      }
+      core_->set_scripted_actors(actors);
+    }
+
     // 脚本化前车（ACC 场景注入，默认关闭）
     LeadScript lead;
     lead.enabled = declare_parameter<bool>("lead.enabled", false);
@@ -62,7 +139,7 @@ class SimVehicleNode : public rclcpp::Node {
     for (std::size_t i = 0; i < ev_times.size(); ++i) {
       lead.events.emplace_back(ev_times[i], ev_speeds[i]);
     }
-    if (lead.enabled) {
+    if (lead.enabled && !scripted_enabled) {
       core_->set_lead_script(lead);
     }
 
@@ -73,7 +150,7 @@ class SimVehicleNode : public rclcpp::Node {
     adj.initial_station_m = declare_parameter<double>("adjacent.initial_station_m", 0.0);
     adj.lateral_m = declare_parameter<double>("adjacent.lateral_m", 3.5);
     adj.speed_mps = declare_parameter<double>("adjacent.speed_mps", 10.0);
-    if (adj.enabled) {
+    if (adj.enabled && !scripted_enabled) {
       core_->set_adjacent_car_script(adj);
     }
 
@@ -85,7 +162,7 @@ class SimVehicleNode : public rclcpp::Node {
     ped.start_lateral_m = declare_parameter<double>("pedestrian.start_lateral_m", -5.0);
     ped.end_lateral_m = declare_parameter<double>("pedestrian.end_lateral_m", 5.0);
     ped.speed_mps = declare_parameter<double>("pedestrian.speed_mps", 1.5);
-    if (ped.enabled) {
+    if (ped.enabled && !scripted_enabled) {
       core_->set_pedestrian_script(ped);
     }
 
@@ -154,49 +231,28 @@ class SimVehicleNode : public rclcpp::Node {
     objects.header.stamp = now;
     objects.header.frame_id = "odom";
     objects.primary_lead_id = -1;
-    const auto lead = core_->lead_state();
-    if (lead.present) {
+    for (const auto& actor : core_->snapshot_objects()) {
       adas_msgs::msg::TrackedObject o;
-      o.id = 1;
-      o.classification = adas_msgs::msg::TrackedObject::CLASS_CAR;
-      o.pose.pose.position.x = lead.x;
-      o.pose.pose.position.y = lead.y;
-      o.pose.pose.orientation.z = std::sin(lead.yaw / 2.0);
-      o.pose.pose.orientation.w = std::cos(lead.yaw / 2.0);
-      o.twist.twist.linear.x = lead.v_mps;
-      o.dimensions.x = 4.5;
-      o.dimensions.y = 1.8;
-      o.dimensions.z = 1.5;
-      objects.objects.push_back(o);
-    }
-    const auto adj = core_->adjacent_car_state();
-    if (adj.present) {
-      adas_msgs::msg::TrackedObject o;
-      o.id = 3;
-      o.classification = adas_msgs::msg::TrackedObject::CLASS_CAR;
-      o.pose.pose.position.x = adj.x;
-      o.pose.pose.position.y = adj.y;
-      o.pose.pose.orientation.z = std::sin(adj.yaw / 2.0);
-      o.pose.pose.orientation.w = std::cos(adj.yaw / 2.0);
-      o.twist.twist.linear.x = adj.v_mps;
-      o.dimensions.x = 4.5;
-      o.dimensions.y = 1.8;
-      o.dimensions.z = 1.5;
-      objects.objects.push_back(o);
-    }
-    const auto ped = core_->pedestrian_state();
-    if (ped.present) {
-      adas_msgs::msg::TrackedObject o;
-      o.id = 2;
-      o.classification = adas_msgs::msg::TrackedObject::CLASS_PEDESTRIAN;
-      o.pose.pose.position.x = ped.x;
-      o.pose.pose.position.y = ped.y;
-      o.pose.pose.orientation.z = std::sin(ped.yaw / 2.0);
-      o.pose.pose.orientation.w = std::cos(ped.yaw / 2.0);
-      o.twist.twist.linear.x = ped.v_mps;
-      o.dimensions.x = 0.5;
-      o.dimensions.y = 0.5;
-      o.dimensions.z = 1.7;
+      o.id = actor.id;
+      o.classification = static_cast<std::uint8_t>(actor.classification);
+      o.pose.pose.position.x = actor.x;
+      o.pose.pose.position.y = actor.y;
+      o.pose.pose.orientation.z = std::sin(actor.yaw / 2.0);
+      o.pose.pose.orientation.w = std::cos(actor.yaw / 2.0);
+      o.twist.twist.linear.x = actor.v_mps;
+      if (actor.classification == ScriptedActorClass::Pedestrian) {
+        o.dimensions.x = 0.5;
+        o.dimensions.y = 0.5;
+        o.dimensions.z = 1.7;
+      } else if (actor.classification == ScriptedActorClass::Bicycle) {
+        o.dimensions.x = 1.8;
+        o.dimensions.y = 0.6;
+        o.dimensions.z = 1.7;
+      } else {
+        o.dimensions.x = 4.5;
+        o.dimensions.y = 1.8;
+        o.dimensions.z = 1.5;
+      }
       objects.objects.push_back(o);
     }
     pub_objects_->publish(objects);

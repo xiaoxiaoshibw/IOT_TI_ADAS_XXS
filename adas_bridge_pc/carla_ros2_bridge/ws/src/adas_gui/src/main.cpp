@@ -87,6 +87,19 @@ int main(int argc, char** argv) {
     std::cerr << "adas_gui: another GUI instance is already running" << std::endl;
     return 2;
   }
+  // --backend 决定 DDS profile，必须先于 rclcpp::init/apply_dds_defaults。
+  bool backend_was_explicit = false;
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--backend")) {
+      const QByteArray backend = QByteArray(argv[i + 1]);
+      ::setenv("ADAS_GUI_BACKEND", backend.constData(), /*overwrite=*/1);
+      backend_was_explicit = true;
+      break;
+    }
+  }
+  if (!backend_was_explicit && std::getenv("ADAS_GUI_BACKEND") == nullptr) {
+    ::setenv("ADAS_GUI_BACKEND", "carla_local_soc", /*overwrite=*/0);
+  }
   // 必须在 rclcpp::init 之前：固化 HIL 直连 DDS 口径（CycloneDDS + 绑直连网卡
   // + 单播 Orin），保证无论经 start_gui.sh 还是裸 `ros2 run`/桌面图标启动都能
   // 收到 Orin 的 /adas/mcu/* 等 HIL 遥测。已 export 的变量优先，不被覆盖。
@@ -97,6 +110,7 @@ int main(int argc, char** argv) {
   // 分支，不破坏 ros2 run adas_gui adas_gui 的入参透传。
   QString screenshot_path;
   int screenshot_delay_ms = 1500;
+  bool autostart = false;
   for (int i = 1; i < argc; ++i) {
     const QString arg = QString::fromLocal8Bit(argv[i]);
     if (arg == QStringLiteral("--screenshot") && i + 1 < argc) {
@@ -109,6 +123,10 @@ int main(int argc, char** argv) {
         return 2;
       }
       screenshot_delay_ms = value;
+    } else if (arg == QStringLiteral("--backend") && i + 1 < argc) {
+      ++i;  // 已在 rclcpp::init 前消费；保留 argv 不影响 Qt/ROS 参数解析。
+    } else if (arg == QStringLiteral("--autostart")) {
+      autostart = true;
     }
   }
 
@@ -156,6 +174,7 @@ int main(int argc, char** argv) {
   {
     adas::gui::RosBridge bridge;
     adas::gui::MainWindow window(&bridge);
+    bridge.start();
     if (!screenshot_path.isEmpty()) {
       // 截屏模式：offscreen 平台 + grab() 栅格化，无需 X server 即可出 PNG。
       QTimer::singleShot(screenshot_delay_ms, &application, [&window, screenshot_path]() {
@@ -177,6 +196,13 @@ int main(int argc, char** argv) {
       });
     } else {
       window.show();
+      if (autostart) {
+        QTimer::singleShot(300, &application, [&window]() {
+          if (!window.startConfiguredSystem(/*interactive=*/false)) {
+            std::cerr << "adas_gui: --autostart preflight failed" << std::endl;
+          }
+        });
+      }
     }
     application.exec();
   }

@@ -61,10 +61,15 @@ ManagedProcess::ManagedProcess(QString tag, QObject* parent)
             forward_output(/*stderr=*/false);
             forward_output(/*stderr=*/true);
             const bool expected = state_ == ProcState::Stopping;
-            const bool clean =
-                exit_status == QProcess::NormalExit && code == 0;
-            set_state(expected || clean ? ProcState::Stopped : ProcState::Failed,
-                      QStringLiteral("exit=%1").arg(code));
+            const bool clean = exit_status == QProcess::NormalExit && code == 0;
+            // bridge/SoC are long-lived.  A clean exit is still unexpected
+            // unless stop() initiated it; treating it as Stopped hid broken
+            // sessions behind a green UI.
+            set_state(expected ? ProcState::Stopped : ProcState::Failed,
+                      QStringLiteral("%1 exit=%2")
+                          .arg(clean ? QStringLiteral("unexpected")
+                                     : QStringLiteral("failed"))
+                          .arg(code));
           });
 
   kill_timer_.setSingleShot(true);
@@ -80,7 +85,8 @@ ManagedProcess::ManagedProcess(QString tag, QObject* parent)
 
 void ManagedProcess::start(const QString& program, const QStringList& arguments) {
   if (process_.state() != QProcess::NotRunning) return;
-  line_buffer_.clear();
+  stdout_line_buffer_.clear();
+  stderr_line_buffer_.clear();
   emit logLine(tag_, QStringLiteral("$ %1 %2").arg(program, arguments.join(' ')));
   set_state(ProcState::Starting);
   process_.start(program, arguments);
@@ -98,6 +104,23 @@ void ManagedProcess::stop() {
   }
 }
 
+void ManagedProcess::killProcessGroup() {
+  const pid_t pid = static_cast<pid_t>(process_.processId());
+  if (process_.state() != QProcess::NotRunning && pid > 0) {
+    ::kill(-pid, SIGKILL);
+  } else if (process_.state() != QProcess::NotRunning) {
+    process_.kill();
+  }
+}
+
+bool ManagedProcess::stopAndWait(int graceful_ms) {
+  if (process_.state() == QProcess::NotRunning) return true;
+  stop();
+  if (process_.waitForFinished(graceful_ms)) return true;
+  killProcessGroup();
+  return process_.waitForFinished(2000);
+}
+
 void ManagedProcess::set_state(ProcState state, const QString& detail) {
   if (state_ == state && detail.isEmpty()) return;
   state_ = state;
@@ -110,22 +133,24 @@ void ManagedProcess::forward_output(bool stderr) {
   const QString tag = stderr ? QStringLiteral("ERROR") : tag_;
   QByteArray chunk = stderr ? process_.readAllStandardError()
                             : process_.readAllStandardOutput();
-  line_buffer_ += chunk;
+  QByteArray& line_buffer = stderr ? stderr_line_buffer_ : stdout_line_buffer_;
+  line_buffer += chunk;
   int newline;
-  while ((newline = line_buffer_.indexOf('\n')) >= 0) {
-    const QString line = QString::fromUtf8(line_buffer_.left(newline)).trimmed();
-    line_buffer_.remove(0, newline + 1);
+  while ((newline = line_buffer.indexOf('\n')) >= 0) {
+    const QString line = QString::fromUtf8(line_buffer.left(newline)).trimmed();
+    line_buffer.remove(0, newline + 1);
     if (!line.isEmpty()) emit logLine(tag, line);
   }
 }
 
 ProcessManager::ProcessManager(QObject* parent)
-    : QObject(parent), carla_(QStringLiteral("CARLA")),
-      bridge_(QStringLiteral("桥接")) {
+    : QObject(parent), bridge_(QStringLiteral("桥接")),
+      soc_(QStringLiteral("本机 SoC")) {
   sil_mode_ = QString::fromLocal8Bit(qgetenv("ADAS_GUI_MODE"))
                   .compare(QStringLiteral("sil"), Qt::CaseInsensitive) == 0;
-  connect(&carla_, &ManagedProcess::logLine, this, &ProcessManager::logLine);
+  local_three_observer_ = qEnvironmentVariableIntValue("ADAS_LOCAL_THREE_MACHINE") == 1;
   connect(&bridge_, &ManagedProcess::logLine, this, &ProcessManager::logLine);
+  connect(&soc_, &ManagedProcess::logLine, this, &ProcessManager::logLine);
   // Orin 远端命令的 stdout/stderr 走同一 LogDrawer（tag 由 OrinStackManager 自带）
   connect(&orin_, &OrinStackManager::logLine, this, &ProcessManager::logLine);
   // Orin 命令完成 → 推进全流程状态机
@@ -152,34 +177,48 @@ ProcessManager::ProcessManager(QObject* parent)
             if (state == ProcState::Running) {
               emit logLine(QStringLiteral("STARTUP"),
                            QStringLiteral("[STARTUP][BRIDGE_PROCESS_STARTED]"));
+              if (soc_pending_) {
+                soc_pending_ = false;
+                start_local_soc_stack(pending_config_);
+              }
             }
             // 全流程编排：如果桥在 StartBridge 阶段 Failed，主动失败
             on_bridge_state_changed_for_topology(state, detail);
             emit bridgeChanged(state, detail);
-          });
-  connect(&carla_, &ManagedProcess::stateChanged, this,
-          [this](ProcState state, const QString& detail) {
-            if (state == ProcState::Running) {
-              external_carla_ = false;
-              emit logLine(
-                  QStringLiteral("STARTUP"),
-                  QStringLiteral("[STARTUP][CARLA_PROCESS_STARTED] rpc_host=127.0.0.1 "
-                                 "rpc_port=%1")
-                      .arg(pending_config_.carla_port));
-              start_readiness_probe();
-            } else {
-              stop_readiness_probe();
-              carla_ready_ = false;
-              if (state == ProcState::Stopped || state == ProcState::Failed) {
-                bridge_pending_ = false;
-                // 只有本 GUI 真正 start() 过的 CARLA 才持有这把锁（探测到外部
-                // 实例复用时从不加锁）；这里无条件 unlock 是安全的空操作。
-                carla_lock_.unlock();
-              }
+            if (state == ProcState::Stopped || state == ProcState::Failed) {
+              maybe_stop_carla_after_children();
             }
-            // 全流程编排：如果 CARLA 进程在 StartCarla 阶段 Failed，主动失败
-            on_carla_state_changed_for_topology(state, carla_ready_, detail);
-            emit carlaChanged(state, carla_ready_, detail);
+          });
+  connect(&soc_, &ManagedProcess::stateChanged, this,
+          [this](ProcState state, const QString& detail) {
+            emit logLine(QStringLiteral("SOC"),
+                         QStringLiteral("本机 SoC 状态=%1 %2")
+                             .arg(proc_state_name(state), detail));
+            if (state == ProcState::Failed) emit bridgeChanged(state, detail);
+            if (state == ProcState::Stopped || state == ProcState::Failed) {
+              maybe_stop_carla_after_children();
+            }
+          });
+
+  carla_command_.setProcessChannelMode(QProcess::SeparateChannels);
+  connect(&carla_command_, &QProcess::readyReadStandardOutput, this, [this]() {
+    const QByteArray chunk = carla_command_.readAllStandardOutput();
+    carla_command_stdout_ += chunk;
+    if (!chunk.trimmed().isEmpty()) emit logLine(QStringLiteral("CARLA"), QString::fromUtf8(chunk).trimmed());
+  });
+  connect(&carla_command_, &QProcess::readyReadStandardError, this, [this]() {
+    const QByteArray chunk = carla_command_.readAllStandardError();
+    carla_command_stderr_ += chunk;
+    if (!chunk.trimmed().isEmpty()) emit logLine(QStringLiteral("ERROR"), QString::fromUtf8(chunk).trimmed());
+  });
+  connect(&carla_command_,
+          QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+          &ProcessManager::on_carla_command_finished);
+  connect(&carla_command_, &QProcess::errorOccurred, this,
+          [this](QProcess::ProcessError) {
+            set_carla_state(ProcState::Failed,
+                            QStringLiteral("carla_invoker 启动失败：%1")
+                                .arg(carla_command_.errorString()));
           });
 
   connect(&readiness_probe_,
@@ -219,7 +258,7 @@ ProcessManager::ProcessManager(QObject* parent)
             const QString detail =
                 QStringLiteral("readiness 子进程异常（%1）：%2")
                     .arg(readiness_probe_.program(), readiness_probe_.errorString());
-            emit carlaChanged(carla_.state(), false, detail);
+            emit carlaChanged(carla_state_, false, detail);
             if (full_stage_ == FullStage::WaitReadiness) {
               fail_full_stack(QStringLiteral("readiness"), detail);
             }
@@ -242,12 +281,19 @@ ProcessManager::ProcessManager(QObject* parent)
     forward_hil_output(hil_manager_, hil_error_buffer_, true);
   });
   connect(&hil_manager_, &QProcess::started, this, [this]() {
-    emit carlaChanged(ProcState::Starting, false,
+    const bool local_three = managed_backend_ == QStringLiteral("mil") ||
+                             managed_backend_ == QStringLiteral("local_three_machine");
+    emit carlaChanged(local_three ? ProcState::Running : ProcState::Starting,
+                      local_three,
                       sil_mode_ ? QStringLiteral("统一 SIL 管理器已启动")
-                                : QStringLiteral("统一 HIL 管理器已启动"));
-    emit bridgeChanged(ProcState::Starting,
+                                : (local_three
+                                       ? QStringLiteral("本地三机编排器已启动")
+                                       : QStringLiteral("统一 HIL 管理器已启动")));
+    emit bridgeChanged(local_three ? ProcState::Running : ProcState::Starting,
                        sil_mode_ ? QStringLiteral("等待 SIL 话题就绪")
-                                 : QStringLiteral("等待 CARLA 就绪后自动启动"));
+                                 : (local_three
+                                        ? QStringLiteral("本地三机闭环已受管")
+                                        : QStringLiteral("等待 CARLA 就绪后自动启动")));
   });
   connect(&hil_manager_, &QProcess::errorOccurred, this,
           [this](QProcess::ProcessError) {
@@ -307,20 +353,26 @@ ProcessManager::ProcessManager(QObject* parent)
 
 ProcessManager::~ProcessManager() {
   stop_readiness_probe();
-  bridge_.stop();
-  carla_.stop();
-  const int kChildKillWaitMs = 5000;
-  if (bridge_.active()) {
-    if (!bridge_.waitForFinished(kChildKillWaitMs)) bridge_.kill();
-  }
-  if (carla_.active()) {
-    if (!carla_.waitForFinished(kChildKillWaitMs)) carla_.kill();
+  bridge_.stopAndWait();
+  soc_.stopAndWait();
+  if (carla_owned_) {
+    start_carla_command(QStringLiteral("stop"), pending_config_);
+    carla_command_.waitForFinished(10000);
   }
   if (hil_manager_.state() != QProcess::NotRunning) {
     hil_stop_requested_ = true;
-    hil_manager_.terminate();
+    const pid_t pid = static_cast<pid_t>(hil_manager_.processId());
+    if ((managed_backend_ == QStringLiteral("mil") ||
+         managed_backend_ == QStringLiteral("local_three_machine")) && pid > 0) {
+      // orchestrator 以 KeyboardInterrupt 进入 finally 并回收它创建的独立
+      // 进程组；SIGTERM 会让 Python 直接退出，反而留下 MCU/ROS 孤儿。
+      ::kill(-pid, SIGINT);
+    } else {
+      hil_manager_.terminate();
+    }
     if (!hil_manager_.waitForFinished(30000)) {
-      hil_manager_.kill();
+      if (pid > 0) ::kill(-pid, SIGKILL);
+      else hil_manager_.kill();
       hil_manager_.waitForFinished(5000);
     }
   }
@@ -365,6 +417,14 @@ QString find_carla_readiness_script() {
   return QString();
 }
 
+QString find_carla_invoker_script(const QString& explicit_root = {}) {
+  const QString root = find_repo_root(explicit_root);
+  if (root.isEmpty()) return {};
+  const QString candidate =
+      QDir(root).filePath(QStringLiteral("adas_bridge_pc/scripts/carla_invoker.py"));
+  return QFileInfo::exists(candidate) ? candidate : QString();
+}
+
 QString find_release_script(const QString& name) {
   QDir dir(QCoreApplication::applicationDirPath());
   for (int up = 0; up < 12; ++up) {
@@ -400,6 +460,16 @@ QString find_sil_script() {
   return QString();
 }
 
+QString find_local_three_machine_script(const QString& explicit_root) {
+  const QString root = find_repo_root(explicit_root);
+  if (root.isEmpty()) return {};
+  const QString canonical = QDir(root).filePath(QStringLiteral("scripts/run_mil.sh"));
+  if (QFileInfo::exists(canonical)) return canonical;
+  const QString legacy =
+      QDir(root).filePath(QStringLiteral("scripts/run_local_three_machine_hil.sh"));
+  return QFileInfo::exists(legacy) ? legacy : QString();
+}
+
 QString sil_scenario_name(const QString& scenario) {
   if (scenario.startsWith(QStringLiteral("aeb"), Qt::CaseInsensitive)) {
     return QStringLiteral("aeb");
@@ -416,7 +486,18 @@ QString sil_scenario_name(const QString& scenario) {
 }  // namespace
 
 void ProcessManager::startCarla(const LaunchConfig& config) {
-  if (sil_mode_) {
+  if (config.backend == QStringLiteral("hil")) {
+    const QString detail = QStringLiteral("HIL 后端尚未适配；当前仅支持 MIL 本机模拟硬件");
+    emit carlaChanged(ProcState::Failed, false, detail);
+    emit bridgeChanged(ProcState::Failed, detail);
+    return;
+  }
+  if (config.backend == QStringLiteral("mil") ||
+      config.backend == QStringLiteral("local_three_machine")) {
+    start_local_three_machine(config);
+    return;
+  }
+  if (config.backend == QStringLiteral("sil_fallback")) {
     start_sil_stack(config);
     return;
   }
@@ -426,43 +507,106 @@ void ProcessManager::startCarla(const LaunchConfig& config) {
     // 端口已开只说明"不用再拉起一个 CARLA 进程"，不等于"可以启桥"——外部
     // 实例同样必须过 readiness 脚本（RPC/版本/世界/稳定窗口），否则一个刚
     // 被别的脚本拉起、还没稳定的外部 CARLA 会被当场判定就绪。
-    emit carlaChanged(carla_.state(), false,
+    set_carla_state(ProcState::Running,
                       QStringLiteral("检测到外部 CARLA（端口 %1），校验就绪中…")
                           .arg(config.carla_port));
     start_readiness_probe();
     return;
   }
-  const QString executable = carla_executable(config);
-  if (!QFileInfo::exists(executable)) {
-    emit carlaChanged(ProcState::Failed, false,
-                      QStringLiteral("未找到 %1（请设置 CARLA 目录）")
-                          .arg(executable));
+  start_carla_command(QStringLiteral("start"), config);
+}
+
+void ProcessManager::set_carla_state(ProcState state, const QString& detail) {
+  carla_state_ = state;
+  if (state == ProcState::Stopped || state == ProcState::Failed) carla_ready_ = false;
+  on_carla_state_changed_for_topology(state, carla_ready_, detail);
+  emit carlaChanged(state, carla_ready_, detail);
+}
+
+void ProcessManager::start_carla_command(const QString& action,
+                                         const LaunchConfig& config) {
+  if (carla_command_.state() != QProcess::NotRunning) return;
+  const QString script = find_carla_invoker_script(config.repo_root);
+  if (script.isEmpty()) {
+    set_carla_state(ProcState::Failed,
+                    QStringLiteral("找不到 adas_bridge_pc/scripts/carla_invoker.py"));
     return;
   }
-  // 系统级锁：端口探测只能防住"本机已经在监听"，防不住两个客户端同一
-  // 瞬间都探测到端口空闲、都决定拉起的race（CarlaUE4 从进程起来到端口就绪
-  // 有数秒空档）。flock 非阻塞，抢不到锁直接拒绝，不重试、不排队。
-  if (!carla_lock_.tryLock()) {
-    external_carla_ = true;
-    emit carlaChanged(ProcState::Failed, false,
-                      QStringLiteral("另一个 CARLA 实例正在启动/运行中（系统锁 %1 已被占用），"
-                                     "本机同一时刻只允许一个 CARLA")
-                          .arg(carla_lock_path()));
+  pending_config_ = config;
+  carla_command_action_ = action;
+  carla_command_stdout_.clear();
+  carla_command_stderr_.clear();
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert(QStringLiteral("CARLA_ROOT"), config.carla_root);
+  env.insert(QStringLiteral("TOWN"), config.town);
+  carla_command_.setProcessEnvironment(env);
+  QStringList args{script, action,
+                   QStringLiteral("--host"), QStringLiteral("127.0.0.1"),
+                   QStringLiteral("--port"), QString::number(config.carla_port),
+                   QStringLiteral("--town"), config.town,
+                   QStringLiteral("--scenario"), config.scenario,
+                   QStringLiteral("--quality-level"),
+                   config.low_quality ? QStringLiteral("Low") : QStringLiteral("Epic")};
+  if (action == QStringLiteral("start")) {
+    if (config.render_offscreen) args << QStringLiteral("--render-offscreen");
+    args << QStringLiteral("--timeout") << QStringLiteral("180");
+    external_carla_ = false;
+    carla_ready_ = false;
+    set_carla_state(ProcState::Starting, QStringLiteral("通过统一 invoker 启动 CARLA"));
+  } else {
+    set_carla_state(ProcState::Stopping, QStringLiteral("通过统一 invoker 停止 CARLA"));
+  }
+  emit logLine(QStringLiteral("STARTUP"),
+               QStringLiteral("$ /usr/bin/python3 %1").arg(args.join(' ')));
+  carla_command_.start(QStringLiteral("/usr/bin/python3"), args);
+}
+
+void ProcessManager::on_carla_command_finished(int exit_code,
+                                                QProcess::ExitStatus status) {
+  carla_command_stdout_ += carla_command_.readAllStandardOutput();
+  carla_command_stderr_ += carla_command_.readAllStandardError();
+  QJsonObject response;
+  const QList<QByteArray> lines = carla_command_stdout_.split('\n');
+  for (auto it = lines.crbegin(); it != lines.crend(); ++it) {
+    const QJsonDocument document = QJsonDocument::fromJson(it->trimmed());
+    if (document.isObject()) { response = document.object(); break; }
+  }
+  const bool clean = status == QProcess::NormalExit && exit_code == 0;
+  const QString state = response.value(QStringLiteral("state")).toString();
+  const QString error = response.value(QStringLiteral("error")).toString(
+      QString::fromUtf8(carla_command_stderr_).trimmed());
+  if (!clean) {
+    set_carla_state(ProcState::Failed,
+                    error.isEmpty() ? QStringLiteral("carla_invoker exit=%1").arg(exit_code)
+                                    : error);
     return;
   }
-  external_carla_ = false;
-  carla_ready_ = false;
-  emit logLine(
-      QStringLiteral("STARTUP"),
-      QStringLiteral("[STARTUP][CARLA_START_REQUESTED] command=%1 %2 "
-                     "rpc_host=127.0.0.1 rpc_port=%3")
-          .arg(executable, carla_arguments(config).join(' '))
-          .arg(config.carla_port));
-  carla_.start(executable, carla_arguments(config));
+  if (carla_command_action_ == QStringLiteral("start")) {
+    carla_owned_ = state == QStringLiteral("started");
+    external_carla_ = state == QStringLiteral("already_running");
+    set_carla_state(ProcState::Running,
+                    carla_owned_ ? QStringLiteral("GUI 已启动 CARLA，正在校验 world")
+                                 : QStringLiteral("复用外部 CARLA，正在校验 world"));
+    start_readiness_probe();
+  } else {
+    carla_owned_ = false;
+    external_carla_ = false;
+    set_carla_state(ProcState::Stopped, QStringLiteral("CARLA 已停止"));
+  }
 }
 
 void ProcessManager::startBridge(const LaunchConfig& config) {
-  if (sil_mode_) {
+  if (config.backend == QStringLiteral("hil")) {
+    emit bridgeChanged(ProcState::Failed,
+                       QStringLiteral("HIL 后端尚未适配；未执行任何硬件动作"));
+    return;
+  }
+  if (config.backend == QStringLiteral("mil") ||
+      config.backend == QStringLiteral("local_three_machine")) {
+    start_local_three_machine(config);
+    return;
+  }
+  if (config.backend == QStringLiteral("sil_fallback")) {
     if (bridge_probe_ && bridge_probe_()) {
       external_carla_ = true;
       external_bridge_ = true;
@@ -475,48 +619,52 @@ void ProcessManager::startBridge(const LaunchConfig& config) {
     return;
   }
   const bool graph_has_bridge = bridge_probe_ ? bridge_probe_() : external_bridge_;
-  external_bridge_ = graph_has_bridge;
   emit logLine(QStringLiteral("桥接"),
                QStringLiteral("startBridge: graph_has_bridge=%1 external_bridge_=%2")
                    .arg(graph_has_bridge).arg(external_bridge_));
   if (graph_has_bridge) {
-    external_bridge_ = true;
-    emit logLine(QStringLiteral("桥接"),
-                 QStringLiteral("检测到外部 carla_bridge，复用现有实例，跳过重复启动"));
-    emit bridgeChanged(ProcState::Running, QStringLiteral("外部实例 · ROS graph 已发现"));
+    // 这里不能把未知外部 bridge 记作本次后端的 Running，否则 UI 会再次
+    // 锁住场景选择，并把失败伪装成成功。
+    external_bridge_ = false;
+    const QString detail = QStringLiteral(
+        "检测到外部 carla_bridge；无法证明它使用当前场景 %1，拒绝静默复用。"
+        "请先停止外部 bridge 后重试").arg(config.scenario);
+    emit logLine(QStringLiteral("桥接"), detail);
+    emit bridgeChanged(ProcState::Failed, detail);
     return;
   }
-  // Orin is ROS 2 Humble while this PC is Jazzy. Direct cross-distro DDS
-  // discovery corrupts ros_discovery_info and prevents the control stack from
-  // consuming bridge data. Run the ROS-facing bridge in the pinned Humble
-  // container; CARLA remains a native host process reachable via host network.
-  const QString readiness_script = find_carla_readiness_script();
-  const QString bridge_runner =
-      readiness_script.isEmpty()
-          ? QString()
-          : QFileInfo(readiness_script).dir().filePath(
-                QStringLiteral("run_humble_bridge.sh"));
-  if (bridge_runner.isEmpty() || !QFileInfo::exists(bridge_runner)) {
-    emit bridgeChanged(
-        ProcState::Failed,
-        QStringLiteral("缺少 Humble Bridge 启动器：adas_pc/scripts/run_humble_bridge.sh"));
-    return;
-  }
-  const QStringList args = bridge_arguments(config).mid(3);
+  // GUI 与 PC bridge 同为 Jazzy，默认直接运行工作区内 bridge。旧实现强制使用
+  // 一个可能不存在/损坏的 Humble Docker 镜像，使 CARLA 联合链必然中断。
+  // 跨机 HIL 仍通过 domain43 + CycloneDDS 与 Orin Humble 互通。
+  const QStringList args = bridge_arguments(config);
   emit logLine(QStringLiteral("STARTUP"),
                QStringLiteral("[STARTUP][BRIDGE_START_REQUESTED] command=%1 %2 "
-                              "ros_runtime=humble-container")
-                   .arg(bridge_runner, args.join(' ')));
-  bridge_.start(bridge_runner, args);
+                              "ros_runtime=pc-jazzy-native")
+                   .arg(QStringLiteral("ros2"), args.join(' ')));
+  bridge_.start(QStringLiteral("ros2"), args);
+}
+
+void ProcessManager::start_local_soc_stack(const LaunchConfig& config) {
+  if (soc_.active()) return;
+  const QString root = find_repo_root(config.repo_root);
+  const QString script = QDir(root).filePath(
+      QStringLiteral("adas_bridge_pc/scripts/run_local_soc_stack.sh"));
+  if (root.isEmpty() || !QFileInfo::exists(script)) {
+    const QString detail = QStringLiteral("找不到本机 SoC 启动器：%1").arg(script);
+    emit bridgeChanged(ProcState::Failed, detail);
+    return;
+  }
+  emit stackProgress(QStringLiteral("local_soc"),
+                     QStringLiteral("启动本机 SoC 控制栈（CARLA 联合模式）…"));
+  soc_.start(script, {QStringLiteral("--scenario"), config.scenario});
 }
 
 void ProcessManager::setExternalCarlaDetected(bool detected) {
-  if (carla_.active()) return;
-  if (external_carla_ == detected && carla_ready_ == detected) return;
+  if (hasManagedCarla()) return;
+  if (external_carla_ == detected) return;
   external_carla_ = detected;
-  carla_ready_ = detected;
-  emit carlaChanged(carlaState(), detected,
-                    detected ? QStringLiteral("统一管理器实例 · 数据已就绪")
+  emit carlaChanged(carlaState(), carla_ready_,
+                    detected ? QStringLiteral("观察到外部 CARLA 数据（尚未取得 RPC 所有权）")
                              : QStringLiteral("统一管理器实例已离线"));
 }
 
@@ -531,7 +679,28 @@ void ProcessManager::setExternalBridgeDetected(bool detected) {
 }
 
 void ProcessManager::startAll(const LaunchConfig& config) {
-  if (sil_mode_) {
+  if (stop_carla_after_children_ || bridge_.state() == ProcState::Stopping ||
+      soc_.state() == ProcState::Stopping ||
+      carla_state_ == ProcState::Stopping) {
+    const QString detail = QStringLiteral("上一会话仍在有序停止，请等待 CARLA 完全退出");
+    emit stackProgress(QStringLiteral("stopping"), detail);
+    emit logLine(QStringLiteral("启动"), detail);
+    return;
+  }
+  if (config.backend == QStringLiteral("hil")) {
+    const QString detail = QStringLiteral("HIL 后端尚未适配；未执行 SSH/CAN/MCU 动作");
+    emit carlaChanged(ProcState::Failed, false, detail);
+    emit bridgeChanged(ProcState::Failed, detail);
+    emit stackProgress(QStringLiteral("failed"), detail);
+    return;
+  }
+  if (config.backend == QStringLiteral("mil") ||
+      config.backend == QStringLiteral("local_three_machine")) {
+    ++startup_generation_;
+    start_local_three_machine(config);
+    return;
+  }
+  if (config.backend == QStringLiteral("sil_fallback")) {
     ++startup_generation_;
     if (bridge_probe_ && bridge_probe_()) {
       external_carla_ = true;
@@ -569,23 +738,25 @@ void ProcessManager::startAll(const LaunchConfig& config) {
   // 自动接桥；这条链只受 startBridge 内的 ROS graph 探针（避免双实例）阻拦，
   // 不会被任何 CARLA 进程状态截断。
   pending_config_ = config;
+  managed_backend_ = config.backend;
+  soc_pending_ = config.backend == QStringLiteral("carla_local_soc");
   bridge_pending_ = true;
   if (carla_ready_) {
     bridge_pending_ = false;
     startBridge(config);
     return;
   }
-  if (carla_.state() == ProcState::Stopped || carla_.state() == ProcState::Failed) {
+  if (carla_state_ == ProcState::Stopped || carla_state_ == ProcState::Failed) {
     // readiness 校验总是异步的（含外部 CARLA 复用），startCarla() 内部会拉起
     // carla_readiness.py；桥的实际启动统一在 on_readiness_finished() 里，
     // 靠 bridge_pending_ 接续，这里不再假设 carla_ready_ 会同步置位。
     startCarla(config);
-  } else if (carla_.state() == ProcState::Running) {
+  } else if (carla_state_ == ProcState::Running) {
     // CARLA 已跑但 readiness 还没过（冷启动首次超时 / 上次失败）：
     // 重试一次 probe。否则再点「启动完整系统」是死按钮——
     // CARLA 不会被重新拉起、也没有新校验发生。
     if (!readiness_running_) start_readiness_probe();
-  } else if (carla_.state() == ProcState::Starting) {
+  } else if (carla_state_ == ProcState::Starting) {
     // CARLA 进程正在拉起中，stateChanged→Running 会自动接 start_readiness_probe，
     // 桥启动经由 on_readiness_finished 接续；这里只显式打个日志，避免按钮
     // 在 Starting 窗口内被点多次时表现为"啥也没发生"。
@@ -599,6 +770,7 @@ void ProcessManager::startAll(const LaunchConfig& config) {
 void ProcessManager::stopAll() {
   ++startup_generation_;
   bridge_pending_ = false;
+  soc_pending_ = false;
   stop_readiness_probe();
   // Orin HIL 是系统级常驻服务。GUI 的“停止完整系统”只停止本机
   // Bridge/CARLA，绝不停止 Orin，也不撤销 MCU 会话；keeper timer 会保证
@@ -612,11 +784,22 @@ void ProcessManager::stopAll() {
                        QStringLiteral("PC 仿真已请求停止（Orin HIL 保持常驻）"));
   }
   const QString stop_script = find_release_script(QStringLiteral("stop_hil.sh"));
+  if (local_three_observer_ && !hilManagerActive()) {
+    emit logLine(QStringLiteral("停止"),
+                 QStringLiteral("当前 GUI 由外部本地三机编排器启动，仅观察，不发送停止信号"));
+    return;
+  }
   if (hilManagerActive()) {
     hil_stop_requested_ = true;
     emit logLine(QStringLiteral("停止"),
                  QStringLiteral("正在停止 PC 后台栈（Orin HIL/CAN 保持常驻）"));
-    hil_manager_.terminate();
+    const pid_t pid = static_cast<pid_t>(hil_manager_.processId());
+    if ((managed_backend_ == QStringLiteral("mil") ||
+         managed_backend_ == QStringLiteral("local_three_machine")) && pid > 0) {
+      ::kill(-pid, SIGINT);
+    } else {
+      hil_manager_.terminate();
+    }
     return;
   }
   if (!stop_script.isEmpty()) {
@@ -624,16 +807,32 @@ void ProcessManager::stopAll() {
     return;
   }
   emit logLine(QStringLiteral("停止"),
-               QStringLiteral("按桥接 → CARLA 顺序停止本 GUI 启动的本机进程"));
+               QStringLiteral("按本机 SoC → 桥接 → CARLA 顺序停止 GUI-owned 进程"));
+  stop_carla_after_children_ = carla_owned_;
+  shutdown_generation_ = startup_generation_;
+  if (soc_.active()) soc_.stop();
   stopBridge();
-  if (carla_.active()) {
+  if (stop_carla_after_children_) {
     emit logLine(QStringLiteral("停止"), QStringLiteral("正在停止本 GUI 启动的 CARLA"));
-    carla_.stop();
+    // 等 bridge 与 SoC 的 QProcess 都实际退出后再停 CARLA。ManagedProcess
+    // 自带 5 s SIGKILL 兜底，因此这里不会无限等待，也不会留下可杀掉下一
+    // 会话的无代际 singleShot。
+    maybe_stop_carla_after_children();
   } else if (external_carla_) {
     emit logLine(QStringLiteral("停止"),
                  QStringLiteral("外部 CARLA 不属于本 GUI，未发送停止信号"));
-    emit carlaChanged(carla_.state(), carla_ready_,
+    emit carlaChanged(carla_state_, carla_ready_,
                       QStringLiteral("外部实例 · 未停止"));
+  }
+}
+
+void ProcessManager::maybe_stop_carla_after_children() {
+  if (!stop_carla_after_children_ ||
+      shutdown_generation_ != startup_generation_) return;
+  if (bridge_.active() || soc_.active()) return;
+  stop_carla_after_children_ = false;
+  if (carla_owned_ && carla_command_.state() == QProcess::NotRunning) {
+    start_carla_command(QStringLiteral("stop"), pending_config_);
   }
 }
 
@@ -698,6 +897,7 @@ void ProcessManager::start_sil_stack(const LaunchConfig& config) {
   }
 
   pending_config_ = config;
+  managed_backend_ = QStringLiteral("sil_fallback");
   hil_stop_requested_ = false;
   hil_output_buffer_.clear();
   hil_error_buffer_.clear();
@@ -714,10 +914,70 @@ void ProcessManager::start_sil_stack(const LaunchConfig& config) {
   hil_manager_.start(script, args);
 }
 
+void ProcessManager::start_local_three_machine(const LaunchConfig& config) {
+  if (local_three_observer_) {
+    external_carla_ = true;
+    external_bridge_ = true;
+    carla_ready_ = true;
+    emit logLine(QStringLiteral("LOCAL3"),
+                 QStringLiteral("GUI 位于已有本地三机编排器内：观察模式，不重复启动"));
+    emit carlaChanged(ProcState::Running, true, QStringLiteral("外部本地三机闭环"));
+    emit bridgeChanged(ProcState::Running, QStringLiteral("观察模式 · 不持有进程"));
+    emit stackProgress(QStringLiteral("complete"), QStringLiteral("已连接本地三机闭环 ✅"));
+    return;
+  }
+  if (hilManagerActive()) return;
+  if (bridge_probe_ && bridge_probe_()) {
+    external_carla_ = true;
+    external_bridge_ = true;
+    carla_ready_ = true;
+    emit logLine(QStringLiteral("LOCAL3"),
+                 QStringLiteral("ROS graph 已存在闭环，复用外部实例，不重复启动"));
+    emit carlaChanged(ProcState::Running, true, QStringLiteral("外部本地三机闭环"));
+    emit bridgeChanged(ProcState::Running, QStringLiteral("外部实例 · ROS graph 已发现"));
+    return;
+  }
+  const QString script = find_local_three_machine_script(config.repo_root);
+  if (script.isEmpty()) {
+    const QString detail = QStringLiteral(
+        "找不到 scripts/run_mil.sh；可设置 ADAS_REPO_ROOT");
+    emit logLine(QStringLiteral("LOCAL3"), detail);
+    emit carlaChanged(ProcState::Failed, false, detail);
+    emit bridgeChanged(ProcState::Failed, detail);
+    return;
+  }
+  if (qEnvironmentVariable("ROS_DOMAIN_ID") != QStringLiteral("145")) {
+    const QString detail = QStringLiteral(
+        "MIL 要求 GUI 自身以 ROS_DOMAIN_ID=145 启动，否则无法观察本机模拟硬件闭环");
+    emit logLine(QStringLiteral("LOCAL3"), detail);
+    emit carlaChanged(ProcState::Failed, false, detail);
+    emit bridgeChanged(ProcState::Failed, detail);
+    return;
+  }
+  pending_config_ = config;
+  managed_backend_ = config.backend == QStringLiteral("mil")
+                         ? QStringLiteral("mil")
+                         : QStringLiteral("local_three_machine");
+  hil_stop_requested_ = false;
+  hil_output_buffer_.clear();
+  hil_error_buffer_.clear();
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert(QStringLiteral("ROS_DOMAIN_ID"), QStringLiteral("145"));
+  hil_manager_.setProcessEnvironment(env);
+  const QStringList args = local_three_machine_arguments(config);
+  emit logLine(QStringLiteral("LOCAL3"),
+               QStringLiteral("$ %1 %2").arg(script, args.join(' ')));
+  emit stackProgress(QStringLiteral("mil"),
+                     QStringLiteral("启动 MIL 本机模拟硬件闭环：%1").arg(config.scenario));
+  // 有意不传 --gui/--gui-offscreen：当前 GUI 是唯一界面，避免双启动。
+  hil_manager_.start(script, args);
+}
+
 void ProcessManager::start_release_stack(const LaunchConfig& config,
                                          const QString& script) {
   if (hilManagerActive() || stop_helper_.state() != QProcess::NotRunning) return;
   pending_config_ = config;
+  managed_backend_ = QStringLiteral("release_hil");
   hil_stop_requested_ = false;
   hil_output_buffer_.clear();
   hil_error_buffer_.clear();
@@ -760,7 +1020,11 @@ void ProcessManager::forward_hil_output(QProcess& process, QByteArray& buffer,
     const QString line = QString::fromUtf8(buffer.left(newline)).trimmed();
     buffer.remove(0, newline + 1);
     if (!line.isEmpty()) {
-      emit logLine(stderr ? QStringLiteral("ERROR") : QStringLiteral("HIL"), line);
+      const QString tag = stderr ? QStringLiteral("ERROR")
+                          : managed_backend_ == QStringLiteral("mil")
+                              ? QStringLiteral("MIL")
+                              : QStringLiteral("HIL");
+      emit logLine(tag, line);
     }
   }
 }
@@ -769,7 +1033,7 @@ void ProcessManager::start_readiness_probe() {
   if (readiness_running_) return;  // 已有一次校验在跑，不重复拉起
   const QString script = find_carla_readiness_script();
   if (script.isEmpty()) {
-    emit carlaChanged(carla_.state(), false,
+    emit carlaChanged(carla_state_, false,
                       QStringLiteral("找不到 carla_readiness.py（可设置 ADAS_PC_ROOT 环境变量指向 "
                                      "adas_pc 目录），无法校验 CARLA 是否真正就绪，拒绝启桥"));
     return;
@@ -934,15 +1198,6 @@ void ProcessManager::on_orin_command_finished(OrinStackManager::Op op,
       // readiness 自身失败则由 on_readiness_finished 收口。
       break;
 
-    case FullStage::StartBridge:
-      // 桥 Running → 等绿灯
-      full_stage_ = FullStage::WaitGreenLight;
-      green_light_started_ms_ = QDateTime::currentMSecsSinceEpoch();
-      emit stackProgress(QStringLiteral("green_light"),
-                         QStringLiteral("等待 Orin 节点绿灯（MCU status fresh + nav status 已收）…"));
-      green_light_timer_.start();
-      break;
-
     default:
       break;
   }
@@ -966,6 +1221,13 @@ void ProcessManager::on_bridge_state_changed_for_topology(ProcState state,
   if (state == ProcState::Failed) {
     fail_full_stack(QStringLiteral("bridge"),
                     QStringLiteral("桥接进程失败：%1").arg(detail));
+  } else if (state == ProcState::Running) {
+    full_stage_ = FullStage::WaitGreenLight;
+    green_light_started_ms_ = QDateTime::currentMSecsSinceEpoch();
+    emit stackProgress(
+        QStringLiteral("green_light"),
+        QStringLiteral("等待 Orin 节点绿灯（MCU status fresh + nav status 已收）…"));
+    green_light_timer_.start();
   }
 }
 
@@ -1040,14 +1302,14 @@ void ProcessManager::on_readiness_finished(int exit_code, QProcess::ExitStatus e
     emit logLine(QStringLiteral("STARTUP"),
                  QStringLiteral("[STARTUP][CARLA_READY_ACCEPTED]"));
     carla_ready_ = true;
-    emit carlaChanged(carla_.state(), true,
+    emit carlaChanged(carla_state_, true,
                       detail.isEmpty()
                           ? QStringLiteral("CARLA 就绪（RPC/世界/稳定窗口校验通过）")
                           : detail);
     if (bridge_pending_) {
       bridge_pending_ = false;
       emit logLine(QStringLiteral("STARTUP"),
-                   QStringLiteral("[STARTUP][BRIDGE_START_QUEUED] ros_runtime=humble-container"));
+                   QStringLiteral("[STARTUP][BRIDGE_START_QUEUED] ros_runtime=pc-jazzy-native"));
       startBridge(pending_config_);
     }
     // 全流程：CARLA 就绪 → 启桥
@@ -1059,7 +1321,7 @@ void ProcessManager::on_readiness_finished(int exit_code, QProcess::ExitStatus e
     }
   } else {
     carla_ready_ = false;
-    emit carlaChanged(carla_.state(), false,
+    emit carlaChanged(carla_state_, false,
                       QStringLiteral("CARLA 就绪校验未通过：%1")
                           .arg(detail.isEmpty() ? QStringLiteral("见 carla_readiness 输出")
                                                 : detail));

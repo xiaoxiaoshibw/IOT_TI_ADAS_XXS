@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Machine-readable acceptance checks for the local three-machine HIL."""
+"""Machine-readable acceptance checks for the local MIL hardware simulation."""
 
 import argparse
 from collections import defaultdict
 import json
+import math
 import os
 import signal
 import socket
@@ -18,7 +19,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from adas_msgs.msg import (ActuationCommand, BehaviorState, GateStatus, LaneState,
-                           McuStatus, NavigationStatus, SafetyStatus)
+                           McuStatus, NavigationStatus, SafetyStatus,
+                           TrackedObjectArray)
 from adas_msgs.srv import CancelNavigation, SetNavigationGoal
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import String
@@ -83,6 +85,7 @@ class Checker(Node):
         self.times = defaultdict(list)
         self.last = {}
         self.odom_samples = []
+        self.object_frames = defaultdict(list)
         self.fault_acks = {}
         sensor = QoSProfile(depth=20)
         sensor.reliability = ReliabilityPolicy.BEST_EFFORT
@@ -92,6 +95,8 @@ class Checker(Node):
         topics = [
             (Odometry, '/adas/localization/kinematic_state', sensor),
             (LaneState, '/adas/perception/lane_state', sensor),
+            (TrackedObjectArray, '/adas/perception/objects_raw', sensor),
+            (TrackedObjectArray, '/adas/perception/objects', sensor),
             (BehaviorState, '/adas/planning/behavior', 20),
             (GateStatus, '/adas/control/gate/status', transient),
             (ActuationCommand, '/adas/vehicle/actuation_cmd', 20),
@@ -119,6 +124,12 @@ class Checker(Node):
             self.odom_samples.append((
                 time.monotonic(), float(msg.pose.pose.position.x),
                 float(msg.pose.pose.position.y), float(msg.twist.twist.linear.x)))
+        elif name in ('/adas/perception/objects_raw', '/adas/perception/objects'):
+            self.object_frames[name].append((
+                time.monotonic(), tuple(int(obj.id) for obj in msg.objects),
+                int(msg.primary_lead_id),
+                tuple((float(obj.pose.pose.position.x),
+                       float(obj.pose.pose.position.y)) for obj in msg.objects)))
 
     def on_ack(self, msg):
         try:
@@ -174,7 +185,18 @@ def main():
     parser.add_argument('--carla-host', default='127.0.0.1')
     parser.add_argument('--carla-port', type=int, default=2000)
     parser.add_argument('--scenario', default='baseline')
+    parser.add_argument('--scenario-file', default='')
+    parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
+
+    scenario = None
+    if args.scenario_file:
+        try:
+            with open(args.scenario_file, encoding='utf-8') as stream:
+                scenario = json.load(stream)
+        except (OSError, json.JSONDecodeError) as error:
+            print('[FAIL] Scenario acceptance: %s' % error, flush=True)
+            return 2
 
     results = Results()
     capture = CanCapture(args.interface)
@@ -215,6 +237,67 @@ def main():
                   for topic in required_topics}
         continuous = all(count >= 2 for count in counts.values())
         results.add('ROS closed loop', continuous, json.dumps(counts, sort_keys=True))
+
+        if scenario is not None:
+            expected_ids = tuple(int(actor['id']) for actor in scenario['actors'])
+            raw_frames = [frame for frame in
+                          node.object_frames['/adas/perception/objects_raw']
+                          if frame[0] >= start]
+            exact = (len(raw_frames) >= 20 and all(
+                frame[1] == expected_ids and frame[2] == -1
+                for frame in raw_frames))
+            results.add(
+                'Scenario actor IDs/count', exact,
+                'id=%s seed=%d expected=%d frames=%d observed=%s primary_raw=%s' % (
+                    scenario.get('id'), args.seed, len(expected_ids), len(raw_frames),
+                    list(raw_frames[-1][1]) if raw_frames else [],
+                    raw_frames[-1][2] if raw_frames else 'missing'))
+
+            gaps = [b[0] - a[0] for a, b in zip(raw_frames, raw_frames[1:])]
+            max_gap = max(gaps, default=float('inf'))
+            elapsed = (raw_frames[-1][0] - raw_frames[0][0]
+                       if len(raw_frames) >= 2 else 0.0)
+            average_hz = ((len(raw_frames) - 1) / elapsed if elapsed > 0.0 else 0.0)
+            sorted_gaps = sorted(gaps)
+            p95_gap = (sorted_gaps[min(len(sorted_gaps) - 1,
+                                        int(len(sorted_gaps) * 0.95))]
+                       if sorted_gaps else float('inf'))
+            continuous_objects = (len(raw_frames) >= 20 and average_hz >= 30.0 and
+                                  p95_gap <= 0.1 and max_gap <= 0.75)
+            results.add('Scenario object continuity', continuous_objects,
+                        'frames=%d average_hz=%.1f p95_gap_s=%.3f max_gap_s=%.3f' % (
+                            len(raw_frames), average_hz, p95_gap, max_gap))
+
+            min_spacing = float('inf')
+            for _, _, _, positions in raw_frames:
+                for index, first in enumerate(positions):
+                    for second in positions[index + 1:]:
+                        min_spacing = min(
+                            min_spacing,
+                            math.hypot(first[0] - second[0], first[1] - second[1]))
+            spacing_ok = len(expected_ids) < 2 or min_spacing >= 2.0
+            results.add('Scenario minimum actor spacing', spacing_ok,
+                        'minimum_m=%s threshold_m=2.0' % (
+                            'n/a' if math.isinf(min_spacing) else '%.2f' % min_spacing))
+
+            tracked = [frame for frame in node.object_frames['/adas/perception/objects']
+                       if frame[0] >= start]
+            leads = [frame[2] for frame in tracked]
+            switches = sum(current != previous for previous, current
+                           in zip(leads, leads[1:]))
+            stable_primary = len(tracked) >= 2 and switches <= 4
+            results.add('Scenario primary lead stability', stable_primary,
+                        'frames=%d switches=%d values=%s' % (
+                            len(tracked), switches, sorted(set(leads))))
+
+            acceptance = scenario.get('acceptance', {})
+            declared_windows = acceptance.get('behavior_aeb_windows', [])
+            # Schema v1 currently declares no behavior/AEB windows. Preserve an
+            # explicit report item so a future catalog extension cannot be silently ignored.
+            windows_ok = not declared_windows
+            results.add('Scenario behavior/AEB windows', windows_ok,
+                        ('none declared' if not declared_windows else
+                         'unsupported declarations=%s' % declared_windows))
 
         if args.carla:
             carla_ok = False

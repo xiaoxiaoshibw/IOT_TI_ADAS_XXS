@@ -148,7 +148,7 @@ Common usage:
 - Logs → `logs/sil/<timestamp>_<scenario>.log`.
 - `--check` exits after sampling required topics once and confirming `/adas/vehicle/actuation_cmd` heartbeats.
 - `--host-tests` first runs the MCU GCC host regression (`adas_mcu/tests/run_host_tests.sh`).
-- GUI SIL mode: `ADAS_GUI_MODE=sil ROS_DOMAIN_ID=145 ./adas_bridge_pc/start_gui.sh` reuses `run_sil_fallback.sh` as the back-end and never tries to launch CARLA / Orin / MCU.
+- GUI SIL mode: `ADAS_GUI_MODE=sil ROS_DOMAIN_ID=145 RMW_IMPLEMENTATION=rmw_fastrtps_cpp ./adas_bridge_pc/start_gui.sh` reuses `run_sil_fallback.sh` as the back-end and never tries to launch CARLA / Orin / MCU. `RMW_IMPLEMENTATION` is explicitly set because SIL uses FastRTPS while HIL defaults to CycloneDDS.
 
 ## IoT stack (`adas_iot/`)
 
@@ -179,6 +179,29 @@ Every package under `adas_soc/src/<role>/<pkg>/` follows the same two-layer spli
 If the new node belongs to the activation chain, register it in `sil_launch_common.py` in the correct position; readiness is checked via lifecycle state, not `ros2 node list`.
 
 The package's `CMakeLists.txt` must add the test executable via `ament_add_gtest(... <test_xxx>.cpp)` and `ament_target_dependencies(... $<pkg>_core)` so the core is testable without a ROS2 runtime.
+
+## System dependencies (first-time setup)
+
+```bash
+# Ubuntu 24.04 (PC) / 22.04 (Jetson)
+sudo apt update && sudo apt install -y \
+  build-essential cmake git python3-pip python3-venv \
+  libeigen3-dev libpcl-dev libboost-all-dev \
+  can-utils net-tools iproute2
+
+# ROS2 — PC Jazzy
+sudo apt install ros-jazzy-desktop ros-jazzy-rclpy ros-jazzy-std-msgs \
+  ros-jazzy-geometry-msgs ros-jazzy-sensor-msgs ros-jazzy-nav-msgs \
+  ros-jazzy-cv-bridge ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs \
+  ros-jazzy-cyclonedds ros-jazzy-rmw-cyclonedds-cpp \
+  ros-jazzy-launch ros-jazzy-launch-ros
+
+# ROS2 — Jetson Humble
+sudo apt install ros-humble-desktop ros-humble-rclpy ros-humble-std-msgs \
+  ros-humble-geometry-msgs ros-humble-sensor-msgs ros-humble-nav-msgs \
+  ros-humble-cv-bridge ros-humble-tf2-ros ros-humble-tf2-geometry-msgs \
+  ros-humble-launch ros-humble-launch-ros
+```
 
 ## Common commands
 

@@ -31,12 +31,15 @@ class SegmentedBar;
 class SafetyPanel : public QWidget {
   Q_OBJECT
  public:
-  explicit SafetyPanel(QWidget* parent = nullptr);
+  explicit SafetyPanel(bool mcu_less_mode = false, bool sil_mode = false,
+                       bool simulated_hardware = false,
+                       QWidget* parent = nullptr);
 
   // 遥测各自新鲜度阈值 ms（与 MainWindow::onStaleCheck 同口径）。
   static constexpr qint64 kMcuStaleMs = 500;
   static constexpr qint64 kActuationStaleMs = 500;
   static constexpr qint64 kEgoStaleMs = 500;
+  static constexpr qint64 kAuxTelemetryStaleMs = 1200;
 
  public slots:
   void onMcuStatus(const GuiMcuStatus& status);
@@ -63,10 +66,13 @@ class SafetyPanel : public QWidget {
 
  private:
   void build_ui();
+  void update_live_indicator(bool fresh);
   void update_link_lights(const GuiMcuStatus& status, bool fresh);
+  void update_actuation_bars(int throttle_percent, int brake_percent, bool fresh);
   void set_value_label(QLabel* label, const QString& text, const char* color = nullptr);
 
   StatusBanner* banner_;
+  QLabel* live_value_;
   QLabel* source_value_;
   QLabel* primary_value_;
   QLabel* mcu_value_;
@@ -98,6 +104,9 @@ class SafetyPanel : public QWidget {
   qint64 last_source_change_ms_{-1};
   bool last_manual_override_{false};
   qint64 manual_override_since_ms_{-1};
+  bool mcu_less_mode_{false};
+  bool sil_mode_{false};
+  bool simulated_hardware_{false};
 };
 
 }  // namespace adas::gui

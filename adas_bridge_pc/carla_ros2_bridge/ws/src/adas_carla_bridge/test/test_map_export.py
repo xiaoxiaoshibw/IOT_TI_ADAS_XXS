@@ -4,8 +4,9 @@
 """map_export.build_lane_graph 离线单测：用假 waypoint 验证 LaneGraph 构造，
 不依赖 CARLA / ROS。对应 M6 第 1 步的"先写单测验证 lane_graph 构造逻辑"。
 
-覆盖：车道分组、右手系坐标转换、直行连接、变道连接、id 编码唯一性、
-断头车道无连接、行驶方向过滤、单点车道过滤、自环连接跳过、路口左/右转分类。
+覆盖：车道分组、正/负 lane 行驶方向、右手系坐标转换、直行连接、变道连接、
+id 编码唯一性、断头车道无连接、行驶方向过滤、短 connector 拓扑、自环连接跳过、
+路口左/右转分类。
 """
 
 import math
@@ -106,7 +107,7 @@ def test_basic_grouping_and_coords():
 
 def test_y_and_yaw_sign_flip():
     # y_c=4.0, yaw_c=90° → 右手系 y_r=-4.0, yaw_r=-90°
-    # 用 2 点车道：单点车道会被 build_lane_graph 过滤，取首点验证坐标/朝向翻转。
+    # 用 2 点车道，取首点验证坐标/朝向翻转。
     wps = [FakeWaypoint(1, 0, -1, s=0.0, x=3.0, y=4.0, yaw=90.0),
            FakeWaypoint(1, 0, -1, s=2.0, x=3.0, y=6.0, yaw=90.0)]
     graph = build_lane_graph(wps, map_name='M')
@@ -116,28 +117,62 @@ def test_y_and_yaw_sign_flip():
     assert abs(yaw - math.radians(-90.0)) < 1e-9
 
 
-def test_single_point_lane_dropped():
-    # CARLA 对短于采样间距的路口连接线/短 section 只采到 1 点。单点车道无法构成
-    # 中心线（SoC add_lane 拒），build_lane_graph 应直接过滤，不能让它进图，
-    # 否则订阅端会因这一条坏车道把整张地图判 FAILED。
+def test_positive_lane_ordered_in_driving_direction():
+    # OpenDRIVE 正 lane 逆 reference line 行驶，即 s 递减。输入故意打乱；只有按 s
+    # 递减排序，中心线才从 x=4 指向 x=0，且真正出口 s=0 的 next() 才能生成连接。
+    positive = [FakeWaypoint(10, 0, 1, s=0.0, x=0.0, y=0.0, yaw=180.0),
+                FakeWaypoint(10, 0, 1, s=4.0, x=4.0, y=0.0, yaw=180.0),
+                FakeWaypoint(10, 0, 1, s=2.0, x=2.0, y=0.0, yaw=180.0)]
+    destination = _straight_lane(20, -1, x0=-2.0, n=2, yaw=180.0)
+    positive[0]._next = [destination[0]]
+
+    graph = build_lane_graph(positive + destination, map_name='M')
+    lanes = {lane['id']: lane for lane in graph['lanes']}
+    positive_id = encode_lane_key(10, 0, 1)
+    destination_id = encode_lane_key(20, 0, -1)
+    assert [point[0] for point in lanes[positive_id]['centerline']] == [4.0, 2.0, 0.0]
+    assert [edge['to_lane_id'] for edge in lanes[positive_id]['outgoing']] == [
+        destination_id]
+
+
+def test_single_point_lane_synthesized_as_valid_segment():
+    # CARLA 对短于采样间距的路口 connector 可能只采到 1 点。保留该 lane，并沿
+    # waypoint 的行驶航向补出第二点，使 SoC add_lane 能接收且不丢失地图节点。
     good = _straight_lane(10, -1, x0=0.0, n=3)
-    stub = [FakeWaypoint(11, 0, -1, s=0.0, x=100.0, y=0.0)]   # 单点车道
+    stub = [FakeWaypoint(11, 0, -1, s=0.0, x=100.0, y=0.0,
+                         yaw=90.0, is_junction=True)]
     graph = build_lane_graph(good + stub, map_name='M')
-    ids = {l['id'] for l in graph['lanes']}
-    assert encode_lane_key(10, 0, -1) in ids
-    assert encode_lane_key(11, 0, -1) not in ids   # 单点车道被过滤
-    assert len(graph['lanes']) == 1
+    lanes = {lane['id']: lane for lane in graph['lanes']}
+    stub_lane = lanes[encode_lane_key(11, 0, -1)]
+    assert len(stub_lane['centerline']) == 2
+    assert stub_lane['centerline'][0] != stub_lane['centerline'][1]
+    assert stub_lane['junction'] is True
+    # yaw_c=+90° → yaw_r=-90°，后补点应沿右手系 -y 前进。
+    assert abs(stub_lane['centerline'][1][0] - 100.0) < 1e-9
+    assert stub_lane['centerline'][1][1] < stub_lane['centerline'][0][1]
 
 
-def test_forward_connection_to_dropped_lane_skipped():
-    # 指向被过滤的单点车道的前向连接也应一并消失（否则订阅端会拒该连接）。
+def test_short_connector_preserves_incoming_and_outgoing_topology():
+    # 短 connector 不能被过滤：approach -> connector -> departure 两条边都必须存在。
     lane_a = _straight_lane(10, -1, x0=0.0, n=3)
-    stub = [FakeWaypoint(11, 0, -1, s=0.0, x=6.0, y=0.0)]   # 单点车道
-    lane_a[-1]._next = [stub[0]]   # a 末端指向被过滤的单点车道
-    graph = build_lane_graph(lane_a + stub, map_name='M')
+    stub = [FakeWaypoint(11, 0, -1, s=0.0, x=6.0, y=0.0,
+                         is_junction=True)]
+    # 这个前向点仍属于 connector，但未出现在 generate_waypoints() 的采样列表中；
+    # 导出器必须继续 next() 扫描，不能把它误判成应直接丢弃的自环。
+    hidden_stub_forward = FakeWaypoint(
+        11, 0, -1, s=1.0, x=7.0, y=0.0, is_junction=True)
+    lane_b = _straight_lane(12, -1, x0=8.0, n=3)
+    lane_a[-1]._next = [stub[0]]
+    stub[0]._next = [hidden_stub_forward]
+    hidden_stub_forward._next = [lane_b[0]]
+    graph = build_lane_graph(lane_a + stub + lane_b, map_name='M')
     a_id = encode_lane_key(10, 0, -1)
+    stub_id = encode_lane_key(11, 0, -1)
+    b_id = encode_lane_key(12, 0, -1)
     lanes = {l['id']: l for l in graph['lanes']}
-    assert lanes[a_id]['outgoing'] == []   # 无指向已过滤车道的连接
+    assert [edge['to_lane_id'] for edge in lanes[a_id]['outgoing']] == [stub_id]
+    assert [edge['to_lane_id'] for edge in lanes[stub_id]['outgoing']] == [b_id]
+    assert len(lanes[stub_id]['centerline']) == 2
 
 
 def test_self_loop_forward_connection_skipped():

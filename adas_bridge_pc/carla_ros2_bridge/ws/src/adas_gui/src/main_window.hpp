@@ -1,9 +1,11 @@
 #ifndef ADAS_GUI__MAIN_WINDOW_HPP_
 #define ADAS_GUI__MAIN_WINDOW_HPP_
 
+#include <QDoubleSpinBox>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
+#include <QPushButton>
 #include <QSplitter>
 #include <QTimer>
 
@@ -13,16 +15,18 @@
 #include "map_view.hpp"
 #include "ros_bridge.hpp"
 #include "safety_panel.hpp"
+#include "scenario_run_panel.hpp"
 #include "telemetry_freshness.hpp"
 
 namespace adas::gui {
 
 class BusyButton;
 
-// 主窗口：三栏一底部抽屉布局。
+// 主窗口：三栏一底部抽屉布局。GUI 只承担启动、导航和故障操控；
+// 场景、路线、目标物与车辆状态全部在 CARLA 世界内展示。
 //   ┌──────────────┬─────────────────────┬───────────────┐
-//   │ 系统控制       │       地图          │  安全状态       │
-//   │ (LaunchPanel) │      (MapView)      │ (SafetyPanel) │
+//   │ 系统控制       │     导航操控         │  安全状态       │
+//   │ (LaunchPanel) │   (control only)   │ (SafetyPanel) │
 //   ├──────────────┴─────────────────────┴───────────────┤
 //   │             日志抽屉 (LogDrawer)                    │
 //   └────────────────────────────────────────────────────┘
@@ -34,6 +38,7 @@ class MainWindow : public QMainWindow {
 
  public:
   explicit MainWindow(RosBridge* bridge, QWidget* parent = nullptr);
+  bool startConfiguredSystem(bool interactive = true);
 
  protected:
   void closeEvent(QCloseEvent* event) override;
@@ -43,12 +48,16 @@ class MainWindow : public QMainWindow {
   void onLeadObject(const GuiLeadObject& lead);
   void onEgo(double x, double y, double yaw_rad, double speed_mps,
              double yaw_rate_rps);
-  // 演示预设已触发：仅做 HUD 显示反馈，不再挂起导航目标（导航必须用户手动选点）。
+  // 演示预设已触发：仅做操控反馈，场景画面交给 CARLA。
   void onDemoPresetLaunched(const QString& scenario, const QString& town);
   void onStaleCheck();
 
  private:
-  QWidget* build_map_panel();
+  QWidget* build_control_panel();
+  void set_goal_controls_enabled(bool enabled);
+  bool navigationInputsReady() const;
+  bool submitGoal(double world_x, double world_y, bool require_confirmation);
+  void tryAutoNavigation();
   void update_alert_bar();
   void update_hud_mode();
   void update_hud_fault();
@@ -62,10 +71,12 @@ class MainWindow : public QMainWindow {
   FaultInjectPanel* fault_inject_panel_;
   LogDrawer* log_drawer_;
   MapView* map_view_;
-  QCheckBox* follow_check_;
-  QPushButton* fit_button_;
-  QPushButton* clear_trail_button_;
-  QPushButton* layer_button_;
+  ScenarioRunPanel* scenario_run_panel_;
+  QDoubleSpinBox* goal_x_input_;
+  QDoubleSpinBox* goal_y_input_;
+  QDoubleSpinBox* forward_distance_input_;
+  QPushButton* send_coordinate_goal_button_;
+  QPushButton* send_forward_goal_button_;
   BusyButton* cancel_button_;
   QLabel* nav_status_value_;
   QLabel* alert_bar_;
@@ -74,6 +85,7 @@ class MainWindow : public QMainWindow {
   QLabel* hud_mode_value_;
   QLabel* hud_ttc_value_;
   QLabel* hud_lead_gap_value_;
+  QLabel* hud_objects_value_;
   QLabel* hud_fault_value_;
   QLabel* scenario_label_;
   QLabel* config_label_;
@@ -99,6 +111,23 @@ class MainWindow : public QMainWindow {
   QString active_goal_id_;
   QString pending_goal_request_id_;
   QString pending_cancel_request_id_;
+  double latest_ego_x_{0.0};
+  double latest_ego_y_{0.0};
+  double latest_ego_yaw_{0.0};
+  bool latest_ego_valid_{false};
+  QVector<GuiLane> latest_lanes_;
+  QString active_scenario_{QStringLiteral("free")};
+  bool bridge_running_{false};
+  bool auto_navigation_armed_{false};
+  bool auto_navigation_retry_pending_{false};
+  int auto_navigation_attempts_{0};
+  quint64 auto_navigation_generation_{0};
+  quint64 latest_map_generation_{0};
+  quint64 latest_ego_generation_{0};
+  double auto_navigation_distance_m_{0.0};
+  QString requested_town_;
+  QString latest_map_id_;
+  QString latest_map_hash_;
 };
 
 }  // namespace adas::gui

@@ -10,9 +10,27 @@
 
 namespace adas::gui {
 
+struct GuiLaneConnection {
+  qint64 to_lane_id{0};
+  quint8 maneuver{0};
+};
+
 struct GuiLane {
+  qint64 id{0};
   QPolygonF centerline;   // 世界坐标(m)
+  double speed_limit_mps{0.0};
   bool junction{false};
+  QVector<GuiLaneConnection> outgoing;
+};
+
+struct GuiMapObject {
+  quint32 id{0};
+  quint8 classification{0};
+  double x{0.0};
+  double y{0.0};
+  double yaw_rad{0.0};
+  double length_m{4.5};
+  double width_m{1.8};
 };
 
 // CARLA 车道图视图。交互：
@@ -37,13 +55,16 @@ class MapView : public QWidget {
     kLayerEgoHalo    = 1u << 1,    // 自车发光晕（演示时压眼，默认关）
     kLayerSnapRadius = 1u << 2,    // 8m 吸附半径 ring
     kLayerGrid       = 1u << 3,    // 淡点阵网格
+    kLayerObjects    = 1u << 4,    // 完整目标物快照（默认关）
   };
   static constexpr quint32 kDefaultLayers = kLayerGrid;  // 演示风：默认无尾迹、无 halo、无 snap ring
 
   public slots:
    void setLanes(const QVector<adas::gui::GuiLane>& lanes, const QString& map_id);
+   void setMapMetadata(const QString& map_id, const QString& map_hash);
    void setRoute(const QPolygonF& route);
    void setVehicle(double x, double y, double yaw_rad, bool valid);
+   void setObjects(const QVector<adas::gui::GuiMapObject>& objects);
    void setGoal(double x, double y, bool valid);
    void setGoalSelectionEnabled(bool enabled);
    void setFollowEnabled(bool enabled);
@@ -51,6 +72,8 @@ class MapView : public QWidget {
    void clearTrail();
    // 调试图层显隐（位掩码 LayerFlag 组合）；0 表示全部装饰图层关闭。
    void setLayers(quint32 flags);
+   quint32 layerFlags() const { return layer_flags_; }
+   int objectCount() const { return objects_.size(); }
 
  signals:
   void goalRequested(double world_x, double world_y);
@@ -70,7 +93,9 @@ class MapView : public QWidget {
  private:
   MapCamera camera_;
   QVector<GuiLane> lanes_;
+  QVector<GuiMapObject> objects_;
   QString map_id_;
+  QString map_hash_;
   QPolygonF route_;
   QPolygonF trail_;               // 自车轨迹尾迹（10 Hz 抽样，上限截断）
   double vehicle_x_{0.0}, vehicle_y_{0.0}, vehicle_yaw_{0.0};
@@ -95,5 +120,6 @@ class MapView : public QWidget {
 }  // namespace adas::gui
 
 Q_DECLARE_METATYPE(adas::gui::GuiLane)
+Q_DECLARE_METATYPE(adas::gui::GuiMapObject)
 
 #endif  // ADAS_GUI__MAP_VIEW_HPP_

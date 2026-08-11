@@ -170,8 +170,15 @@ void FaultInjectPanel::setAllButtonsEnabled(bool enabled) {
   // pending_button_ 自身保持 disabled(busy 可视化),其余按钮统一启用/禁用。
   for (auto* btn : all_buttons_) {
     if (btn == pending_button_) continue;
-    btn->setEnabled(enabled);
+    btn->setEnabled(enabled && available_);
   }
+}
+
+void FaultInjectPanel::setAvailable(bool available, const QString& reason) {
+  available_ = available;
+  setAllButtonsEnabled(available);
+  if (!reason.isEmpty()) logEvent(reason);
+  setToolTip(reason);
 }
 
 void FaultInjectPanel::logEvent(const QString& line) {

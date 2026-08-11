@@ -1,11 +1,5 @@
-// 端到端烟雾测试：实例化真实的 ProcessManager，模拟「启动完整系统」按钮
-// 的等价路径，验证：
-//   (a) run_preflight 在 start_full_stack=false 时不强制 Orin ping；
-//   (b) ProcessManager::startAll 能走到 startCarla，并在 CARLA 二进制
-//       缺失时优雅报 Failed（而不是被 preflight 阻断到根本起不来）。
-//
-// 这是修复后的回归测试；修复前 (a) 会让 preflight 整体 Fail 把 startAll
-// 截胡，整个 GUI 表现为"按一键启动啥也不发生"。
+// 后端边界烟雾测试：MIL 只依赖本机模拟硬件环境；HIL 只保留接口，且不能
+// 在尚未适配时触发任何远程或硬件动作。
 
 #include <gtest/gtest.h>
 
@@ -59,77 +53,55 @@ class SmokeLogCapture : public QObject {
   std::string logs_;
 };
 
-TEST(SmokeOneClickStart, LocalStackPreflightSkipsOrinPing) {
-  // 关键证据 1：start_full_stack=false 时，preflight 不应包含 Orin 检查。
-  // 测试环境里 Orin 显然 ping 不通（除非 build host 与 HIL 网段重合）。
-  // 如果包含 orin_ping 且 Orin ping 失败，整体 preflight 会把启动整体阻断。
+TEST(SmokeOneClickStart, MilPreflightOnlyChecksLocalRuntime) {
+  const QByteArray previous = qgetenv("ROS_DOMAIN_ID");
+  qputenv("ROS_DOMAIN_ID", "145");
   LaunchConfig cfg;
-  cfg.carla_root = "/nonexistent/carla";
-  cfg.scenario = "free";
-  cfg.town = "Town04";
-  cfg.control_source = "ros2";
-  cfg.start_full_stack = false;
+  cfg.backend = QStringLiteral("mil");
 
   const auto items = run_preflight(cfg);
-  bool orin_check_present = false;
   QStringList seen_ids;
-  for (const auto& it : items) {
-    if (it.id == QStringLiteral("orin_ping")) orin_check_present = true;
-    seen_ids.append(it.id);
-  }
-  EXPECT_FALSE(orin_check_present)
-      << "本地栈不应触发 Orin ping，但 preflight 返回了 orin_ping 项；ids="
-      << seen_ids.join(';').toStdString();
+  for (const auto& it : items) seen_ids.append(it.id);
+  EXPECT_TRUE(seen_ids.contains(QStringLiteral("dds_profile")));
+  EXPECT_TRUE(seen_ids.contains(QStringLiteral("sil_runtime")));
+  EXPECT_FALSE(seen_ids.contains(QStringLiteral("carla_exe")));
+  EXPECT_FALSE(seen_ids.contains(QStringLiteral("orin_ping")));
+  if (previous.isNull()) qunsetenv("ROS_DOMAIN_ID");
+  else qputenv("ROS_DOMAIN_ID", previous);
 }
 
-TEST(SmokeOneClickStart, LocalStackPreflightFailsOrinWhenFullStackRequested) {
-  // 对照组：start_full_stack=true 时 Orin ping 必须出现。
+TEST(SmokeOneClickStart, HilPreflightIsExplicitlyBlocked) {
+  const QByteArray previous = qgetenv("ROS_DOMAIN_ID");
+  qputenv("ROS_DOMAIN_ID", "43");
   LaunchConfig cfg;
-  cfg.carla_root = "/nonexistent/carla";
-  cfg.start_full_stack = true;
+  cfg.backend = QStringLiteral("hil");
 
   const auto items = run_preflight(cfg);
-  bool orin_check_present = false;
+  bool hil_blocked = false;
   for (const auto& it : items) {
-    if (it.id == QStringLiteral("orin_ping")) orin_check_present = true;
+    if (it.id == QStringLiteral("hil_stage") && it.level == PreflightLevel::Fail) {
+      hil_blocked = true;
+    }
   }
-  EXPECT_TRUE(orin_check_present)
-      << "勾上 Orin 远程启动时，Orin ping 体检必须出现，否则没法阻断不可达的远端启动";
+  EXPECT_TRUE(hil_blocked);
+  if (previous.isNull()) qunsetenv("ROS_DOMAIN_ID");
+  else qputenv("ROS_DOMAIN_ID", previous);
 }
 
-TEST(SmokeOneClickStart, StartAllReachesStartCarlaEvenWhenOrinUnreachable) {
-  // 关键证据 2：startAll 链路在 CARLA 二进制缺失时走到 startCarla 并报 Failed，
-  // 而不是被 preflight 截胡（修复前的历史行为）。
+TEST(SmokeOneClickStart, HilStartAllPerformsNoHardwareAction) {
   ASSERT_TRUE(qApp != nullptr) << "QCoreApplication 未初始化";
   ProcessManager mgr;
   SmokeLogCapture capture(mgr);
 
   LaunchConfig cfg;
-  cfg.carla_root = QStringLiteral("/nonexistent/carla");
-  cfg.carla_port = 22222;  // 避开 2000（dev box 可能残留外部 CARLA 实例）
-  cfg.scenario = QStringLiteral("free");
-  cfg.town = QStringLiteral("Town04");
-  cfg.control_source = QStringLiteral("ros2");
-  cfg.start_full_stack = false;
+  cfg.backend = QStringLiteral("hil");
 
   mgr.startAll(cfg);
 
-  // 让信号在事件循环里走完
-  QEventLoop loop;
-  QTimer::singleShot(300, &loop, &QEventLoop::quit);
-  loop.exec();
-
   const std::string log = capture.snapshot();
-  // 1) startCarla 报 Failed，detail 含「未找到 CarlaUE4.sh」之类的错误。
-  EXPECT_NE(log.find("未找到"), std::string::npos)
-      << "startAll 应走到 startCarla 报 Failed，但日志里没看到 CARLA 二进制缺失的诊断：\n"
-      << log;
-  EXPECT_NE(log.find("CarlaUE4.sh"), std::string::npos)
-      << "startAll 应明确指出缺少 CarlaUE4.sh：\n" << log;
-  // 2) 因为 CARLA 没起来，桥不会被启；不应有 bridgeStarted 信号。
+  EXPECT_NE(log.find("HIL 后端尚未适配"), std::string::npos) << log;
   EXPECT_EQ(mgr.bridgeState(), ProcState::Stopped);
-  // 3) bridge_pending_ 应当被 CARLA 失败清掉（state change handler）。
-  EXPECT_FALSE(mgr.hasManagedBridge());
+  EXPECT_FALSE(mgr.hasManagedProcesses());
 }
 
 }  // namespace
