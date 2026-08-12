@@ -1,5 +1,6 @@
 import math
 import json
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -122,6 +123,120 @@ def test_fault_ack_requires_uuid4_and_reports_can_contract():
         assert ack['dlc'] == 8
         assert ack['crc_valid']
         assert ack['param'] == 9
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_run_id_isolation_rejects_other_sessions_and_empty():
+    """P0.C: 消费端 _accept_run_id 必须拒绝空 run_id 与错配会话。"""
+    rclpy.init()
+    args = SimpleNamespace(stale_timeout_s=0.5, control_source='ros2',
+                           scenario='test', run_id='session-A')
+    node = CarlaBridgeNode(args)
+    try:
+        # 当前会话内消息必须放行
+        assert node._accept_run_id('session-A')
+        # 空 run_id 一律拒绝（无通配语义）
+        assert not node._accept_run_id('')
+        # 旧会话残留必须拒绝
+        assert not node._accept_run_id('session-B')
+        assert not node._accept_run_id('stale:handshake:1')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_run_id_auto_generates_when_cli_arg_missing():
+    """P0.C: --run-id 为空时桥实例必须自动生成 UUID v4。"""
+    rclpy.init()
+    args = SimpleNamespace(stale_timeout_s=0.5, control_source='ros2',
+                           scenario='test', run_id='')
+    node = CarlaBridgeNode(args)
+    try:
+        # 自动生成的 run_id 必须是合法 UUID 形式
+        parsed = uuid.UUID(node._current_run_id)
+        assert parsed.version == 4
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_freshness_watchdog_clears_stale_route_and_aeb():
+    """P0.D: 超过 freshness 阈值的 route/goal/AEB 必须被看门狗清空。"""
+    rclpy.init()
+    args = SimpleNamespace(stale_timeout_s=0.5, control_source='ros2',
+                           scenario='test', run_id='session-A')
+    node = CarlaBridgeNode(args)
+    try:
+        node._freshness_timeout_s = 0.1  # 压缩等待时间
+        # P0.D: seen_t=0.0 等价于"未观察过"；测试想表达"很久以前"，故用极小正数。
+        ancient = 1e-6
+        with node._visual_lock:
+            node._visual['route'] = [(1.0, 2.0), (3.0, 4.0)]
+            node._visual['route_seen_t'] = ancient
+            node._visual['pending_goal'] = (5.0, 6.0)
+            node._visual['goal_seen_t'] = ancient
+            node._visual['aeb_state'] = 2
+            node._visual['aeb_seen_t'] = ancient
+            node._visual['behavior_state'] = 3
+            node._visual['behavior_seen_t'] = ancient
+        node._freshness_watchdog()
+        with node._visual_lock:
+            assert node._visual['route'] == []
+            assert node._visual['pending_goal'] is None
+            assert node._visual['aeb_state'] == 0
+            assert node._visual['behavior_state'] == -1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_freshness_watchdog_keeps_fresh_values():
+    """P0.D: 在 freshness 阈值内的字段必须保持原值。"""
+    rclpy.init()
+    args = SimpleNamespace(stale_timeout_s=0.5, control_source='ros2',
+                           scenario='test', run_id='session-A')
+    node = CarlaBridgeNode(args)
+    try:
+        node._freshness_timeout_s = 5.0  # 阈值很大
+        with node._visual_lock:
+            node._visual['route'] = [(1.0, 2.0)]
+            node._visual['route_seen_t'] = time.monotonic()
+            node._visual['aeb_state'] = 2
+            node._visual['aeb_seen_t'] = time.monotonic()
+        node._freshness_watchdog()
+        with node._visual_lock:
+            assert node._visual['route'] == [(1.0, 2.0)]
+            assert node._visual['aeb_state'] == 2
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_close_is_idempotent_and_clears_visual_cache():
+    """P0.D: 桥节点 close 多次调用必须安全，且 _visual 缓存必须清空。"""
+    rclpy.init()
+    args = SimpleNamespace(stale_timeout_s=0.5, control_source='ros2',
+                           scenario='test', run_id='session-A')
+    node = CarlaBridgeNode(args)
+    try:
+        with node._visual_lock:
+            node._visual['route'] = [(1.0, 2.0)]
+            node._visual['pending_goal'] = (3.0, 4.0)
+            node._visual['behavior_state'] = 1
+        # 第一次 close：必须不报错
+        node.close()
+        # 第二次 close：必须不报错
+        node.close()
+        with node._visual_lock:
+            assert node._visual['route'] == []
+            assert node._visual['pending_goal'] is None
+            assert node._visual['behavior_state'] == -1
+            assert all(
+                node._visual[k] == 0.0
+                for k in ('route_seen_t', 'status_seen_t', 'behavior_seen_t',
+                          'aeb_seen_t', 'safety_seen_t', 'goal_seen_t'))
     finally:
         node.destroy_node()
         rclpy.shutdown()

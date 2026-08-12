@@ -12,10 +12,16 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QProcessEnvironment>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+
+#include <cmath>
+
+#include "scenario_workflow.hpp"
 
 namespace adas::gui {
 
@@ -28,6 +34,8 @@ struct LaunchConfig {
   QString scenario_file;           // catalog.json 中的绝对场景文件路径
   int seed{0};
   int expected_actor_count{-1};
+  QString acceptance_profile;
+  double nav_distance_m{0.0};
   QString town{"Town04"};
   QString control_source{"ros2"};  // ros2 / can / can_cpp
   QString can_transport{"canalystii"};
@@ -50,6 +58,9 @@ struct LaunchConfig {
                                     // 手动在 Orin 上 systemctl start
                                     // adas-hil.service 即可，不用 GUI 跨
                                     // 网 SSH。勾上后 GUI 才走 Orin 编排。
+  // P0.C: GUI 编排本轮“启动场景”时生成 run_id，必须显式传给 carla_bridge。
+  // 不传 → bridge 收到后会自己生成 UUID → 与 GUI/Planner 不一致 → 整个会话被拒。
+  QString run_id;
 };
 
 struct ScenarioCatalogEntry {
@@ -61,6 +72,12 @@ struct ScenarioCatalogEntry {
   QStringList supported_backends;
   int default_seed{0};
   int expected_actor_count{-1};
+  // P1.E: catalog schema v2 必填字段，GUI 必须显式消费，不能再依赖
+  // scenario_workflow.hpp 的硬编码 fallback。
+  double duration_s{0.0};
+  QStringList actor_blueprints;
+  QString acceptance_profile;
+  double nav_distance_m{0.0};
 };
 
 inline QString find_repo_root(const QString& explicit_root = {}) {
@@ -89,36 +106,88 @@ inline QVector<ScenarioCatalogEntry> load_scenario_catalog(
   const QString root = find_repo_root(explicit_root);
   QFile file(QDir(root).filePath(QStringLiteral("scenarios/catalog.json")));
   if (root.isEmpty() || !file.open(QIODevice::ReadOnly)) return result;
-  const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+  QJsonParseError parse_error;
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parse_error);
+  if (parse_error.error != QJsonParseError::NoError || !document.isObject() ||
+      document.object().value(QStringLiteral("schema_version")).toInt() != 2) {
+    return {};
+  }
   const QJsonArray entries = document.object().value(QStringLiteral("scenarios")).toArray();
+  if (entries.isEmpty()) return {};
+  QSet<QString> ids;
+  const QSet<QString> towns{"Town01", "Town02", "Town03", "Town04", "Town05",
+                            "Town06", "Town07", "Town10HD"};
+  const QSet<QString> backends{"carla", "sil"};
+  const QStringList profile_ids = scenario_workflow_ids();
+  const QSet<QString> profiles(profile_ids.cbegin(), profile_ids.cend());
   for (const QJsonValue& value : entries) {
+    if (!value.isObject()) return {};
     const QJsonObject object = value.toObject();
     ScenarioCatalogEntry entry;
     entry.id = object.value(QStringLiteral("id")).toString();
     entry.display_name = object.value(QStringLiteral("display_name")).toString(entry.id);
     entry.description = object.value(QStringLiteral("description")).toString();
     entry.file = QDir(root).filePath(object.value(QStringLiteral("file")).toString());
-    entry.default_town = object.value(QStringLiteral("default_town")).toString("Town04");
+    entry.default_town = object.value(QStringLiteral("default_town")).toString();
     entry.default_seed = object.value(QStringLiteral("default_seed")).toInt(0);
     entry.expected_actor_count =
         object.value(QStringLiteral("expected_actor_count")).toInt(-1);
+    // P1.E: schema v2 必填字段。读不到或类型错误视作"catalog 缺关键数据"，
+    // 直接丢弃这条 entry，避免 GUI 误用旧 profile 兜底。
+    if (!object.contains(QStringLiteral("duration_s")) ||
+        !object.value(QStringLiteral("duration_s")).isDouble()) {
+      return {};
+    }
+    entry.duration_s = object.value(QStringLiteral("duration_s")).toDouble();
+    const QJsonArray blueprints =
+        object.value(QStringLiteral("actor_blueprints")).toArray();
+    for (const QJsonValue& bp : blueprints) {
+      if (bp.isNull()) {
+        entry.actor_blueprints << QString();
+      } else {
+        entry.actor_blueprints << bp.toString();
+      }
+    }
+    entry.acceptance_profile =
+        object.value(QStringLiteral("acceptance_profile")).toString();
+    if (!object.contains(QStringLiteral("nav_distance_m")) ||
+        !object.value(QStringLiteral("nav_distance_m")).isDouble()) {
+      return {};
+    }
+    entry.nav_distance_m = object.value(QStringLiteral("nav_distance_m")).toDouble();
     for (const QJsonValue& backend :
          object.value(QStringLiteral("supported_backends")).toArray()) {
       entry.supported_backends << backend.toString();
     }
-    if (!entry.id.isEmpty() && QFileInfo::exists(entry.file)) result.push_back(entry);
+    if (entry.id.isEmpty() || ids.contains(entry.id) || entry.display_name.isEmpty() ||
+        entry.description.isEmpty() || !QFileInfo::exists(entry.file) ||
+        !towns.contains(entry.default_town) || entry.supported_backends.isEmpty() ||
+        entry.expected_actor_count < 0 ||
+        entry.actor_blueprints.size() != entry.expected_actor_count ||
+        !profiles.contains(entry.acceptance_profile) ||
+        !std::isfinite(entry.nav_distance_m) || entry.nav_distance_m <= 0.0) {
+      return {};
+    }
+    for (const QString& backend : entry.supported_backends) {
+      if (!backends.contains(backend)) return {};
+    }
+    ids.insert(entry.id);
+    result.push_back(entry);
   }
   return result;
 }
 
 inline QStringList legacy_scenarios() {
+  // P1.E: 仅供离线单元测试验证"硬编码 ID 集合"——GUI 业务路径禁止调用。
   return {"lka", "acc", "acc_stop_and_go", "acc_slow_truck",
-          "overtake", "aeb", "aeb_stationary", "aeb_pedestrian", "free"};
+          "overtake", "aeb", "aeb_stationary", "aeb_pedestrian", "free",
+          "dense_overtake_v1"};
 }
 
 inline QStringList known_scenarios(const QString& explicit_root = {}) {
+  // P1.E: fail-closed。catalog 缺失或解析失败时**不**静默回退到 legacy；
+  // 业务方必须把空列表视为 GUI 启动失败。
   const auto catalog = load_scenario_catalog(explicit_root);
-  if (catalog.isEmpty()) return legacy_scenarios();
   QStringList ids;
   for (const auto& entry : catalog) ids << entry.id;
   return ids;
@@ -227,6 +296,10 @@ inline QStringList bridge_arguments(const LaunchConfig& config) {
   } else {
     args << "--scenario" << config.scenario;
   }
+  // P0.C: 把 GUI 当前会话 run_id 透传给桥节点；为空时让桥自生成 UUID。
+  if (!config.run_id.isEmpty()) {
+    args << "--run-id" << config.run_id;
+  }
   args << "--town" << config.town
        << "--carla-port" << QString::number(config.carla_port)
        // GUI“完整系统”由停止按钮管理生命周期，不能继承演示场景的
@@ -249,6 +322,7 @@ inline QStringList bridge_arguments(const LaunchConfig& config) {
 
 inline QStringList local_three_machine_arguments(const LaunchConfig& config) {
   QStringList args;
+  if (!config.run_id.isEmpty()) args << "--run-id" << config.run_id;
   if (!config.scenario_file.isEmpty()) {
     args << "--scenario-file" << config.scenario_file
          << "--seed" << QString::number(config.seed);

@@ -19,37 +19,37 @@ adas::gui::GuiLane make_lane(
   return lane;
 }
 
-TEST(MapObjects, SnapshotIsStoredAndLayerDefaultsOff) {
+// P1.F: 旧"setObjects 截图"测试已删除——场景 actor 不再进入 GUI 渲染路径。
+// 下面三件事用于锁定新契约：
+//   1. clearForMapChange 必须清空路线且可重复调用。
+//   2. setLayers 只接受不包含已删除的 kLayerObjects 的位图。
+
+TEST(MapView, ClearForMapChangeResetsRouteAndVehicle) {
   int argc = 1;
-  char app_name[] = "test_map_objects";
+  char app_name[] = "test_clear_for_map_change";
   char* argv[] = {app_name, nullptr};
   QApplication app(argc, argv);
   adas::gui::MapView view;
   view.resize(640, 480);
-  adas::gui::GuiLane lane;
-  lane.centerline << QPointF(-20.0, 0.0) << QPointF(100.0, 0.0);
-  view.setLanes({lane}, QStringLiteral("Town04"));
+  view.setRoute({QPointF(0.0, 0.0), QPointF(10.0, 0.0)});
+  EXPECT_EQ(view.routeSizeForTest(), 2);
+  view.clearForMapChange();
+  EXPECT_EQ(view.routeSizeForTest(), 0);
+  // 二次调用必须幂等。
+  view.clearForMapChange();
+  EXPECT_EQ(view.routeSizeForTest(), 0);
+}
 
-  QVector<adas::gui::GuiMapObject> objects;
-  for (quint32 id = 1; id <= 20; ++id) {
-    adas::gui::GuiMapObject object;
-    object.id = id;
-    object.classification = 1;
-    object.x = static_cast<double>(id) * 3.0;
-    object.y = (id % 2 == 0) ? 3.7 : -3.7;
-    objects.push_back(object);
-  }
-  view.setObjects(objects);
-  EXPECT_EQ(view.objectCount(), 20);
-  EXPECT_EQ(view.layerFlags() & adas::gui::MapView::kLayerObjects, 0U);
-
-  view.setLayers(adas::gui::MapView::kDefaultLayers |
-                 adas::gui::MapView::kLayerObjects);
-  QImage image(view.size(), QImage::Format_ARGB32_Premultiplied);
-  image.fill(Qt::transparent);
-  QPainter painter(&image);
-  view.render(&painter);
-  EXPECT_FALSE(image.isNull());
+TEST(MapView, LayerFlagsDoNotExposeScenarioObjects) {
+  int argc = 1;
+  char app_name[] = "test_layer_flags";
+  char* argv[] = {app_name, nullptr};
+  QApplication app(argc, argv);
+  adas::gui::MapView view;
+  EXPECT_EQ(view.layerFlags(), adas::gui::MapView::kDefaultLayers);
+  // 任何调用 setLayers 都不得"复活"已删除的 kLayerObjects（已不再定义）。
+  view.setLayers(adas::gui::MapView::kDefaultLayers);
+  EXPECT_EQ(view.layerFlags(), adas::gui::MapView::kDefaultLayers);
 }
 
 TEST(NavigationGoal, FollowsOnlyDeclaredOutgoingConnections) {

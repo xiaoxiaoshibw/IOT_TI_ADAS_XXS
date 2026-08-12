@@ -1,5 +1,7 @@
 #include "launch_panel.hpp"
 
+#include "run_id_session.hpp"
+
 #include <QDateTime>
 #include <QDir>
 #include <QEvent>
@@ -267,7 +269,15 @@ LaunchPanel::~LaunchPanel() {
 }
 
 bool LaunchPanel::startConfiguredSystem(bool interactive) {
-  const auto config = currentConfig();
+  auto config = currentConfig();
+  if (config.scenario.isEmpty() || config.scenario_file.isEmpty() ||
+      config.acceptance_profile.isEmpty() || config.nav_distance_m <= 0.0) {
+    const QString detail = QStringLiteral(
+        "场景 catalog 缺失或无效；已 fail-closed，禁止启动。请运行 tools/validate_scenario.py");
+    emit manager_.logLine(QStringLiteral("PREFLIGHT"), detail);
+    if (interactive) QMessageBox::critical(this, QStringLiteral("场景 catalog 无效"), detail);
+    return false;
+  }
   if (interactive) {
     if (!runPreflightGate()) return false;
     if (!confirm_action(this, QStringLiteral("确认启动完整系统"),
@@ -298,14 +308,17 @@ bool LaunchPanel::startConfiguredSystem(bool interactive) {
       }
     }
   }
+  // 预检与确认完成才建立会话；取消或预检失败不会轮换 run_id。
+  config.run_id = adas_gui::RunIdSession::begin();
   start_all_button_->setBusy(true, QStringLiteral("启动中"),
                              QStringLiteral("等待 bridge 运行或启动失败"));
   active_start_button_ = start_all_button_;
   save_settings();
-  const auto profile = scenario_workflow_profile(config.scenario);
+  const auto profile = scenario_workflow_profile(config.acceptance_profile);
   emit scenarioRunRequested(config.scenario, config.town,
+                            config.acceptance_profile,
                             config.auto_navigation && profile.requires_navigation,
-                            profile.recommended_goal_distance_m);
+                            config.nav_distance_m);
   manager_.startAll(config);
   update_buttons();
   return true;
@@ -325,8 +338,10 @@ void LaunchPanel::rebuildScenarioChoices(const QString& preferred) {
   scenario_combo_->clear();
   const auto catalog = load_scenario_catalog();
   if (catalog.isEmpty()) {
-    for (const QString& id : legacy_scenarios()) scenario_combo_->addItem(id, id);
+    scenario_combo_->addItem(QStringLiteral("场景 catalog 无效，禁止启动"), QString());
+    scenario_combo_->setEnabled(false);
   } else {
+    scenario_combo_->setEnabled(true);
     for (const auto& entry : catalog) {
       if (!scenario_supports_backend(entry, selectedBackend())) continue;
       scenario_combo_->addItem(
@@ -366,6 +381,8 @@ LaunchConfig LaunchPanel::currentConfig() const {
   config.scenario_file = entry.file;
   config.seed = entry.default_seed;
   config.expected_actor_count = entry.expected_actor_count;
+  config.acceptance_profile = entry.acceptance_profile;
+  config.nav_distance_m = entry.nav_distance_m;
   config.town = entry.default_town.isEmpty() ? town_combo_->currentText()
                                               : entry.default_town;
   config.control_source = source_combo_->currentText();
@@ -378,6 +395,8 @@ LaunchConfig LaunchPanel::currentConfig() const {
   // 勾上时 GUI 会 SSH 上 Orin 跑 CAN 链路 + adas-hil 编排，需要 SecureSettings
   // 里有密码。
   config.start_full_stack = start_full_stack_check_ && start_full_stack_check_->isChecked();
+  // 只返回已确认会话；startConfiguredSystem 在所有 gate 通过后覆盖为新 UUID。
+  config.run_id = adas_gui::RunIdSession::current();
   return config;
 }
 
@@ -727,24 +746,9 @@ void LaunchPanel::applyPreset(const DemoPreset& preset) {
                                    ? QStringLiteral("将自动生成并下发车道导航目标。")
                                    : QStringLiteral("请在 Town 地图手动选择目标。")),
                       ConfirmSeverity::Warning)) return;
-  auto* button = qobject_cast<BusyButton*>(sender());
-  if (button) {
-    button->setBusy(true, QStringLiteral("启动中"),
-                    QStringLiteral("等待 bridge 运行或启动失败"));
-    active_start_button_ = button;
-  }
-  // 控制源保留操作员当前选择（HIL 下 can/can_cpp 是人为设定，预设不越权覆盖）。
-  save_settings();
-  // 不再 emit demoGoalArmed：导航目标由用户在地图上手动选点（MapView::goalRequested）
-  // 设定。预设只负责"启动哪个 CARLA 场景"。
   emit demoPresetLaunched(preset.scenario, preset.town);
-  const auto config = currentConfig();
-  const auto profile = scenario_workflow_profile(config.scenario);
-  emit scenarioRunRequested(config.scenario, config.town,
-                            config.auto_navigation && profile.requires_navigation,
-                            profile.recommended_goal_distance_m);
-  manager_.startAll(config);
-  update_buttons();
+  // 预设与普通/autostart 复用同一会话创建入口；前面的交互确认不创建 UUID。
+  startConfiguredSystem(/*interactive=*/false);
 }
 
 void LaunchPanel::setAdvancedVisible(bool visible) {

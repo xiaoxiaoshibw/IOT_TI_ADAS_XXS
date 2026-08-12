@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 scenario_id="free"
+run_id=""
 while (($#)); do
   case "$1" in
     --scenario)
@@ -12,6 +13,14 @@ while (($#)); do
         exit 2
       }
       scenario_id="$2"
+      shift 2
+      ;;
+    --run-id)
+      [[ $# -ge 2 && -n "$2" ]] || {
+        echo "--run-id requires a non-empty session id" >&2
+        exit 2
+      }
+      run_id="$2"
       shift 2
       ;;
     --help|-h)
@@ -42,4 +51,5 @@ source "${ROS_SETUP}"
 source "${SOC_SETUP}"
 set -u
 
-exec ros2 launch adas_launch carla.launch.py "scenario_id:=${scenario_id}"
+exec ros2 launch adas_launch carla.launch.py \
+  "scenario_id:=${scenario_id}" "run_id:=${run_id}"

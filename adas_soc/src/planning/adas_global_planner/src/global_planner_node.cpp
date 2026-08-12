@@ -14,15 +14,16 @@
 #include "adas_global_planner/global_planner_core.hpp"
 #include "adas_global_planner/route_validator.hpp"
 #include "adas_global_planner/semantic_route.hpp"
+#include "adas_msgs/msg/global_route.hpp"
 #include "adas_msgs/msg/lane_graph.hpp"
 #include "adas_msgs/msg/navigation_status.hpp"
+#include "adas_msgs/msg/route_point.hpp"
 #include "adas_msgs/srv/cancel_navigation.hpp"
 #include "adas_msgs/srv/set_navigation_goal.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/empty.hpp"
 
 namespace adas::planning {
 namespace {
@@ -157,6 +158,8 @@ class GlobalPlannerNode : public rclcpp::Node {
     route_validation_.min_route_points = static_cast<std::size_t>(min_route_points);
     replan_policy_ = std::make_unique<ReplanPolicy>(replan_threshold_m_, replan_cooldown_s_);
     planner_ = std::make_unique<GlobalPlannerCore>(cost);
+    // P0.C: GUI 端持有的运行会话 run_id；空字符串代表未握手（暂未与新 GUI 会话同步）。
+    run_id_ = declare_parameter<std::string>("run_id", std::string());
 
     const auto map_qos = rclcpp::QoS(1).reliable().transient_local();
     sub_map_ = create_subscription<adas_msgs::msg::LaneGraph>(
@@ -165,12 +168,6 @@ class GlobalPlannerNode : public rclcpp::Node {
     sub_odom_ = create_subscription<nav_msgs::msg::Odometry>(
         "/adas/localization/kinematic_state", rclcpp::SensorDataQoS(),
         std::bind(&GlobalPlannerNode::on_odom, this, std::placeholders::_1));
-    sub_goal_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/adas/navigation/goal", rclcpp::QoS(1).reliable(),
-        std::bind(&GlobalPlannerNode::on_goal, this, std::placeholders::_1));
-    sub_cancel_ = create_subscription<std_msgs::msg::Empty>(
-        "/adas/navigation/cancel", rclcpp::QoS(1).reliable(),
-        std::bind(&GlobalPlannerNode::on_cancel, this, std::placeholders::_1));
     srv_goal_ = create_service<adas_msgs::srv::SetNavigationGoal>(
         "/adas/navigation/set_goal",
         [this](const std::shared_ptr<adas_msgs::srv::SetNavigationGoal::Request> request,
@@ -186,6 +183,20 @@ class GlobalPlannerNode : public rclcpp::Node {
               !std::isfinite(request->goal.pose.position.y)) {
             response->accepted = false;
             response->message = "request_id must be UUID v4; frame/goal must be valid";
+            goal_responses_[request->request_id] = *response;
+            return;
+          }
+          // P0.C: 当前若已锁定到某 run_id，则请求必须显式携带相同的 run_id；
+          // 空请求 run_id 一律拒绝，避免 GUI/Bridge 误把"未握手"消息当成通配符。
+          if (run_id_.empty()) {
+            response->accepted = false;
+            response->message = "planner not yet bound to a run_id (no LaneGraph handshake)";
+            goal_responses_[request->request_id] = *response;
+            return;
+          }
+          if (request->run_id.empty() || request->run_id != run_id_) {
+            response->accepted = false;
+            response->message = "run_id mismatch: stale or wrong-session goal";
             goal_responses_[request->request_id] = *response;
             return;
           }
@@ -215,6 +226,19 @@ class GlobalPlannerNode : public rclcpp::Node {
             *response = cached->second;
             return;
           }
+          // P0.C: cancel 也必须匹配当前会话 run_id；空 run_id 一律拒绝。
+          if (run_id_.empty()) {
+            response->accepted = false;
+            response->message = "planner not yet bound to a run_id (no LaneGraph handshake)";
+            cancel_responses_[request->request_id] = *response;
+            return;
+          }
+          if (request->run_id.empty() || request->run_id != run_id_) {
+            response->accepted = false;
+            response->message = "run_id mismatch: stale or wrong-session cancel";
+            cancel_responses_[request->request_id] = *response;
+            return;
+          }
           response->goal_id = goal_id_;
           if (!is_uuid_v4(request->request_id) ||
               (!request->goal_id.empty() && request->goal_id != goal_id_)) {
@@ -234,6 +258,14 @@ class GlobalPlannerNode : public rclcpp::Node {
 
     pub_route_ = create_publisher<nav_msgs::msg::Path>(
         "/adas/planning/global_route", rclcpp::QoS(1).reliable().transient_local());
+    // P0.C: 带 run_id 的 GlobalRoute 是当前会话权威路线（GUI / CARLA / Bridge
+    // 严格按 run_id 过滤）；route_adapter 节点从该话题消费并发布 Path 到下游
+    // 控制栈。如果 route_adapter 不在线，下游消费 /adas/planning/global_route
+    // 仍然能拿到 Path（planner 同时发布），但不带 run_id——显式违反 P0.3 时
+    // 启动日志里会发出警告。
+    pub_global_route_ = create_publisher<adas_msgs::msg::GlobalRoute>(
+        "/adas/navigation/global_route",
+        rclcpp::QoS(1).reliable().transient_local());
     pub_status_ = create_publisher<adas_msgs::msg::NavigationStatus>(
         "/adas/navigation/status", rclcpp::QoS(1).reliable().transient_local());
     deviation_timer_ = create_wall_timer(
@@ -249,6 +281,23 @@ class GlobalPlannerNode : public rclcpp::Node {
 
  private:
   void on_map(const adas_msgs::msg::LaneGraph::ConstSharedPtr msg) {
+    // 若 launch 未显式注入预期会话，只允许首条非空 LaneGraph 绑定一次。
+    // transient-local 的空/旧会话地图不能抢占，也不能让已绑定 planner 切会话。
+    if (run_id_.empty()) {
+      if (!bind_or_accept_run_id(run_id_, msg->run_id)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "忽略空 run_id 的 LaneGraph；等待会话握手");
+        return;
+      }
+      if (map_id_.empty()) {
+        RCLCPP_INFO(get_logger(), "锁定 run_id=%s 来自首条 LaneGraph",
+                    run_id_.c_str());
+      }
+    } else if (!bind_or_accept_run_id(run_id_, msg->run_id)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "忽略与本地 run_id 不一致的 LaneGraph（旧会话残留）");
+      return;
+    }
     auto graph = std::make_unique<LaneGraph>();
     std::size_t skipped_lanes = 0;
     std::size_t skipped_connections = 0;
@@ -310,20 +359,9 @@ class GlobalPlannerNode : public rclcpp::Node {
       remaining_distance_m_ = 0.0;
       publish_status(adas_msgs::msg::NavigationStatus::ARRIVED,
                      "route endpoint reached");
+      // P0.B: 请求已完成，释放 goal 让下一次提交不被旧 goal 卡住。
+      clear_request_state();
     }
-  }
-
-  void on_goal(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
-    goal_ = msg;
-    goal_id_ = std::to_string(now().nanoseconds());
-    clear_active_route();
-    plan_route();
-  }
-
-  void on_cancel(const std_msgs::msg::Empty::ConstSharedPtr) {
-    goal_.reset();
-    clear_active_route();
-    publish_status(adas_msgs::msg::NavigationStatus::CANCELED, "navigation canceled");
   }
 
   void clear_active_route() {
@@ -339,6 +377,47 @@ class GlobalPlannerNode : public rclcpp::Node {
     empty.header.stamp = now();
     empty.header.frame_id = "map";
     pub_route_->publish(empty);
+    publish_global_route(adas_msgs::msg::GlobalRoute::STATUS_INVALID,
+                         empty.header.stamp, {}, 0.0F);
+  }
+
+  // P0.C: 把当前路线以带 run_id 的 GlobalRoute 形式发布给 GUI / CARLA。
+  // status=STATUS_INVALID 时清空 transient_local 旧路线；其余状态消费端
+  // 按 status 与 run_id 双重校验。
+  void publish_global_route(std::uint8_t status, const rclcpp::Time& stamp,
+                            const std::vector<SemanticRoutePoint>& points,
+                            float length_m) {
+    if (!pub_global_route_) return;
+    adas_msgs::msg::GlobalRoute route;
+    route.header.stamp = stamp;
+    route.header.frame_id = "map";
+    route.frame_id = "map";
+    route.run_id = run_id_;
+    route.map_id = map_id_;
+    route.map_hash = map_hash_;
+    route.goal_id = goal_id_;
+    // P0.C: GlobalRoute.route_id 是 uint32（与 nav_msgs/Path 不一致是历史
+    // 残留）；当前语义靠 run_id + map_hash 唯一标识，route_id 留 0 即可。
+    route.status = status;
+    route.length = length_m;
+    route.points.reserve(points.size());
+    for (const auto& point : points) {
+      adas_msgs::msg::RoutePoint rp;
+      rp.x = static_cast<float>(point.pose.x);
+      rp.y = static_cast<float>(point.pose.y);
+      rp.yaw = static_cast<float>(point.pose.yaw);
+      route.points.push_back(rp);
+    }
+    pub_global_route_->publish(route);
+  }
+
+  // P0.B: 统一清空"本次请求"相关状态（goal/活动路线/到达点/AROP/ARIVED）。
+  // FAILED/ARRIVED/CANCELED 共用，避免其中任一条路径漏清而锁死下一次提交。
+  // 不动 map_*/graph_/odom_ 这些环境状态——它们不属于单次请求。
+  void clear_request_state() {
+    goal_.reset();
+    goal_id_.clear();
+    clear_active_route();
   }
 
   void check_route_deviation() {
@@ -396,8 +475,9 @@ class GlobalPlannerNode : public rclcpp::Node {
                        "replan failed; retaining previous route");
         return;
       }
-      active_route_ = candidate;
-      publish_status(adas_msgs::msg::NavigationStatus::FAILED, active_route_.failure_reason);
+      const auto failure_reason = candidate.failure_reason;
+      clear_request_state();
+      publish_status(adas_msgs::msg::NavigationStatus::FAILED, failure_reason);
       return;
     }
 
@@ -416,9 +496,10 @@ class GlobalPlannerNode : public rclcpp::Node {
                        "replan geometry invalid; retaining previous route");
         return;
       }
-      active_route_ = candidate;
+      const auto geometry_reason = semantic.failure_reason;
+      clear_request_state();
       publish_status(adas_msgs::msg::NavigationStatus::FAILED,
-                     "route geometry invalid: " + semantic.failure_reason);
+                     "route geometry invalid: " + geometry_reason);
       return;
     }
     const auto validation = validate_route(semantic.points, route_validation_);
@@ -431,9 +512,10 @@ class GlobalPlannerNode : public rclcpp::Node {
                        "replan validation failed; retaining previous route");
         return;
       }
-      active_route_ = candidate;
+      const auto validation_reason = validation.reason;
+      clear_request_state();
       publish_status(adas_msgs::msg::NavigationStatus::FAILED,
-                     "route validation failed: " + validation.reason);
+                     "route validation failed: " + validation_reason);
       return;
     }
     active_route_ = std::move(candidate);
@@ -461,6 +543,9 @@ class GlobalPlannerNode : public rclcpp::Node {
     active_route_id_ = route_id(map_hash_, path.header.stamp);
     remaining_distance_m_ = semantic.length_m;
     pub_route_->publish(path);
+    publish_global_route(adas_msgs::msg::GlobalRoute::STATUS_VALID,
+                         path.header.stamp, semantic.points,
+                         static_cast<float>(semantic.length_m));
     publish_status(adas_msgs::msg::NavigationStatus::DRIVING, "route ready");
   }
 
@@ -469,6 +554,8 @@ class GlobalPlannerNode : public rclcpp::Node {
     status.header.stamp = now();
     status.header.frame_id = "map";
     status.state = state;
+    // P0.C: 把本地锁定后的 run_id 写入每条 status，消费端据此过滤。
+    status.run_id = run_id_;
     status.map_id = map_id_;
     status.goal_id = goal_id_;
     status.route_id = active_route_id_;
@@ -496,6 +583,8 @@ class GlobalPlannerNode : public rclcpp::Node {
   std::string map_hash_;
   std::string goal_id_;
   std::string active_route_id_;
+  // P0.C: 由首条 LaneGraph 握手或 ROS 参数 run_id 注入；之后不可空。
+  std::string run_id_;
   std::unique_ptr<LaneGraph> graph_;
   std::unique_ptr<GlobalPlannerCore> planner_;
   GlobalRoute active_route_;
@@ -503,11 +592,10 @@ class GlobalPlannerNode : public rclcpp::Node {
   geometry_msgs::msg::PoseStamped::ConstSharedPtr goal_;
   rclcpp::Subscription<adas_msgs::msg::LaneGraph>::SharedPtr sub_map_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_cancel_;
   rclcpp::Service<adas_msgs::srv::SetNavigationGoal>::SharedPtr srv_goal_;
   rclcpp::Service<adas_msgs::srv::CancelNavigation>::SharedPtr srv_cancel_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_;
+  rclcpp::Publisher<adas_msgs::msg::GlobalRoute>::SharedPtr pub_global_route_;
   rclcpp::Publisher<adas_msgs::msg::NavigationStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr deviation_timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;

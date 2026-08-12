@@ -39,13 +39,14 @@ def scenario_parameter_files(scenario_id):
 
 def _setup(context):
     scenario_id = LaunchConfiguration('scenario_id').perform(context).strip()
+    run_id = LaunchConfiguration('run_id').perform(context).strip()
     overlays = scenario_parameter_files(scenario_id)
     overlay_text = ','.join(overlays) if overlays else 'baseline'
     return [
         LogInfo(msg='[scenario] CARLA SoC profile: %s -> %s' %
                 (scenario_id, overlay_text)),
         *adas_nodes(sim_extra_params=overlays, include_sim=False,
-                    include_navigation=True),
+                    include_navigation=True, run_id=run_id),
     ]
 
 
@@ -54,5 +55,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'scenario_id', default_value='free',
             description='Catalog scenario whose behavior policy is applied'),
+        DeclareLaunchArgument(
+            'run_id', default_value='',
+            description='Expected non-empty run session ID'),
         OpaqueFunction(function=_setup),
     ])

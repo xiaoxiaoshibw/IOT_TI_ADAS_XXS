@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QUuid>
+#include "run_id_session.hpp"
+#include "session_contract.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -124,6 +126,10 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
     sub_map_ = node_->create_subscription<adas_msgs::msg::LaneGraph>(
         "/adas/map/lane_graph", map_qos,
         [this](adas_msgs::msg::LaneGraph::ConstSharedPtr message) {
+          const QString incoming_run_id = QString::fromStdString(message->run_id);
+          if (!accepts_run_id(adas_gui::RunIdSession::current(), incoming_run_id)) {
+            return;
+          }
           QVector<GuiLane> lanes;
           lanes.reserve(static_cast<int>(message->lanes.size()));
           for (const auto& lane : message->lanes) {
@@ -148,19 +154,36 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
                                   QString::fromStdString(message->map_hash));
           emit laneGraphChanged(lanes, map_id);
         });
-    sub_route_ = node_->create_subscription<nav_msgs::msg::Path>(
-        "/adas/planning/global_route", map_qos,
-        [this](nav_msgs::msg::Path::ConstSharedPtr message) {
+    // Path 不携带 run_id，不能参与 GUI 的正常业务路线。控制栈仍可消费
+    // /adas/planning/global_route；GUI 只消费带会话字段的 GlobalRoute。
+    sub_global_route_ = node_->create_subscription<adas_msgs::msg::GlobalRoute>(
+        "/adas/navigation/global_route", map_qos,
+        [this](adas_msgs::msg::GlobalRoute::ConstSharedPtr message) {
+          const QString incoming_run_id = QString::fromStdString(message->run_id);
+          const QString my_run_id = adas_gui::RunIdSession::current();
+          const auto update = route_update_for(
+              my_run_id, incoming_run_id,
+              message->status == adas_msgs::msg::GlobalRoute::STATUS_VALID,
+              static_cast<int>(message->points.size()));
+          if (update == RouteUpdate::Ignore) return;
+          if (update == RouteUpdate::Clear) {
+            emit routeChanged(QPolygonF{});
+            return;
+          }
           QPolygonF route;
-          route.reserve(static_cast<int>(message->poses.size()));
-          for (const auto& pose : message->poses) {
-            route.append(QPointF(pose.pose.position.x, pose.pose.position.y));
+          route.reserve(static_cast<int>(message->points.size()));
+          for (const auto& point : message->points) {
+            route.append(QPointF(point.x, point.y));
           }
           emit routeChanged(route);
         });
     sub_nav_ = node_->create_subscription<adas_msgs::msg::NavigationStatus>(
         "/adas/navigation/status", map_qos,
         [this](adas_msgs::msg::NavigationStatus::ConstSharedPtr message) {
+          const QString incoming_run_id = QString::fromStdString(message->run_id);
+          if (!accepts_run_id(adas_gui::RunIdSession::current(), incoming_run_id)) {
+            return;
+          }
           GuiNavStatus status;
           status.state = message->state;
           status.detail = QString::fromStdString(message->detail);
@@ -317,6 +340,8 @@ QString RosBridge::requestGoal(double world_x, double world_y) {
   }
   auto request = std::make_shared<adas_msgs::srv::SetNavigationGoal::Request>();
   request->request_id = id.toStdString();
+  // P0.C：把当前会话 run_id 写入请求；服务端会校验一致性。
+  request->run_id = adas_gui::RunIdSession::current_std();
   request->goal.header.stamp = node_->now();
   request->goal.header.frame_id = "map";
   request->goal.pose.position.x = world_x;
@@ -381,6 +406,8 @@ QString RosBridge::requestCancel(const QString& goal_id) {
   }
   auto request = std::make_shared<adas_msgs::srv::CancelNavigation::Request>();
   request->request_id = id.toStdString();
+  // P0.C：与 goal 同一会话上下文，避免误取消旧会话的活跃目标。
+  request->run_id = adas_gui::RunIdSession::current_std();
   request->goal_id = goal_id.toStdString();
   client_cancel_->async_send_request(
       request, [this, id, operation](

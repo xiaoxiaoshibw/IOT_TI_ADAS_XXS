@@ -14,6 +14,8 @@
   <depend>adas_msgs</depend>
   <depend>adas_common</depend>
   <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 

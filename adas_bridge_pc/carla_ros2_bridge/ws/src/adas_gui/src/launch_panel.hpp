@@ -58,6 +58,7 @@ class LaunchPanel : public QWidget {
   void demoPresetLaunched(const QString& scenario, const QString& town);
   void scenarioSelectionChanged(const QString& scenario, const QString& town);
   void scenarioRunRequested(const QString& scenario, const QString& town,
+                            const QString& acceptance_profile,
                             bool auto_navigation, double goal_distance_m);
 
  private:

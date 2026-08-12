@@ -38,7 +38,8 @@ else()
     src/telemetry_freshness.cpp
     src/secure_settings.cpp
     src/orin_stack_manager.cpp
-    src/adas_gui.qrc)
+    src/adas_gui.qrc
+    src/run_id_session.cpp)
   target_include_directories(adas_gui PRIVATE src)
   target_link_libraries(adas_gui Qt6::Widgets Qt6::Network Qt6::Svg)
   ament_target_dependencies(adas_gui rclcpp adas_msgs std_msgs nav_msgs geometry_msgs)
@@ -109,6 +110,27 @@ if(BUILD_TESTING)
     ament_add_gtest(test_scenario_workflow test/test_scenario_workflow.cpp)
     target_include_directories(test_scenario_workflow PRIVATE src)
     target_link_libraries(test_scenario_workflow Qt6::Core)
+    ament_add_gtest(test_session_contract test/test_session_contract.cpp)
+    target_include_directories(test_session_contract PRIVATE src)
+    target_link_libraries(test_session_contract Qt6::Core)
+    ament_add_gtest(test_run_id_session
+      test/test_run_id_session.cpp src/run_id_session.cpp)
+    target_include_directories(test_run_id_session PRIVATE src)
+    target_link_libraries(test_run_id_session Qt6::Core)
+    # ScenarioRunPanel 是 QWidget，必须用 QApplication（不能换 QCoreApplication）；
+    # 在无 DISPLAY 的 CI/开发机上需要强制 offscreen Qt 平台插件，否则启动期
+    # xcb 插件探测 / 退出期 QApplication 析构会触发 SIGSEGV（gtest XML 已写出但
+    # 返回 -11）。同时 snap 自带的 libpthread.so.0 缺 __libc_pthread_init 符号，
+    # 需要 LD_PRELOAD 走系统 pthread。
+    ament_add_gtest(test_scenario_temporal_acceptance
+      test/test_scenario_temporal_acceptance.cpp
+      src/scenario_run_panel.cpp
+      src/widgets.cpp
+      src/icons.cpp
+      APPEND_ENV LD_PRELOAD=/lib/x86_64-linux-gnu/libpthread.so.0
+      APPEND_ENV QT_QPA_PLATFORM=offscreen)
+    target_include_directories(test_scenario_temporal_acceptance PRIVATE src)
+    target_link_libraries(test_scenario_temporal_acceptance Qt6::Core Qt6::Widgets Qt6::Svg)
     ament_add_gtest(test_process_manager
       test/test_process_manager.cpp
       src/process_manager.cpp

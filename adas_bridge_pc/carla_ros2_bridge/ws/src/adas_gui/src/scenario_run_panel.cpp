@@ -1,5 +1,6 @@
 #include "scenario_run_panel.hpp"
 
+#include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -47,6 +48,8 @@ ScenarioRunPanel::ScenarioRunPanel(QWidget* parent) : QWidget(parent) {
   requirements_layout_ = new QHBoxLayout();
   requirements_layout_->setSpacing(5);
   root->addLayout(requirements_layout_);
+  // P1.G: 默认走单调时钟；测试可注入 fake clock 验证"不同帧"语义。
+  clock_ = &ScenarioRunPanel::default_clock;
   setScenario(QStringLiteral("free"));
 }
 
@@ -67,13 +70,33 @@ void ScenarioRunPanel::setRunning(bool running) {
 }
 
 void ScenarioRunPanel::resetEvidence() {
+  // P1.G: 切到新场景/新会话时必须清空所有验收历史与时间戳，避免旧会话的
+  // WARNING/Dense 帧污染下一轮判断。
   observed_.clear();
   live_.clear();
+  observed_at_ms_.clear();
+  dense_object_set_at_ms_.clear();
   last_passed_ = false;
+  last_failure_detail_.clear();
 }
 
 void ScenarioRunPanel::observe(ScenarioEvidenceKey key) {
-  observed_.insert(key_value(key));
+  const int value = key_value(key);
+  const qint64 now_ms = clock_ ? clock_() : default_clock();
+  observed_.insert(value);
+  // P1.G: 记录单调时钟下的最近观察时间（毫秒）。用于时序约束。
+  observed_at_ms_.insert(value, now_ms);
+  // P1.G: dense_overtake_v1 验收要求 >= kDenseMinFrames 帧在 kDenseWindowMs
+  // 毫秒跨度内观察到 dense object set；记录每次命中的时间。
+  if (key == ScenarioEvidenceKey::DenseObjectSet) {
+    dense_object_set_at_ms_.append(now_ms);
+    // 滑动窗口：裁掉早于 (now - kDenseWindowMs) 的旧时间戳。
+    const qint64 cutoff = now_ms - kDenseWindowMs;
+    while (!dense_object_set_at_ms_.isEmpty() &&
+           dense_object_set_at_ms_.front() < cutoff) {
+      dense_object_set_at_ms_.removeFirst();
+    }
+  }
   refresh();
 }
 
@@ -85,8 +108,32 @@ void ScenarioRunPanel::setLive(ScenarioEvidenceKey key, bool value) {
 bool ScenarioRunPanel::satisfied(ScenarioEvidenceKey key) const {
   const int value = key_value(key);
   const auto live = live_.constFind(value);
-  if (live != live_.cend()) return live.value() || observed_.contains(value);
-  return observed_.contains(value);
+  const bool base = (live != live_.cend() && live.value()) ||
+                    observed_.contains(value);
+  if (!base) return false;
+  // P1.G: AEB 场景族（aeb / aeb_stationary / aeb_pedestrian）必须先看到
+  // WARNING（state == 2）再看到 EMERGENCY（state >= 3）。同一帧里同时
+  // 携带 WARNING+EMERGENCY 也不得通过——必须有时间顺序。
+  if (key == ScenarioEvidenceKey::AebEmergency &&
+      (profile_.id == QStringLiteral("aeb") ||
+       profile_.id == QStringLiteral("aeb_stationary") ||
+       profile_.id == QStringLiteral("aeb_pedestrian"))) {
+    const auto warning_it = observed_at_ms_.constFind(
+        key_value(ScenarioEvidenceKey::AebWarning));
+    const auto emergency_it = observed_at_ms_.constFind(
+        key_value(ScenarioEvidenceKey::AebEmergency));
+    if (warning_it == observed_at_ms_.constEnd() ||
+        emergency_it == observed_at_ms_.constEnd() ||
+        warning_it.value() >= emergency_it.value()) {
+      return false;
+    }
+  }
+  // P1.G: dense_overtake_v1 验收要求 5s 窗口内 >= kDenseMinFrames 帧 dense。
+  if (key == ScenarioEvidenceKey::DenseObjectSet &&
+      profile_.id == QStringLiteral("dense_overtake_v1")) {
+    return dense_object_set_at_ms_.size() >= kDenseMinFrames;
+  }
+  return true;
 }
 
 void ScenarioRunPanel::onMapReady(bool ready) {
@@ -108,7 +155,14 @@ void ScenarioRunPanel::onNavigation(int state) {
 }
 
 void ScenarioRunPanel::onObjects(const QVector<GuiMapObject>& objects) {
-  if (objects.size() >= 20) observe(ScenarioEvidenceKey::DenseObjectSet);
+  if (objects.size() >= 20) {
+    observe(ScenarioEvidenceKey::DenseObjectSet);
+  } else if (profile_.id == QStringLiteral("dense_overtake_v1")) {
+    dense_object_set_at_ms_.clear();
+    observed_.remove(key_value(ScenarioEvidenceKey::DenseObjectSet));
+    observed_at_ms_.remove(key_value(ScenarioEvidenceKey::DenseObjectSet));
+    refresh();
+  }
   if (std::any_of(objects.cbegin(), objects.cend(), [](const GuiMapObject& object) {
         return object.classification == 3;
       })) {

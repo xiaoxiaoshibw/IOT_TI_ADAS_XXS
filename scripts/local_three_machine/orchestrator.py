@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument('--carla', action='store_true',
                         help='run a real CARLA server and CARLA PC bridge')
     parser.add_argument('--carla-root', default=os.environ.get('CARLA_ROOT', ''))
+    parser.add_argument('--run-id', default='',
+                        help='expected GUI/bridge/planner run session ID')
     return parser.parse_args()
 
 
@@ -84,7 +86,8 @@ class Run:
         metadata = getattr(self.args, 'scenario_metadata', None) or {}
         report = {
             'schema_version': 1, 'overall': 'RUNNING',
-            'run_id': self.log_dir.name, 'ros_domain_id': os.environ.get('ROS_DOMAIN_ID'),
+            'run_id': self.args.run_id or self.log_dir.name,
+            'ros_domain_id': os.environ.get('ROS_DOMAIN_ID'),
             'can_interface': 'vcan0', 'scenario': self.args.scenario,
             'scenario_id': metadata.get('id', self.args.scenario),
             'scenario_file': metadata.get('source_file', ''),
@@ -386,6 +389,8 @@ def main():
                 '--can-interface', 'vcan0', '--carla-host', '127.0.0.1',
                 '--carla-port', '2000', '--town', 'Town04', '--duration', '0',
                 '--log-dir', str(run.log_dir / 'carla_csv')]
+            if args.run_id:
+                pc_command += ['--run-id', args.run_id]
             if args.scenario_file:
                 pc_command += [
                     '--scenario-file', args.scenario_file,
@@ -414,6 +419,8 @@ def main():
                     'seed:=' + str(args.scenario_metadata['seed'])]
             elif overlay:
                 orin_command.append('scenario:=' + overlay)
+        if args.run_id:
+            orin_command.append('run_id:=' + args.run_id)
         orin = run.start('orin', orin_command)
         gui_expected = args.gui or args.gui_offscreen
         if gui_expected:
@@ -557,7 +564,7 @@ def main():
             report['processes'] = {
                 role: {'pid': process.pid, 'log': str(run.log_dir / (role + '.log'))}
                 for role, process in run.processes.items()}
-            report['run_id'] = run.log_dir.name
+            report['run_id'] = args.run_id or run.log_dir.name
             report['ros_domain_id'] = '145'
             report['can_interface'] = 'vcan0'
             report['scenario'] = args.scenario

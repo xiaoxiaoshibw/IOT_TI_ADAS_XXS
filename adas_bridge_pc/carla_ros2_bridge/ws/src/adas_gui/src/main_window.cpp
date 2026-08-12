@@ -1,5 +1,8 @@
 #include "main_window.hpp"
 
+#include "run_id_session.hpp"
+#include "session_contract.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -331,6 +334,24 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
           &MapView::setMapMetadata);
   connect(bridge, &RosBridge::mapMetadataChanged, this,
           [this](const QString& map_id, const QString& map_hash) {
+            const bool changed = map_identity_changed(
+                latest_map_id_, latest_map_hash_, map_id, map_hash);
+            if (changed) {
+              map_view_->clearForMapChange();
+              pending_goal_request_id_.clear();
+              pending_cancel_request_id_.clear();
+              active_goal_id_.clear();
+              latest_lanes_.clear();
+              latest_ego_valid_ = false;
+              latest_ego_x_ = latest_ego_y_ = latest_ego_yaw_ = 0.0;
+              ++auto_navigation_generation_;
+              auto_navigation_retry_pending_ = false;
+              auto_navigation_armed_ = false;
+              auto_navigation_submitted_for_run_id_.clear();
+              latest_map_generation_ = 0;
+              latest_ego_generation_ = 0;
+              scenario_run_panel_->onMapReady(false);
+            }
             latest_map_id_ = map_id;
             latest_map_hash_ = map_hash;
           });
@@ -488,6 +509,7 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
                          : QStringLiteral("配置: --"));
             if (running) tryAutoNavigation();
             else {
+              adas_gui::RunIdSession::end();
               TelemetryFreshness::instance().resetSession();
               auto_navigation_armed_ = false;
               auto_navigation_retry_pending_ = false;
@@ -515,18 +537,38 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             scenario_run_panel_->setScenario(scenario);
           });
   connect(launch_panel_, &LaunchPanel::scenarioRunRequested, this,
-          [this](const QString& scenario, const QString& town, bool auto_navigation,
+          [this](const QString& scenario, const QString& town,
+                 const QString& acceptance_profile, bool auto_navigation,
                  double goal_distance_m) {
             ++auto_navigation_generation_;
             TelemetryFreshness::instance().resetSession();
             active_scenario_ = scenario;
-            scenario_run_panel_->setScenario(scenario);
+            scenario_run_panel_->setScenario(acceptance_profile);
             scenario_run_panel_->setRunning(false);
-            auto_navigation_armed_ = auto_navigation;
+            // P1.H: 自动导航默认关闭，仅在用户显式确认后才允许下发目标。
+            // 启动场景时若 auto_navigation=true，弹出确认框告知来源、Town、
+            // 是否会自动发送目标；用户取消则回到手动模式。
+            bool authorized_auto = false;
+            if (auto_navigation) {
+              const QString summary = QStringLiteral(
+                  "场景: %1\nTown: %2\n距离: %3 m\n\n"
+                  "勾选后将在 Town 车道图、自车位姿、bridge 与安全状态均 fresh 的条件下，"
+                  "本次运行会话内自动下发一次导航目标。\n"
+                  "若不勾选，将始终保持手动选点模式。").arg(scenario, town)
+                  .arg(goal_distance_m, 0, 'f', 0);
+              authorized_auto = confirm_action(
+                  this, QStringLiteral("授权自动导航"),
+                  QStringLiteral("是否允许本次会话自动下发一次目标？"),
+                  summary, ConfirmSeverity::Warning);
+            }
+            auto_navigation_armed_ = authorized_auto;
             auto_navigation_retry_pending_ = false;
             auto_navigation_attempts_ = 0;
             auto_navigation_distance_m_ = goal_distance_m;
             requested_town_ = town;
+            // P1.H: 同一运行会话最多自动下发一次；此处清空占位，提交
+            // 成功后再写入当前 run_id，避免启动瞬间就被"已提交"短路。
+            auto_navigation_submitted_for_run_id_.clear();
             active_goal_id_.clear();
             pending_goal_request_id_.clear();
             latest_lanes_.clear();
@@ -541,9 +583,14 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             map_view_->clearTrail();
             scenario_run_panel_->onMapReady(false);
             if (auto_navigation) {
-              nav_status_value_->setText(
-                  QStringLiteral("导航: 场景启动后将沿 Town 车道自动规划 %1 m")
-                      .arg(goal_distance_m, 0, 'f', 0));
+              if (authorized_auto) {
+                nav_status_value_->setText(
+                    QStringLiteral("导航: 场景启动后将沿 Town 车道自动规划 %1 m")
+                        .arg(goal_distance_m, 0, 'f', 0));
+              } else {
+                nav_status_value_->setText(
+                    QStringLiteral("导航: 自动目标未授权（用户取消），保持手动模式"));
+              }
             }
           });
 
@@ -918,6 +965,32 @@ void MainWindow::onGoalRequested(double world_x, double world_y) {
         QStringLiteral("导航: 等待本次 Town 地图、自车位姿和 bridge 就绪"));
     return;
   }
+  // P1.F: 提交前再次校验 Town/map_hash/车道图就绪。map_hash 与 requested_town
+  // 必须在 navigationInputsReady() 已通过；这里只做"目标落在有向车道图附近"
+  // 的轻量检查，复杂可达性交给 SoC global_planner 服务端。
+  if (latest_map_hash_.isEmpty()) {
+    nav_status_value_->setText(
+        QStringLiteral("导航: 拒绝提交，Town map_hash 缺失（地图尚未完成握手）"));
+    return;
+  }
+  constexpr double kSubmitSnapM = 8.0;  // 与 SoC snap_max_distance_m 默认对齐。
+  bool on_a_lane = false;
+  for (const GuiLane& lane : latest_lanes_) {
+    for (const QPointF& point : lane.centerline) {
+      const double dx = point.x() - world_x;
+      const double dy = point.y() - world_y;
+      if (dx * dx + dy * dy <= kSubmitSnapM * kSubmitSnapM) {
+        on_a_lane = true;
+        break;
+      }
+    }
+    if (on_a_lane) break;
+  }
+  if (!on_a_lane) {
+    nav_status_value_->setText(
+        QStringLiteral("导航: 拒绝提交，目标点不在当前 Town 的有向车道图附近"));
+    return;
+  }
   auto_navigation_armed_ = false;
   submitGoal(world_x, world_y, true);
 }
@@ -956,6 +1029,12 @@ void MainWindow::tryAutoNavigation() {
       latest_ego_generation_ != auto_navigation_generation_) {
     return;
   }
+  // P1.H: 同一运行会话最多自动下发一次；只有"已记录成功下发的 run_id"才算
+  // 已经提交。启动瞬间必须保持为空，否则 tryAutoNavigation 永远直接退出。
+  if (!auto_navigation_submitted_for_run_id_.isEmpty()) {
+    auto_navigation_armed_ = false;
+    return;
+  }
   if (!requested_town_.isEmpty() &&
       !latest_map_id_.contains(requested_town_, Qt::CaseInsensitive)) {
     nav_status_value_->setText(
@@ -987,9 +1066,11 @@ void MainWindow::tryAutoNavigation() {
   }
   nav_status_value_->setText(
       QStringLiteral("导航: 自动目标 %1，正在下发").arg(goal.detail));
+  // 手动/自动共用的 submitGoal：成功才记录 run_id，下次触发会被短路。
   if (submitGoal(goal.x, goal.y, false)) {
     auto_navigation_armed_ = false;
     auto_navigation_retry_pending_ = false;
+    auto_navigation_submitted_for_run_id_ = adas_gui::RunIdSession::current();
     log_drawer_->appendFaultEvent(
         QDateTime::currentMSecsSinceEpoch(), 0, QStringLiteral("场景联动"),
         QStringLiteral("自动导航目标已下发"),

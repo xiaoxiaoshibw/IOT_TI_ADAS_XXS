@@ -1,5 +1,7 @@
 # Request-scoped navigation goal. The legacy PoseStamped topic remains supported.
 string request_id
+# P0.C 会话隔离：当前 run_id。错配视为旧会话请求并返回 rejected。
+string run_id
 geometry_msgs/PoseStamped goal
 ---
 bool accepted

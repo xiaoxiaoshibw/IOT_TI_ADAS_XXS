@@ -86,6 +86,26 @@ void MapView::setRoute(const QPolygonF& route) {
   update();
 }
 
+void MapView::clearForMapChange() {
+  // P1.F: 地图/会话切换时清空所有"上一次会话"残留：路线、目标、相机轨迹。
+  // 必须把 goal_x_/goal_y_/goal_valid_ 也归零，避免旧地图下的目标点
+  // 残留在新地图视觉上。
+  route_ = QPolygonF{};
+  pending_goal_x_ = 0.0;
+  pending_goal_y_ = 0.0;
+  goal_x_ = 0.0;
+  goal_y_ = 0.0;
+  goal_valid_ = false;
+  hover_valid_ = false;
+  hover_x_ = 0.0;
+  hover_y_ = 0.0;
+  vehicle_valid_ = false;
+  trail_.clear();
+  camera_ = MapCamera{};
+  fitted_ = false;
+  update();
+}
+
 void MapView::setVehicle(double x, double y, double yaw_rad, bool valid) {
   vehicle_x_ = x;
   vehicle_y_ = y;
@@ -290,32 +310,8 @@ void MapView::paintEvent(QPaintEvent*) {
     painter.drawEllipse(goal, 2.5, 2.5);
   }
 
-  // 完整目标物：按消息中的稳定 ID 绘制，图层默认关闭。车辆/卡车画有朝向的
-  // 矩形，行人画圆，避免 20~64 个目标时创建 QWidget 子项阻塞 UI。
-  if (layer_flags_ & kLayerObjects) {
-    for (const auto& object : objects_) {
-      const QPointF center = to_screen(camera_, {object.x, object.y});
-      painter.save();
-      painter.translate(center);
-      painter.rotate(-object.yaw_rad * 180.0 / M_PI);
-      QColor color = object.classification == 3 ? QColor("#ffb74d")
-                     : object.classification == 2 ? QColor("#ce93d8")
-                                                  : QColor("#64b5f6");
-      painter.setPen(QPen(color.darker(160), 1.2));
-      painter.setBrush(color);
-      if (object.classification == 3) {
-        painter.drawEllipse(QPointF(0, 0), 4.0, 4.0);
-      } else {
-        const double length_px = std::clamp(object.length_m * scale, 7.0, 22.0);
-        const double width_px = std::clamp(object.width_m * scale, 4.0, 12.0);
-        painter.drawRoundedRect(QRectF(-length_px / 2.0, -width_px / 2.0,
-                                      length_px, width_px), 2.0, 2.0);
-        painter.drawLine(QPointF(length_px / 2.0, 0),
-                         QPointF(length_px / 2.0 + 3.0, 0));
-      }
-      painter.restore();
-    }
-  }
+  // P1.F: 不在 GUI 渲染场景 actor 几何（CARLA 是唯一场景展示端）。
+  // 旧实现里那段绘制已删除；这里只画 Town 路网、自车、路线、目标。
 
   // 自车三角 + dropshadow + 朝向描边（屏幕 y 翻转）
   if (vehicle_valid_) {

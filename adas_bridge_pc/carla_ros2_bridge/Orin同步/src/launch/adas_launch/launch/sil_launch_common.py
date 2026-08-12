@@ -39,7 +39,7 @@ def _lifecycle_node(package, executable, name, scenario_files):
 
 
 def adas_nodes(sim_extra_params=None, scenario_overlay=None, include_sim=True,
-               include_navigation=False, include_mcu=False):
+               include_navigation=False, include_mcu=False, run_id=''):
     """返回节点与事件处理器；每个节点 Active 后才配置下一个节点。
 
     sim_extra_params：场景 overlay yaml 文件名列表——追加到**所有节点**的参数表
@@ -83,7 +83,7 @@ def adas_nodes(sim_extra_params=None, scenario_overlay=None, include_sim=True,
             executable='global_planner_node',
             name='global_planner',
             output='screen',
-            parameters=[_config('global_planner.yaml')],
+            parameters=[_config('global_planner.yaml'), {'run_id': run_id}],
         ))
     if include_sim:
         sim_params = [_config('sim_vehicle.yaml')]

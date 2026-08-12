@@ -16,6 +16,7 @@
 #include "adas_msgs/msg/aeb_status.hpp"
 #include "adas_msgs/msg/behavior_state.hpp"
 #include "adas_msgs/msg/gate_status.hpp"
+#include "adas_msgs/msg/global_route.hpp"
 #include "adas_msgs/msg/lane_graph.hpp"
 #include "adas_msgs/msg/lane_state.hpp"
 #include "adas_msgs/msg/mcu_status.hpp"
@@ -157,7 +158,7 @@ class RosBridge : public QObject {
   rclcpp::Subscription<adas_msgs::msg::ActuationCommand>::SharedPtr sub_sil_actuation_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_dtc_;
   rclcpp::Subscription<adas_msgs::msg::LaneGraph>::SharedPtr sub_map_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr sub_route_;
+  rclcpp::Subscription<adas_msgs::msg::GlobalRoute>::SharedPtr sub_global_route_;
   rclcpp::Subscription<adas_msgs::msg::NavigationStatus>::SharedPtr sub_nav_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Subscription<adas_msgs::msg::TrackedObjectArray>::SharedPtr sub_objects_;

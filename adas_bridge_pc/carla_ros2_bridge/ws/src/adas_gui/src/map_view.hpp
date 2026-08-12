@@ -55,13 +55,19 @@ class MapView : public QWidget {
     kLayerEgoHalo    = 1u << 1,    // 自车发光晕（演示时压眼，默认关）
     kLayerSnapRadius = 1u << 2,    // 8m 吸附半径 ring
     kLayerGrid       = 1u << 3,    // 淡点阵网格
-    kLayerObjects    = 1u << 4,    // 完整目标物快照（默认关）
+    // P1.F: 场景 actor 渲染路径已彻底移除。CARLA 才是唯一场景展示端；
+    // GUI 仅画 Town 路网、自车、路线、目标、限速、路口。
   };
   static constexpr quint32 kDefaultLayers = kLayerGrid;  // 演示风：默认无尾迹、无 halo、无 snap ring
 
   public slots:
    void setLanes(const QVector<adas::gui::GuiLane>& lanes, const QString& map_id);
    void setMapMetadata(const QString& map_id, const QString& map_hash);
+   // P1.F: 地图切换时清空路线、目标、相机，确保不会残留旧会话视觉。
+   void clearForMapChange();
+
+  // P1.F: 单元测试访问器，不参与 GUI 渲染。
+  int routeSizeForTest() const { return route_.size(); }
    void setRoute(const QPolygonF& route);
    void setVehicle(double x, double y, double yaw_rad, bool valid);
    void setObjects(const QVector<adas::gui::GuiMapObject>& objects);

@@ -42,6 +42,12 @@ double polyline_length(const std::vector<MapPoint>& points) {
   return result;
 }
 
+bool bind_or_accept_run_id(std::string& expected, const std::string& incoming) {
+  if (incoming.empty()) return false;
+  if (expected.empty()) expected = incoming;
+  return expected == incoming;
+}
+
 bool LaneGraph::add_lane(const LaneSegment& lane) {
   if (lane.id == kInvalidLane || lane.centerline.size() < 2 ||
       lane.speed_limit_mps <= 0.0 || lanes_.count(lane.id) != 0U) {
@@ -239,6 +245,12 @@ bool ReplanPolicy::request(double deviation_m, double now_s) {
 void ReplanPolicy::reset() {
   attempted_ = false;
   last_attempt_s_ = 0.0;
+}
+
+bool should_clear_request_on_failure(bool is_replan, bool previous_route_valid) {
+  // 见头文件策略说明：首次规划失败或重规划失败但无旧路线可用时，必须清空请求。
+  if (!is_replan) return true;
+  return !previous_route_valid;
 }
 
 }  // namespace adas::planning

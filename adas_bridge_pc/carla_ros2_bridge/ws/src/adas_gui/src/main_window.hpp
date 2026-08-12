@@ -122,6 +122,9 @@ class MainWindow : public QMainWindow {
   bool auto_navigation_retry_pending_{false};
   int auto_navigation_attempts_{0};
   quint64 auto_navigation_generation_{0};
+  // P1.H: 一旦本会话已经自动下发过目标，立刻置为当前 run_id，阻止
+  // tryAutoNavigation 二次发送；run_id 切换后该值被覆盖。
+  QString auto_navigation_submitted_for_run_id_;
   quint64 latest_map_generation_{0};
   quint64 latest_ego_generation_{0};
   double auto_navigation_distance_m_{0.0};

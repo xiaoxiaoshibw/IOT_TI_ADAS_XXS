@@ -13,6 +13,8 @@ find_package(rclcpp_components REQUIRED)
 find_package(adas_msgs REQUIRED)
 find_package(adas_common REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 # 纯算法核心（无 ROS 依赖，可独立单测）
 add_library(${PROJECT_NAME}_core src/sim_vehicle_core.cpp)
@@ -26,7 +28,8 @@ ament_target_dependencies(${PROJECT_NAME}_core adas_common)
 add_library(${PROJECT_NAME}_node SHARED src/sim_vehicle_node.cpp)
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 ament_target_dependencies(${PROJECT_NAME}_node
-  rclcpp rclcpp_components adas_msgs adas_common nav_msgs)
+  rclcpp rclcpp_components adas_msgs adas_common nav_msgs
+  geometry_msgs tf2_ros)
 rclcpp_components_register_node(${PROJECT_NAME}_node
   PLUGIN "adas::sim::SimVehicleNode"
   EXECUTABLE sim_vehicle_node)

@@ -23,6 +23,7 @@ def _actions(context):
     scenario_file = LaunchConfiguration('scenario_file').perform(context)
     scenario_id = LaunchConfiguration('scenario_id').perform(context)
     seed_text = LaunchConfiguration('seed').perform(context)
+    run_id = LaunchConfiguration('run_id').perform(context).strip()
     extras = ([scenario] if scenario and not (scenario_file or scenario_id)
               else [])
     overlay = None
@@ -35,7 +36,7 @@ def _actions(context):
             metadata['source_file']))
     actions = adas_nodes(
         sim_extra_params=extras, scenario_overlay=overlay,
-        include_sim=True, include_navigation=True)
+        include_sim=True, include_navigation=True, run_id=run_id)
     actions.append(Node(
         package='adas_can_gateway', executable='can_gateway_node',
         name='can_gateway', output='screen',
@@ -58,5 +59,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'seed', default_value='',
             description='optional unsigned deterministic seed override'),
+        DeclareLaunchArgument(
+            'run_id', default_value='',
+            description='Expected non-empty run session ID'),
         OpaqueFunction(function=_actions),
     ])

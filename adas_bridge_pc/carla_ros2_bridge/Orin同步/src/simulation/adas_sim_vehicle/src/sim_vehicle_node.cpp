@@ -10,9 +10,12 @@
 #include "adas_msgs/msg/steering_report.hpp"
 #include "adas_msgs/msg/tracked_object_array.hpp"
 #include "adas_sim_vehicle/sim_vehicle_core.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
+#include "tf2_ros/static_transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.h"
 
 namespace adas::sim {
 
@@ -177,6 +180,21 @@ class SimVehicleNode : public rclcpp::Node {
     pub_objects_ = create_publisher<adas_msgs::msg::TrackedObjectArray>(
         "/adas/perception/objects_raw", sensor_qos);
 
+    // 静态 TF：map -> odom。SIL 链路里"地图世界系"与"里程计原点"重合；
+    // 一次性广播 identity，后续 tf2_ros / test_chain_test 直接看到 map->odom->base_link。
+    static_tf_broadcaster_ =
+        std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+    geometry_msgs::msg::TransformStamped static_map_odom;
+    static_map_odom.header.stamp = this->now();
+    static_map_odom.header.frame_id = "map";
+    static_map_odom.child_frame_id = "odom";
+    static_map_odom.transform.rotation.w = 1.0;
+    static_tf_broadcaster_->sendTransform(static_map_odom);
+
+    // 动态 TF：odom -> base_link。每次仿真 tick 与 Odometry 共享时间戳、
+    // 位姿和姿态（用同一四元数），保证 tf_chain_test 连续成功且数值有限。
+    dynamic_tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
     sub_actuation_ = create_subscription<adas_msgs::msg::ActuationCommand>(
         "/adas/vehicle/actuation_cmd", rclcpp::QoS(1),
         [this](adas_msgs::msg::ActuationCommand::ConstSharedPtr msg) {
@@ -209,6 +227,26 @@ class SimVehicleNode : public rclcpp::Node {
     odom.twist.twist.linear.x = s.velocity_mps;
     odom.twist.twist.angular.z = s.yaw_rate_rps;
     pub_odom_->publish(odom);
+
+    // 动态 odom -> base_link：与 Odometry 共享同时间戳 / 位姿 / 姿态。
+    // 四元数来自 sin/cos 配对，归一化且数值有限；此处再显式归一化一次，
+    // 避免下游 TF lookup 出现非单位四元数警告。
+    geometry_msgs::msg::TransformStamped odom_base;
+    odom_base.header.stamp = now;
+    odom_base.header.frame_id = "odom";
+    odom_base.child_frame_id = "base_link";
+    odom_base.transform.translation.x = s.pose.x;
+    odom_base.transform.translation.y = s.pose.y;
+    odom_base.transform.translation.z = 0.0;
+    const double qz = std::sin(s.pose.yaw / 2.0);
+    const double qw = std::cos(s.pose.yaw / 2.0);
+    odom_base.transform.rotation.x = 0.0;
+    odom_base.transform.rotation.y = 0.0;
+    odom_base.transform.rotation.z = qz;
+    odom_base.transform.rotation.w = qw;
+    if (dynamic_tf_broadcaster_) {
+      dynamic_tf_broadcaster_->sendTransform(odom_base);
+    }
 
     const auto ls = core_->lane_state();
     adas_msgs::msg::LaneState lane;
@@ -268,6 +306,8 @@ class SimVehicleNode : public rclcpp::Node {
   rclcpp::Publisher<adas_msgs::msg::TrackedObjectArray>::SharedPtr pub_objects_;
   rclcpp::Subscription<adas_msgs::msg::ActuationCommand>::SharedPtr sub_actuation_;
   rclcpp::TimerBase::SharedPtr timer_;
+  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> dynamic_tf_broadcaster_;
 };
 
 }  // namespace adas::sim

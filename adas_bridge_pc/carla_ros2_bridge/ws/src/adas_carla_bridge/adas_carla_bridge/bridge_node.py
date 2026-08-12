@@ -52,12 +52,14 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from tf2_ros.transform_broadcaster import TransformBroadcaster
 
 from adas_msgs.msg import (ActuationCommand, AebStatus, BehaviorState,
-                           LaneConnection, LaneGraph, LaneState, MapLane,
-                           NavigationStatus, SafetyStatus, SteeringReport,
-                           TrackedObject, TrackedObjectArray)
-from geometry_msgs.msg import Pose
+                           GlobalRoute, LaneConnection, LaneGraph, LaneState,
+                           MapLane, NavigationStatus, SafetyStatus,
+                           SteeringReport, TrackedObject, TrackedObjectArray)
+from geometry_msgs.msg import Pose, TransformStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import String
 
@@ -80,6 +82,7 @@ TOPIC_MAP = '/adas/map/lane_graph'
 TOPIC_FAULT_COMMAND = '/adas/_debug/fault_inject_cmd'
 TOPIC_FAULT_ACK = '/adas/_debug/fault_inject_ack'
 TOPIC_ROUTE = '/adas/planning/global_route'
+TOPIC_NAV_ROUTE = '/adas/navigation/global_route'
 TOPIC_NAV_STATUS = '/adas/navigation/status'
 TOPIC_BEHAVIOR = '/adas/planning/behavior'
 TOPIC_AEB_STATUS = '/adas/control/aeb/status'
@@ -103,6 +106,14 @@ SENSOR_QOS.reliability = QoSReliabilityPolicy.RELIABLE
 # 执行链路丢失时的安全制动兜底（归一化制动量）
 FAILSAFE_BRAKE = 1.0
 VALID_RECOVERY_FRAMES = 3
+
+# P0.D: 视觉/状态 fresh 性默认阈值。route/goal/behavior/AEB/safety 任一
+# 字段超过此时长未更新，即认为上游断流，桥实例必须把对应 overlay 清空
+# 或把状态值替换为 STALE/UNKNOWN，禁止继续显示旧值。
+# 4 × stale_timeout_s 是经验值（控制回路通常 10–50 Hz，4 倍默认 0.5 s
+# 下界为 2 s，足以区分短暂阻塞与真实断流）。
+def _default_freshness_timeout_s(stale_timeout_s: float) -> float:
+    return max(1.0, 4.0 * float(stale_timeout_s))
 
 
 def validate_actuation_values(throttle, brake, steer):
@@ -129,6 +140,10 @@ class CarlaBridgeNode(Node):
         self.args = args
         self._lock = threading.Lock()
         self._act = {'throttle': 0.0, 'brake': 0.0, 'steer': 0.0, 'rx_t': 0.0}
+        # P0.C: 本次桥实例持有的 run_id；缺省从 CLI 拿，否则自动生成 UUID v4。
+        # GUI 与本桥在 launch 时通过 --run-id 同步，链路消费端据此过滤。
+        self._current_run_id = (
+            str(getattr(args, 'run_id', '') or '').strip() or str(uuid.uuid4()))
         self._stale_timeout_s = float(args.stale_timeout_s)
         if not math.isfinite(self._stale_timeout_s) or self._stale_timeout_s <= 0.0:
             raise SystemExit('--stale-timeout-s 必须是有限正数')
@@ -140,11 +155,17 @@ class CarlaBridgeNode(Node):
         # CARLA 是唯一场景展示端。以下缓存由 ROS 回调更新，由主 CARLA tick
         # 线程读取后交给 CarlaWorld 绘制，避免从 executor 线程调用 CARLA API。
         self._visual_lock = threading.Lock()
+        self._freshness_timeout_s = _default_freshness_timeout_s(self._stale_timeout_s)
         self._visual = {
-            'route': [], 'nav_state': 0, 'remaining_m': float('nan'),
-            'behavior_state': -1, 'target_speed_mps': float('nan'),
-            'aeb_state': 0, 'ttc_s': float('nan'), 'safety_level': 0,
-            'pending_goal': None,
+            'route': [], 'route_seen_t': 0.0,
+            'nav_state': 0, 'status_seen_t': 0.0,
+            'remaining_m': float('nan'),
+            'behavior_state': -1, 'behavior_seen_t': 0.0,
+            'target_speed_mps': float('nan'),
+            'aeb_state': 0, 'aeb_seen_t': 0.0,
+            'ttc_s': float('nan'),
+            'safety_level': 0, 'safety_seen_t': 0.0,
+            'pending_goal': None, 'goal_seen_t': 0.0,
         }
 
         self.pub_odom = self.create_publisher(Odometry, TOPIC_ODOM, SENSOR_QOS)
@@ -161,7 +182,11 @@ class CarlaBridgeNode(Node):
         visual_qos = QoSProfile(depth=1)
         visual_qos.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
         visual_qos.reliability = QoSReliabilityPolicy.RELIABLE
-        self.create_subscription(Path, TOPIC_ROUTE, self._route_cb, visual_qos)
+        self.create_subscription(Path, TOPIC_ROUTE, self._legacy_path_route_cb, visual_qos)
+        # P0.C: 带 run_id 的 GlobalRoute 才是当前会话的权威路线。Path
+        # 订阅保留作为兜底；GlobalRoute 在时优先使用。
+        self.create_subscription(GlobalRoute, TOPIC_NAV_ROUTE,
+                                 self._nav_route_cb, visual_qos)
         self.create_subscription(NavigationStatus, TOPIC_NAV_STATUS,
                                  self._nav_status_cb, visual_qos)
         self.create_subscription(BehaviorState, TOPIC_BEHAVIOR,
@@ -181,6 +206,8 @@ class CarlaBridgeNode(Node):
         SLOW_RATE = 0.05
         self._timer_lane = self.create_timer(SLOW_RATE, self._publish_lane)
         self._timer_objects = self.create_timer(SLOW_RATE, self._publish_objects)
+        # P0.D: 1 Hz 看门狗，巡检 overlay/state 是否 fresh。
+        self._timer_freshness = self.create_timer(1.0, self._freshness_watchdog)
 
         if args.control_source in ('ros2', 'can_cpp'):
             topic = (args.can_cpp_topic if args.control_source == 'can_cpp'
@@ -209,6 +236,20 @@ class CarlaBridgeNode(Node):
             % (args.scenario, args.control_source,
                os.environ.get('ROS_DOMAIN_ID', '0')))
 
+        # 静态 TF：map -> odom。CARLA 链路里地图世界系即等于里程计原点，
+        # 与 SIL 节点行为一致；tf_chain_test 才看得到 map->odom->base_link。
+        self._static_tf_broadcaster = StaticTransformBroadcaster(self)
+        static_map_odom = TransformStamped()
+        static_map_odom.header.stamp = self.get_clock().now().to_msg()
+        static_map_odom.header.frame_id = 'map'
+        static_map_odom.child_frame_id = 'odom'
+        static_map_odom.transform.rotation.w = 1.0
+        self._static_tf_broadcaster.sendTransform(static_map_odom)
+
+        # 动态 TF：odom -> base_link。每帧 odom 同步广播，保证下游 TF lookup
+        # 连续成功且数值有限（tf_chain_test 直接消费）。
+        self._dynamic_tf_broadcaster = TransformBroadcaster(self)
+
     def _actuation_cb(self, msg):
         valid, reason = validate_actuation_values(msg.throttle, msg.brake, msg.steer)
         with self._lock:
@@ -231,13 +272,47 @@ class CarlaBridgeNode(Node):
             self.get_logger().error(
                 '拒绝非法执行帧：%s（累计 %d）' % (reason, invalid_count))
 
-    def _route_cb(self, msg):
+    def _accept_run_id(self, msg_run_id: str) -> bool:
+        """P0.C: 消费端会话过滤。空 run_id 一律拒绝（不含通配语义）。"""
+        if not msg_run_id or not self._current_run_id:
+            return False
+        return msg_run_id == self._current_run_id
+
+    def _legacy_path_route_cb(self, msg):
+        # P0.C: 旧 Path 话题保留作为兜底，但不携带 run_id，仅在尚未收到
+        # 带 run_id 的 GlobalRoute 之前用于绘制路线；一旦 GlobalRoute 被采纳
+        # 后续会被覆盖。
         points = [(float(p.pose.position.x), float(p.pose.position.y))
                   for p in msg.poses
                   if math.isfinite(float(p.pose.position.x)) and
                   math.isfinite(float(p.pose.position.y))]
-        # 大地图路径限制绘制点数，保留首尾点并均匀抽样，避免 debug draw
-        # 占满 CARLA RPC 队列。
+        if len(points) > 300:
+            endpoint = points[-1]
+            stride = int(math.ceil(len(points) / 300.0))
+            points = points[::stride]
+            if points[-1] != endpoint:
+                points.append(endpoint)
+        with self._visual_lock:
+            # 仅在尚未确认有 run_id 路由时使用 Path；后续 GlobalRoute
+            # 到达会覆盖。空 points 表示 Path 已清空，GlobalRoute 自然胜出。
+            if not self._visual.get('_route_source_locked', False):
+                self._visual['route'] = points
+                self._visual['route_seen_t'] = time.monotonic()
+
+    def _nav_route_cb(self, msg):
+        # P0.C: 带 run_id 的 GlobalRoute 是当前会话路线；空 run_id 直接丢弃。
+        if not self._accept_run_id(getattr(msg, 'run_id', '')):
+            return
+        # 非 VALID 状态视为清空指令（INVALID/FAILED/CANCELLED/ARRIVED）。
+        if int(msg.status) != GlobalRoute.STATUS_VALID or len(msg.points) < 2:
+            with self._visual_lock:
+                self._visual['route'] = []
+                self._visual['route_seen_t'] = 0.0
+                self._visual['_route_source_locked'] = False
+            return
+        points = [(float(p.x), float(p.y))
+                  for p in msg.points
+                  if math.isfinite(float(p.x)) and math.isfinite(float(p.y))]
         if len(points) > 300:
             endpoint = points[-1]
             stride = int(math.ceil(len(points) / 300.0))
@@ -246,30 +321,41 @@ class CarlaBridgeNode(Node):
                 points.append(endpoint)
         with self._visual_lock:
             self._visual['route'] = points
+            self._visual['route_seen_t'] = time.monotonic()
+            self._visual['_route_source_locked'] = True
 
     def _nav_status_cb(self, msg):
+        # P0.C: 旧会话残留的 status 不应继续作为当前导航状态。
+        if not self._accept_run_id(getattr(msg, 'run_id', '')):
+            return
         with self._visual_lock:
             self._visual['nav_state'] = int(msg.state)
             self._visual['remaining_m'] = float(msg.remaining_distance_m)
+            self._visual['status_seen_t'] = time.monotonic()
             if int(msg.state) in (NavigationStatus.ARRIVED,
                                   NavigationStatus.FAILED,
                                   NavigationStatus.CANCELED):
                 self._visual['route'] = []
                 self._visual['pending_goal'] = None
+                self._visual['route_seen_t'] = 0.0
+                self._visual['goal_seen_t'] = 0.0
 
     def _behavior_cb(self, msg):
         with self._visual_lock:
             self._visual['behavior_state'] = int(msg.state)
             self._visual['target_speed_mps'] = float(msg.target_speed_mps)
+            self._visual['behavior_seen_t'] = time.monotonic()
 
     def _aeb_cb(self, msg):
         with self._visual_lock:
             self._visual['aeb_state'] = int(msg.state)
             self._visual['ttc_s'] = float(msg.ttc_s)
+            self._visual['aeb_seen_t'] = time.monotonic()
 
     def _safety_cb(self, msg):
         with self._visual_lock:
             self._visual['safety_level'] = int(msg.overall)
+            self._visual['safety_seen_t'] = time.monotonic()
 
     def _visualization_command_cb(self, msg):
         try:
@@ -290,8 +376,10 @@ class CarlaBridgeNode(Node):
             return
         with self._visual_lock:
             self._visual['pending_goal'] = goal
+            self._visual['goal_seen_t'] = time.monotonic() if goal is not None else 0.0
             if goal is None:
                 self._visual['route'] = []
+                self._visual['route_seen_t'] = 0.0
 
     def get_visualization_state(self):
         """返回可由 CARLA 主线程安全消费的展示快照。"""
@@ -299,6 +387,44 @@ class CarlaBridgeNode(Node):
             state = dict(self._visual)
             state['route'] = list(self._visual['route'])
             return state
+
+    def _freshness_watchdog(self):
+        """P0.D: 巡检各字段 last_seen 时间戳，超时即清空或替换为 STALE/UNKNOWN。"""
+        now = time.monotonic()
+        timeout = self._freshness_timeout_s
+        with self._visual_lock:
+            # route / goal：超时清空 overlay，并把对应 seen_t 归零，避免下次
+            # 巡检重复处理同一超时事件。
+            if self._visual['route'] and now - self._visual['route_seen_t'] > timeout:
+                self._visual['route'] = []
+                self._visual['route_seen_t'] = 0.0
+            if (self._visual['pending_goal'] is not None
+                    and self._visual['goal_seen_t'] > 0.0
+                    and now - self._visual['goal_seen_t'] > timeout):
+                self._visual['pending_goal'] = None
+                self._visual['goal_seen_t'] = 0.0
+            # navigation status：超时置为 IDLE + NaN，并把 status_seen_t 归零。
+            if (self._visual['status_seen_t'] > 0.0
+                    and now - self._visual['status_seen_t'] > timeout):
+                self._visual['nav_state'] = NavigationStatus.IDLE
+                self._visual['remaining_m'] = float('nan')
+                self._visual['status_seen_t'] = 0.0
+            # 状态字段：超时置为 STALE/UNKNOWN，避免继续显示陈旧值。
+            # 注意：seen_t 初始化为 0.0，必须显式 > 0.0 才视作"已观察过"。
+            if (self._visual['behavior_seen_t'] > 0.0
+                    and now - self._visual['behavior_seen_t'] > timeout):
+                self._visual['behavior_state'] = -1
+                self._visual['target_speed_mps'] = float('nan')
+                self._visual['behavior_seen_t'] = 0.0
+            if (self._visual['aeb_seen_t'] > 0.0
+                    and now - self._visual['aeb_seen_t'] > timeout):
+                self._visual['aeb_state'] = 0
+                self._visual['ttc_s'] = float('nan')
+                self._visual['aeb_seen_t'] = 0.0
+            if (self._visual['safety_seen_t'] > 0.0
+                    and now - self._visual['safety_seen_t'] > timeout):
+                self._visual['safety_level'] = 0
+                self._visual['safety_seen_t'] = 0.0
 
     def _fault_inject_cb(self, msg):
         request_id = ''
@@ -349,6 +475,8 @@ class CarlaBridgeNode(Node):
         msg = LaneGraph()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
+        # P0.C: producer 端把本桥的 run_id 写入 LaneGraph，作为后续消费端的会话基准。
+        msg.run_id = self._current_run_id
         msg.map_id = graph_dict['map_id']
         msg.map_hash = graph_dict['map_hash']
         n_conn = 0
@@ -399,9 +527,32 @@ class CarlaBridgeNode(Node):
         return act
 
     def close(self):
+        # P0.D: 幂等 stop cleanup。任何字段都允许重入且不得报错。
         if self._can_receiver is not None:
-            self._can_receiver.close()
+            try:
+                self._can_receiver.close()
+            except Exception:  # noqa: BLE001 — 关闭期最严格"清干净"原则
+                pass
             self._can_receiver = None
+        # 取消 freshness watchdog timer；ROS destroy_node 也会停，但显式销毁更稳。
+        timer = getattr(self, '_timer_freshness', None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        # 清空 overlay/state 缓存；下一次启动从零开始，杜绝旧值残留。
+        with self._visual_lock:
+            for key in ('route', 'pending_goal'):
+                self._visual[key] = [] if key == 'route' else None
+            for key in ('nav_state', 'behavior_state', 'aeb_state', 'safety_level'):
+                self._visual[key] = 0
+            self._visual['behavior_state'] = -1
+            for key in ('remaining_m', 'target_speed_mps', 'ttc_s'):
+                self._visual[key] = float('nan')
+            for key in ('route_seen_t', 'status_seen_t', 'behavior_seen_t',
+                        'aeb_seen_t', 'safety_seen_t', 'goal_seen_t'):
+                self._visual[key] = 0.0
 
     def publish_frame(self, frame):
         now = self.get_clock().now().to_msg()
@@ -422,6 +573,30 @@ class CarlaBridgeNode(Node):
         odom.twist.twist.linear.x = ego['v']
         odom.twist.twist.angular.z = ego['yaw_rate']
         self.pub_odom.publish(odom)
+
+        # 动态 odom -> base_link：与同帧 Odometry 共享时间戳/位姿/姿态，
+        # 四元数来自 Odometry orientation（已归一化），保证 tf_chain_test
+        # 在 /tf 上能连续查到 map -> odom -> base_link 全链。
+        odom_base = TransformStamped()
+        odom_base.header.stamp = now
+        odom_base.header.frame_id = 'odom'
+        odom_base.child_frame_id = 'base_link'
+        odom_base.transform.translation.x = float(ego['x'])
+        odom_base.transform.translation.y = float(ego['y'])
+        odom_base.transform.translation.z = 0.0
+        odom_base.transform.rotation = odom.pose.pose.orientation
+        # 四元数必须有限；ego yaw 来自 CARLA，是 math.sin/cos 配对构造的，
+        # 数值上必然有限；这里仍做一次防御，避免上游 NaN/Inf 污染 tf lookup。
+        if not all(math.isfinite(float(v)) for v in (
+                odom_base.transform.rotation.x,
+                odom_base.transform.rotation.y,
+                odom_base.transform.rotation.z,
+                odom_base.transform.rotation.w)):
+            odom_base.transform.rotation.x = 0.0
+            odom_base.transform.rotation.y = 0.0
+            odom_base.transform.rotation.z = 0.0
+            odom_base.transform.rotation.w = 1.0
+        self._dynamic_tf_broadcaster.sendTransform(odom_base)
 
         steer = SteeringReport()
         steer.header.stamp = now
@@ -573,6 +748,8 @@ def build_arg_parser():
                         help=('control-source=can_cpp 时的 ActuationCommand 话题；'
                               '可直接使用 Orin 网关发布的 MCU 回控'))
     parser.add_argument('--carla-host', default='127.0.0.1')
+    parser.add_argument('--run-id', default='',
+                        help='P0.C 会话 run_id；空 = 桥实例启动时自动生成 UUID v4')
     parser.add_argument('--carla-port', type=int, default=2000)
     parser.add_argument('--town', default='Town04')
     parser.add_argument('--fixed-dt', type=float, default=0.02,

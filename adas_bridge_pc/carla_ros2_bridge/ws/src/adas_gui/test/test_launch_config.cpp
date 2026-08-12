@@ -100,6 +100,19 @@ TEST(LaunchConfig, CatalogLoadsDenseScenarioAndAbsoluteFile) {
   EXPECT_EQ(entry.expected_actor_count, 20);
   EXPECT_TRUE(QFileInfo(entry.file).isAbsolute());
   EXPECT_TRUE(QFileInfo::exists(entry.file));
+  EXPECT_EQ(entry.acceptance_profile, QStringLiteral("dense_overtake_v1"));
+  EXPECT_DOUBLE_EQ(entry.nav_distance_m, 200.0);
+}
+
+TEST(LaunchConfig, EveryCatalogScenarioHasUsableNavigationAndAcceptanceProfile) {
+  const auto entries = adas::gui::load_scenario_catalog();
+  ASSERT_FALSE(entries.isEmpty());
+  const auto profiles = adas::gui::scenario_workflow_ids();
+  for (const auto& entry : entries) {
+    EXPECT_GT(entry.nav_distance_m, 0.0) << entry.id.toStdString();
+    EXPECT_TRUE(profiles.contains(entry.acceptance_profile))
+        << entry.id.toStdString();
+  }
 }
 
 TEST(LaunchConfig, ScenarioFileBridgeArgumentsAreExplicit) {

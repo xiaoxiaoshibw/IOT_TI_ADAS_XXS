@@ -13,8 +13,15 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 1  # 单条 scenario JSON 仍为 v1（catalog 独立升到 v2）。
 BACKENDS = {"carla", "sil"}
+TOWNS = {"Town01", "Town02", "Town03", "Town04", "Town05",
+         "Town06", "Town07", "Town10HD"}
+ACCEPTANCE_PROFILES = {
+    "lka", "acc", "acc_stop_and_go", "acc_slow_truck", "overtake",
+    "aeb", "aeb_stationary", "aeb_pedestrian", "free",
+    "dense_overtake_v1",
+}
 CLASSIFICATIONS = {"vehicle", "pedestrian", "cyclist", "unknown"}
 LANES = {"ego", "left", "right", "crossing"}
 LEGACY_ROLES = {"lead", "pedestrian"}
@@ -218,8 +225,9 @@ def load_legacy_scenarios(repo_root: Path) -> tuple[dict[str, Any], list[str]]:
 
 def validate_catalog(catalog_path: Path, repo_root: Path) -> dict[str, Any]:
     catalog = load_json(catalog_path)
-    _require(catalog.get("schema_version") == SCHEMA_VERSION,
-             f"catalog.schema_version: expected {SCHEMA_VERSION}")
+    _require(catalog.get("schema_version") == 2,
+             f"catalog.schema_version: expected 2, got "
+             f"{catalog.get('schema_version')!r}")
     entries = catalog.get("scenarios")
     _require(isinstance(entries, list) and entries,
              "catalog.scenarios: expected a non-empty array")
@@ -252,6 +260,8 @@ def validate_catalog(catalog_path: Path, repo_root: Path) -> dict[str, Any]:
                  f"{where}.display_name: does not match scenario name")
         _require(entry.get("default_town") == data["town"],
                  f"{where}.default_town: does not match scenario town")
+        _require(entry.get("default_town") in TOWNS,
+                 f"{where}.default_town: unsupported town")
         _require(entry.get("supported_backends") == data["supported_backends"],
                  f"{where}.supported_backends: does not match scenario")
         _require(entry.get("default_seed") == data["seed"],
@@ -260,9 +270,25 @@ def validate_catalog(catalog_path: Path, repo_root: Path) -> dict[str, Any]:
                  f"{where}.expected_actor_count: does not match actor count")
         _require(isinstance(entry.get("description"), str) and entry["description"],
                  f"{where}.description: expected a non-empty string")
-        _require(isinstance(entry.get("acceptance_profile"), str) and
-                 entry["acceptance_profile"],
-                 f"{where}.acceptance_profile: expected a non-empty string")
+        _require(entry.get("acceptance_profile") in ACCEPTANCE_PROFILES,
+                 f"{where}.acceptance_profile: unknown profile")
+        nav_distance = _number(entry.get("nav_distance_m"),
+                               f"{where}.nav_distance_m")
+        _require(nav_distance > 0.0,
+                 f"{where}.nav_distance_m: must be positive")
+        _require(_number(entry.get("duration_s"), f"{where}.duration_s") ==
+                 float(data["duration_s"]),
+                 f"{where}.duration_s: does not match scenario")
+        blueprints = entry.get("actor_blueprints")
+        _require(isinstance(blueprints, list) and len(blueprints) == len(data["actors"]),
+                 f"{where}.actor_blueprints: must match actor count")
+        for actor_index, (blueprint, actor) in enumerate(zip(blueprints, data["actors"])):
+            _require(blueprint is None or
+                     (isinstance(blueprint, str) and blueprint.startswith("vehicle.")),
+                     f"{where}.actor_blueprints[{actor_index}]: invalid blueprint")
+            if "blueprint" in actor:
+                _require(blueprint == actor["blueprint"],
+                         f"{where}.actor_blueprints[{actor_index}]: does not match actor")
         _require(entry.get("operator_tunable") == [],
                  f"{where}.operator_tunable: Phase 0 requires an empty array")
         loaded[scenario_id] = data

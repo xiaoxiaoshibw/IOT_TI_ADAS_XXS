@@ -115,6 +115,17 @@ class ReplanPolicy {
 
 double polyline_length(const std::vector<MapPoint>& points);
 
+// Empty incoming IDs are never accepted. An empty expected ID binds once to
+// the first non-empty ID; a bound session never switches implicitly.
+bool bind_or_accept_run_id(std::string& expected, const std::string& incoming);
+
+// P0.B 失效恢复策略：纯函数，可独立 gtest。
+// - 首次规划失败（is_replan=false） ⇒ 清空请求（必须清除 goal 与路线）。
+// - 重规划失败 + 已有可用路线（previous_route_valid=true） ⇒ 保留旧路线，发布 DRIVING。
+// - 重规划失败且无旧路线 ⇒ 与"首次失败"行为一致：清空请求。
+// 返回 false ⇒ 节点应当 clear_request_state()；返回 true ⇒ 仅保留旧路线。
+bool should_clear_request_on_failure(bool is_replan, bool previous_route_valid);
+
 }  // namespace adas::planning
 
 #endif  // ADAS_GLOBAL_PLANNER__GLOBAL_PLANNER_CORE_HPP_

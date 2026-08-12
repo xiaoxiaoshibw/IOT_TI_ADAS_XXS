@@ -28,6 +28,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MapLane.msg"
   "msg/LaneGraph.msg"
   "msg/NavigationStatus.msg"
+  "msg/GlobalRoute.msg"
+  "msg/RoutePoint.msg"
   "msg/McuStatus.msg"
   "srv/ChangeCommandSource.srv"
   "srv/SetNavigationGoal.srv"

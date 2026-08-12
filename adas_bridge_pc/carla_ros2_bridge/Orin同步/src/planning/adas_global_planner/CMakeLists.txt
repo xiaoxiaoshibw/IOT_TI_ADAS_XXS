@@ -45,6 +45,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_${PROJECT_NAME}_core test/test_global_planner_core.cpp)
   target_link_libraries(test_${PROJECT_NAME}_core ${PROJECT_NAME}_core)
+  ament_add_gtest(test_planner_failure_recovery test/test_planner_failure_recovery.cpp)
+  target_link_libraries(test_planner_failure_recovery ${PROJECT_NAME}_core)
 endif()
 
 ament_package()

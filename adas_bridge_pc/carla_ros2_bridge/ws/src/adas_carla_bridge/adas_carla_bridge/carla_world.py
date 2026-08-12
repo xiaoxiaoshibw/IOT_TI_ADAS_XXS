@@ -901,6 +901,9 @@ class CarlaWorld:
                 self.ego.apply_control(self.carla.VehicleControl(brake=1.0))
             except RuntimeError:
                 pass
+        # P0.D: 先清 debug overlay，再清理本桥创建的 actor；最后还原设置。
+        # 多次调用必须安全。
+        self.clear_overlays()
         cleanup_error = None
         try:
             self._destroy_spawned(flush=True)
@@ -913,3 +916,18 @@ class CarlaWorld:
                 pass
         if cleanup_error is not None:
             raise cleanup_error
+
+    def clear_overlays(self):
+        """P0.D: 幂等清空所有由本桥绘制的 debug primitive。
+
+        CARLA 没有按"actor 全部销毁"的清屏 API，调用 world.debug.clear() 才
+        能一次性清掉所有持久调试元素。bridge 停止或 session 结束时必须调用，
+        避免旧会话的 goal/route 残留在 CARLA 视图中。"""
+        try:
+            if getattr(self, 'world', None) is not None:
+                self.world.debug.clear()
+        except RuntimeError:
+            # 已销毁或无渲染时静默；幂等是本方法的硬性约束。
+            pass
+        finally:
+            self._last_visualization_t = float('-inf')

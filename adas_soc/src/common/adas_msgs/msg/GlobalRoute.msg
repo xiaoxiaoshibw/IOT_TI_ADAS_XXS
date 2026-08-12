@@ -7,6 +7,8 @@ uint8 STATUS_FAILED=4
 
 std_msgs/Header header
 uint32 route_id
+# P0.C 会话隔离：消费端只在 run_id 一致时采纳，否则视为旧会话残留。
+string run_id
 string frame_id                  # 与 header.frame_id 一致，供非 Header 消费端显式校验
 string map_id
 string map_hash

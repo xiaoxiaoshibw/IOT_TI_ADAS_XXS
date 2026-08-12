@@ -656,7 +656,8 @@ void ProcessManager::start_local_soc_stack(const LaunchConfig& config) {
   }
   emit stackProgress(QStringLiteral("local_soc"),
                      QStringLiteral("启动本机 SoC 控制栈（CARLA 联合模式）…"));
-  soc_.start(script, {QStringLiteral("--scenario"), config.scenario});
+  soc_.start(script, {QStringLiteral("--scenario"), config.scenario,
+                      QStringLiteral("--run-id"), config.run_id});
 }
 
 void ProcessManager::setExternalCarlaDetected(bool detected) {
