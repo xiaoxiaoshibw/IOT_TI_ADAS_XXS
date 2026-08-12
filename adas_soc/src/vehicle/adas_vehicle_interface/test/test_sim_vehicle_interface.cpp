@@ -31,6 +31,30 @@ TEST(SimVehicleInterface, NegativeAccelIsBrakeOnly) {
   EXPECT_NEAR(act.throttle, 0.0, 1e-9);
 }
 
+TEST(SimVehicleInterface, DragCompensationMaintainsCruiseThrottle) {
+  av::SimVehicleInterfaceParams params;
+  params.drag_compensation_per_speed = 0.1;
+  av::SimVehicleInterface vi(params);
+  ac::KinematicState state;
+  state.velocity_mps = 15.0;
+
+  const auto act = vi.apply(cmd_of(0.0, 0.0), state);
+  EXPECT_NEAR(act.throttle, 0.5, 1e-9);
+  EXPECT_NEAR(act.brake, 0.0, 1e-9);
+}
+
+TEST(SimVehicleInterface, DragCompensationDoesNotWeakenBraking) {
+  av::SimVehicleInterfaceParams params;
+  params.drag_compensation_per_speed = 0.1;
+  av::SimVehicleInterface vi(params);
+  ac::KinematicState state;
+  state.velocity_mps = 15.0;
+
+  const auto act = vi.apply(cmd_of(0.0, -4.0), state);
+  EXPECT_NEAR(act.throttle, 0.0, 1e-9);
+  EXPECT_NEAR(act.brake, 0.5, 1e-9);
+}
+
 TEST(SimVehicleInterface, SteerNormalizedAndClamped) {
   av::SimVehicleInterface vi((av::SimVehicleInterfaceParams()));  // max_steer=0.6
   EXPECT_NEAR(vi.apply(cmd_of(0.3, 0.0), {}).steer, 0.5, 1e-9);

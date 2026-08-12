@@ -40,8 +40,9 @@ def scenario_parameter_files(scenario_id):
 def _setup(context):
     scenario_id = LaunchConfiguration('scenario_id').perform(context).strip()
     run_id = LaunchConfiguration('run_id').perform(context).strip()
-    overlays = scenario_parameter_files(scenario_id)
-    overlay_text = ','.join(overlays) if overlays else 'baseline'
+    scenario_overlays = scenario_parameter_files(scenario_id)
+    overlays = ['carla_vehicle_interface.yaml', *scenario_overlays]
+    overlay_text = ','.join(scenario_overlays) if scenario_overlays else 'baseline'
     return [
         LogInfo(msg='[scenario] CARLA SoC profile: %s -> %s' %
                 (scenario_id, overlay_text)),

@@ -2,6 +2,7 @@
 #include "adas_vehicle_interface/sim_vehicle_interface.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace adas::vehicle {
 
@@ -10,11 +11,14 @@ SimVehicleInterface::SimVehicleInterface(const SimVehicleInterfaceParams& params
 
 common::ActuationData SimVehicleInterface::apply(const common::ControlData& cmd,
                                                  const common::KinematicState& state) {
-  (void)state;  // 线性映射不需要状态；标定查表实现（M6）会用到速度
   common::ActuationData act;
   const double a = cmd.longitudinal.acceleration_mps2;
   if (a >= 0.0) {
-    act.throttle = std::clamp(a / params_.max_accel_mps2, 0.0, 1.0);
+    const double speed = std::isfinite(state.velocity_mps)
+                             ? std::max(0.0, state.velocity_mps)
+                             : 0.0;
+    const double compensated_accel = a + params_.drag_compensation_per_speed * speed;
+    act.throttle = std::clamp(compensated_accel / params_.max_accel_mps2, 0.0, 1.0);
     act.brake = 0.0;
   } else {
     act.throttle = 0.0;

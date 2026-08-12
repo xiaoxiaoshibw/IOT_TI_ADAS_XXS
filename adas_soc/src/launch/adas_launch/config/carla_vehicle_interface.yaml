@@ -1,0 +1,7 @@
+# CARLA applies normalized pedal position rather than requested net acceleration.
+# Compensate its steady rolling/aero loss so zero requested acceleration can
+# maintain cruise speed instead of repeatedly falling back into the accel profile.
+vehicle_interface:
+  ros__parameters:
+    sim:
+      drag_compensation_per_speed: 0.1

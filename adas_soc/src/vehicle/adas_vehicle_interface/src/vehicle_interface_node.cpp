@@ -35,6 +35,7 @@ class VehicleInterfaceNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter<double>("sim.max_accel_mps2", 3.0);
     declare_parameter<double>("sim.max_decel_mps2", 8.0);
     declare_parameter<double>("sim.max_steer_rad", 0.6);
+    declare_parameter<double>("sim.drag_compensation_per_speed", 0.0);
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
@@ -58,9 +59,13 @@ class VehicleInterfaceNode : public rclcpp_lifecycle::LifecycleNode {
       p.max_accel_mps2 = get_parameter("sim.max_accel_mps2").as_double();
       p.max_decel_mps2 = get_parameter("sim.max_decel_mps2").as_double();
       p.max_steer_rad = get_parameter("sim.max_steer_rad").as_double();
+      p.drag_compensation_per_speed =
+          get_parameter("sim.drag_compensation_per_speed").as_double();
       common::require_positive("sim.max_accel_mps2", p.max_accel_mps2);
       common::require_positive("sim.max_decel_mps2", p.max_decel_mps2);
       common::require_positive("sim.max_steer_rad", p.max_steer_rad);
+      common::require_nonnegative("sim.drag_compensation_per_speed",
+                                  p.drag_compensation_per_speed);
       impl_ = std::make_unique<SimVehicleInterface>(p);
       adapter_ = adapter;
 

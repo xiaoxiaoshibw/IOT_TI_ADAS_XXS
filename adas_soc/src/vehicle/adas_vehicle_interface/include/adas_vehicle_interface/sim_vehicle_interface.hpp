@@ -12,6 +12,7 @@ struct SimVehicleInterfaceParams {
   double max_accel_mps2{3.0};   // 油门=1 对应的加速度
   double max_decel_mps2{8.0};   // 制动=1 对应的减速度
   double max_steer_rad{0.6};    // steer=±1 对应的前轮转角
+  double drag_compensation_per_speed{0.0};  // 巡航阻力补偿 [m/s² per m/s]
 };
 
 class SimVehicleInterface : public VehicleInterfaceBase {
