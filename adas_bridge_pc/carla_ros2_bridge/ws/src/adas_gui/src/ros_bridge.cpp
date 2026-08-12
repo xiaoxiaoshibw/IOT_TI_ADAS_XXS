@@ -150,9 +150,13 @@ RosBridge::RosBridge(QObject* parent) : QObject(parent) {
             lanes.append(converted);
           }
           const QString map_id = QString::fromStdString(message->map_id);
-          emit mapMetadataChanged(map_id,
-                                  QString::fromStdString(message->map_hash));
+          // P0.3: 同一条 LaneGraph 消息的 (lanes, map_id, map_hash) 一并
+          // 提交。mapMetadataChanged/laneGraphChanged 仍保留,供已经
+          // 解耦的 GUI 旧逻辑使用;新消费者应改连 laneGraphReady。
+          const QString map_hash = QString::fromStdString(message->map_hash);
+          emit mapMetadataChanged(map_id, map_hash);
           emit laneGraphChanged(lanes, map_id);
+          emit laneGraphReady(lanes, map_id, map_hash);
         });
     // Path 不携带 run_id，不能参与 GUI 的正常业务路线。控制栈仍可消费
     // /adas/planning/global_route；GUI 只消费带会话字段的 GlobalRoute。

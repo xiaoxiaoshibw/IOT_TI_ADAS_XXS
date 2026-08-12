@@ -95,6 +95,7 @@ TEST(SmokeOneClickStart, HilStartAllPerformsNoHardwareAction) {
 
   LaunchConfig cfg;
   cfg.backend = QStringLiteral("hil");
+  cfg.run_id = QStringLiteral("11111111-2222-4333-8444-555555555555");
 
   mgr.startAll(cfg);
 

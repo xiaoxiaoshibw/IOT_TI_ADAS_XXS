@@ -778,28 +778,12 @@ class CarlaWorld:
 
     # ── CARLA 世界内 ADAS 展示（GUI 仅负责控制）──
 
-    @staticmethod
-    def _behavior_name(state):
-        return {
-            0: 'LANE FOLLOW', 1: 'FOLLOW LEAD', 2: 'OVERTAKE WAIT',
-            3: 'OVERTAKING', 4: 'RETURN LANE', 5: 'STOPPING',
-            6: 'EMERGENCY', 7: 'APPROACH STOP', 8: 'STOPPED',
-            9: 'WAIT LIGHT', 10: 'JUNCTION',
-        }.get(int(state), 'WAITING')
-
-    @staticmethod
-    def _nav_name(state):
-        return {
-            0: 'IDLE', 1: 'WAIT MAP', 2: 'PLANNING', 3: 'DRIVING',
-            4: 'ARRIVED', 5: 'FAILED', 6: 'CANCELED',
-        }.get(int(state), 'UNKNOWN')
-
     def _debug_location(self, ros_x, ros_y, z=0.35):
         """ROS/ADAS 右手系 (x,y) → CARLA 左手系 (x,-y)。"""
         return self.carla.Location(x=float(ros_x), y=-float(ros_y), z=float(z))
 
     def draw_adas_visualization(self, state, frame, actuation, sim_t):
-        """在 CARLA 世界绘制路线、终点、目标标签和驾驶状态。
+        """在 CARLA 世界绘制路线、终点和目标标签。
 
         所有元素使用短 lifetime 并周期刷新，路线取消或场景退出后会自然消失，
         不会把旧一次运行的 debug primitive 留在世界中。
@@ -812,8 +796,6 @@ class CarlaWorld:
         blue = self.carla.Color(40, 150, 255)
         green = self.carla.Color(40, 230, 110)
         amber = self.carla.Color(255, 180, 30)
-        red = self.carla.Color(255, 45, 45)
-        white = self.carla.Color(245, 245, 245)
 
         route = state.get('route', [])
         pending_goal = state.get('pending_goal')
@@ -857,43 +839,6 @@ class CarlaWorld:
                     persistent_lines=False)
             except RuntimeError:
                 continue
-
-        ego_tf = self.ego.get_transform()
-        ego_label = self.carla.Location(
-            x=ego_tf.location.x, y=ego_tf.location.y, z=ego_tf.location.z + 2.8)
-        speed_kph = max(0.0, float(frame['ego']['v'])) * 3.6
-        target = float(state.get('target_speed_mps', float('nan')))
-        remaining = float(state.get('remaining_m', float('nan')))
-        line1 = 'EGO  %4.1f km/h  |  %s' % (
-            speed_kph, self._behavior_name(state.get('behavior_state', -1)))
-        if math.isfinite(target):
-            line1 += '  TARGET %.0f' % (max(0.0, target) * 3.6)
-        line2 = 'NAV %s' % self._nav_name(state.get('nav_state', 0))
-        if math.isfinite(remaining) and remaining >= 0.0:
-            line2 += '  %.0f m' % remaining
-        line2 += '  |  %s' % ('CONTROL STALE' if actuation.get('stale') else
-                              'CONTROL OK')
-        aeb_state = int(state.get('aeb_state', 0))
-        safety_level = int(state.get('safety_level', 0))
-        status_color = red if aeb_state >= 3 or safety_level >= 2 else (
-            amber if aeb_state == 2 or safety_level == 1 else white)
-        debug.draw_string(ego_label, line1, draw_shadow=True, color=white,
-                          life_time=life, persistent_lines=False)
-        debug.draw_string(
-            self.carla.Location(x=ego_label.x, y=ego_label.y,
-                                z=ego_label.z + 0.45),
-            line2, draw_shadow=True, color=status_color,
-            life_time=life, persistent_lines=False)
-        if aeb_state >= 2:
-            ttc = float(state.get('ttc_s', float('nan')))
-            aeb_text = 'AEB EMERGENCY' if aeb_state >= 3 else 'AEB WARNING'
-            if math.isfinite(ttc) and ttc < 1.0e5:
-                aeb_text += '  TTC %.1fs' % ttc
-            debug.draw_string(
-                self.carla.Location(x=ego_label.x, y=ego_label.y,
-                                    z=ego_label.z + 0.9),
-                aeb_text, draw_shadow=True, color=red if aeb_state >= 3 else amber,
-                life_time=life, persistent_lines=False)
 
     def close(self):
         if self.ego is not None:

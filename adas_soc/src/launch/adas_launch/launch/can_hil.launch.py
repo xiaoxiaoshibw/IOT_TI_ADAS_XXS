@@ -23,11 +23,16 @@ def generate_launch_description():
     default_config = os.path.join(
         get_package_share_directory('adas_launch'), 'config', 'can_hil.yaml')
     config = LaunchConfiguration('params_file')
+    run_id = LaunchConfiguration('run_id')
     actions = adas_nodes(
-        sim_extra_params=['can_hil.yaml'], include_sim=False, include_navigation=True)
+        sim_extra_params=['can_hil.yaml'], include_sim=False,
+        include_navigation=True, run_id=run_id)
     actions.insert(0, DeclareLaunchArgument(
         'params_file', default_value=default_config,
         description='Host-specific CAN HIL parameter file'))
+    actions.insert(0, DeclareLaunchArgument(
+        'run_id', default_value='',
+        description='P0.C 会话 run_id；split-topology 必须显式注入规范 UUID v4'))
     gateway = Node(
         package='adas_can_gateway', executable='can_gateway_node', name='can_gateway',
         output='screen', parameters=[config])

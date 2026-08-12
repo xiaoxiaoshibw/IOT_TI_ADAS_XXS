@@ -48,6 +48,14 @@ bool bind_or_accept_run_id(std::string& expected, const std::string& incoming) {
   return expected == incoming;
 }
 
+std::uint32_t next_route_revision(std::uint32_t last) {
+  // 0 → 1;UINT32_MAX → 1(溢出回绕,且永远跳过 0);其余 last+1。
+  if (last == 0U || last == std::numeric_limits<std::uint32_t>::max()) {
+    return 1U;
+  }
+  return last + 1U;
+}
+
 bool LaneGraph::add_lane(const LaneSegment& lane) {
   if (lane.id == kInvalidLane || lane.centerline.size() < 2 ||
       lane.speed_limit_mps <= 0.0 || lanes_.count(lane.id) != 0U) {

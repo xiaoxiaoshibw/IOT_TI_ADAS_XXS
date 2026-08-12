@@ -6,10 +6,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
 import time
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,23 @@ CRITICAL_PATTERNS = (
     'local_three_machine_pc', 'mcu_sil_runner.py', 'can_gateway_node',
     'global_planner_node', 'trajectory_planner_node', '/adas_gui/adas_gui',
     'CarlaUE4', 'adas_carla_bridge/lib/adas_carla_bridge/bridge_node')
+
+# P0.C: 严格校验 UUID v4（小写）。日志目录名/时间戳/PID 都不可作为协议 run_id,
+# 必须保证 bridge / Orin launch / 报告拿到同一个规范 UUID v4。
+_UUID_V4_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+
+
+def is_canonical_uuid_v4(value):
+    if not isinstance(value, str):
+        return False
+    if not _UUID_V4_RE.match(value):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, TypeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
 
 
 def parse_args():
@@ -43,7 +62,9 @@ def parse_args():
                         help='run a real CARLA server and CARLA PC bridge')
     parser.add_argument('--carla-root', default=os.environ.get('CARLA_ROOT', ''))
     parser.add_argument('--run-id', default='',
-                        help='expected GUI/bridge/planner run session ID')
+                        help='expected GUI/bridge/planner run session ID; '
+                             'must be canonical UUID v4. Omit to auto-generate '
+                             'one (and propagate to every process + report).')
     return parser.parse_args()
 
 
@@ -74,7 +95,23 @@ def process_snapshot():
 class Run:
     def __init__(self, args):
         self.args = args
-        stamp = time.strftime('%Y%m%d_%H%M%S') + '_%d' % os.getpid()
+        # P0.C: 协议 run_id 必须全程一致。CLI 未提供时生成一次,
+        # 显式提供时必须通过规范 UUID v4 校验。日志目录名只用于路径,
+        # 绝不能作为协议 run_id 写入报告 / 进程参数。
+        explicit = str(getattr(args, 'run_id', '') or '').strip()
+        if explicit:
+            if not is_canonical_uuid_v4(explicit):
+                raise SystemExit(
+                    '--run-id 必须是规范 UUID v4（小写、version 4）')
+            self.run_id = explicit
+        else:
+            self.run_id = str(uuid.uuid4())
+        # 让 args.run_id 同步为确定值,后续命令构造都依赖 args.run_id。
+        self.args.run_id = self.run_id
+        # 用微秒+PID 保证并行单测时 log_dir 不冲突;日志目录名永远只是
+        # 路径标识,绝不参与协议 run_id。
+        stamp = time.strftime('%Y%m%d_%H%M%S_') + '%06d_%d' % (
+            (int(time.time() * 1_000_000) % 1_000_000), os.getpid())
         self.log_dir = LOG_ROOT / stamp
         self.log_dir.mkdir(parents=True)
         self.report_path = self.log_dir / 'report.json'
@@ -86,7 +123,7 @@ class Run:
         metadata = getattr(self.args, 'scenario_metadata', None) or {}
         report = {
             'schema_version': 1, 'overall': 'RUNNING',
-            'run_id': self.args.run_id or self.log_dir.name,
+            'run_id': self.run_id,
             'ros_domain_id': os.environ.get('ROS_DOMAIN_ID'),
             'can_interface': 'vcan0', 'scenario': self.args.scenario,
             'scenario_id': metadata.get('id', self.args.scenario),
@@ -388,9 +425,8 @@ def main():
                 '--control-source', 'can', '--can-transport', 'socketcan',
                 '--can-interface', 'vcan0', '--carla-host', '127.0.0.1',
                 '--carla-port', '2000', '--town', 'Town04', '--duration', '0',
-                '--log-dir', str(run.log_dir / 'carla_csv')]
-            if args.run_id:
-                pc_command += ['--run-id', args.run_id]
+                '--log-dir', str(run.log_dir / 'carla_csv'),
+                '--run-id', args.run_id]
             if args.scenario_file:
                 pc_command += [
                     '--scenario-file', args.scenario_file,
@@ -419,8 +455,8 @@ def main():
                     'seed:=' + str(args.scenario_metadata['seed'])]
             elif overlay:
                 orin_command.append('scenario:=' + overlay)
-        if args.run_id:
-            orin_command.append('run_id:=' + args.run_id)
+        # P0.C: 协议 run_id 一致性由 Run.__init__ 强制；这里无条件透传。
+        orin_command.append('run_id:=' + args.run_id)
         orin = run.start('orin', orin_command)
         gui_expected = args.gui or args.gui_offscreen
         if gui_expected:
@@ -564,7 +600,7 @@ def main():
             report['processes'] = {
                 role: {'pid': process.pid, 'log': str(run.log_dir / (role + '.log'))}
                 for role, process in run.processes.items()}
-            report['run_id'] = args.run_id or run.log_dir.name
+            report['run_id'] = run.run_id
             report['ros_domain_id'] = '145'
             report['can_interface'] = 'vcan0'
             report['scenario'] = args.scenario

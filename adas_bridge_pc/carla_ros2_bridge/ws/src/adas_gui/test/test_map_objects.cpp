@@ -111,4 +111,42 @@ TEST(NavigationGoal, RejectsOppositeDirectionLane) {
   EXPECT_EQ(goal.start_lane_id, 0);
 }
 
+TEST(MapView, SetLanesAtomicDoesNotDependOnSignalOrder) {
+  int argc = 1;
+  char app_name[] = "test_atomic_lane_graph";
+  char* argv[] = {app_name, nullptr};
+  QApplication app(argc, argv);
+  adas::gui::MapView view;
+  view.resize(640, 480);
+
+  // 旧会话里残留的 route,验证切换到新地图会被清空。
+  view.setRoute({QPointF(0.0, 0.0), QPointF(50.0, 0.0)});
+  EXPECT_EQ(view.routeSizeForTest(), 2);
+
+  // 第一次地图到达:不算 identity change,不触发 clear,但允许写入数据。
+  const QVector<adas::gui::GuiLane> lanes_a = {
+      make_lane(1, {QPointF(0.0, 0.0), QPointF(20.0, 0.0)}),
+  };
+  view.setLanesAtomic(lanes_a, QStringLiteral("Town04"),
+                      QStringLiteral("hash-a"));
+  EXPECT_EQ(view.routeSizeForTest(), 2);  // 同一会话的旧 route 仍保留
+  // 重复发送同 identity:不触发 clear;route 仍保留。
+  view.setLanesAtomic(lanes_a, QStringLiteral("Town04"),
+                      QStringLiteral("hash-a"));
+  EXPECT_EQ(view.routeSizeForTest(), 2);
+
+  // 换地图身份:必须清空旧 route。
+  const QVector<adas::gui::GuiLane> lanes_b = {
+      make_lane(1, {QPointF(0.0, 0.0), QPointF(40.0, 0.0)}),
+  };
+  view.setLanesAtomic(lanes_b, QStringLiteral("Town05"),
+                      QStringLiteral("hash-b"));
+  EXPECT_EQ(view.routeSizeForTest(), 0);
+
+  // 同 map_id 但 hash 改变:同样清空。
+  view.setLanesAtomic(lanes_a, QStringLiteral("Town04"),
+                      QStringLiteral("hash-c"));
+  EXPECT_EQ(view.routeSizeForTest(), 0);
+}
+
 }  // namespace

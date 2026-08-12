@@ -1,5 +1,7 @@
 #include "process_manager.hpp"
 
+#include "run_id_session.hpp"
+
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -680,6 +682,15 @@ void ProcessManager::setExternalBridgeDetected(bool detected) {
 }
 
 void ProcessManager::startAll(const LaunchConfig& config) {
+  // P0.C: GUI 必须先持有 RunIdSession 注入的规范 UUID v4,才能启动任何子进程；
+  // 缺/空/非法一律 fail-closed,避免两端各自生成 ID。
+  if (!adas::gui::is_canonical_uuid_v4(config.run_id)) {
+    const QString detail = QStringLiteral(
+        "会话 run_id 缺失或不是规范 UUID v4；已 fail-closed，禁止启动。");
+    emit stackProgress(QStringLiteral("failed"), detail);
+    emit logLine(QStringLiteral("STARTUP"), detail);
+    return;
+  }
   if (stop_carla_after_children_ || bridge_.state() == ProcState::Stopping ||
       soc_.state() == ProcState::Stopping ||
       carla_state_ == ProcState::Stopping) {

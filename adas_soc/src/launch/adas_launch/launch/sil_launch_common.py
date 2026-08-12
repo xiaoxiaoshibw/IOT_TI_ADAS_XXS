@@ -85,12 +85,25 @@ def adas_nodes(sim_extra_params=None, scenario_overlay=None, include_sim=True,
             output='screen',
             parameters=[_config('global_planner.yaml'), {'run_id': run_id}],
         ))
+        # P0.3: route_adapter_node 是 /adas/planning/global_route 唯一发布者,
+        # 共享同一个 run_id；planner/adapter 一旦 run_id 不一致,adapter
+        # 会拒绝一切消息并保留启动清空 Path。
+        actions.append(Node(
+            package='adas_global_planner',
+            executable='route_adapter_node',
+            name='route_adapter',
+            output='screen',
+            parameters=[{'run_id': run_id, 'frame_id': 'map'}],
+        ))
     if include_sim:
         sim_params = [_config('sim_vehicle.yaml')]
         for extra in scenario_files:
             sim_params.append(_config(extra))
         if scenario_overlay:
             sim_params.append(dict(scenario_overlay))
+        # P0.C: 把会话 run_id 同步给 sim_vehicle,让 sim_vehicle 在发布
+        # 仿真 LaneGraph 时携带正确 run_id（planner 才能握手）。
+        sim_params.append({'run_id': run_id})
         actions.append(Node(
             package='adas_sim_vehicle',
             executable='sim_vehicle_node',

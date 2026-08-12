@@ -1,9 +1,11 @@
 #include "map_view.hpp"
 
 #include <QApplication>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QThread>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -77,6 +79,29 @@ void MapView::setLanes(const QVector<GuiLane>& lanes, const QString& map_id) {
   }
   lanes_ = lanes;
   map_id_ = map_id;
+  if (!fitted_) fitToLanes();
+  update();
+}
+
+void MapView::setLanesAtomic(const QVector<GuiLane>& lanes,
+                             const QString& map_id, const QString& map_hash) {
+  // P0.3: 在 DDS 回调线程上,先把 (lanes, map_id, map_hash) 三元组作为
+  // 一个原子单元提交给 GUI 线程。identity 比较 + 旧地图清空 + 新数据写入
+  // 全部在 GUI 线程内完成,与外部信号连接顺序无关。
+  if (QThread::currentThread() != thread()) {
+    QMetaObject::invokeMethod(this,
+        [this, lanes, map_id, map_hash]() {
+          setLanesAtomic(lanes, map_id, map_hash);
+        }, Qt::QueuedConnection);
+    return;
+  }
+  const bool identity_changed = (!map_id_.isEmpty() &&
+                                 (map_id_ != map_id ||
+                                  (!map_hash_.isEmpty() && map_hash_ != map_hash)));
+  if (identity_changed) clearForMapChange();
+  lanes_ = lanes;
+  map_id_ = map_id;
+  map_hash_ = map_hash;
   if (!fitted_) fitToLanes();
   update();
 }

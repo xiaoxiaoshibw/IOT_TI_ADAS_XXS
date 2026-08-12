@@ -18,6 +18,15 @@ struct SemanticRoutePoint {
   bool stop{false};
 };
 
+inline bool operator==(const SemanticRoutePoint& lhs,
+                       const SemanticRoutePoint& rhs) {
+  return lhs.pose.x == rhs.pose.x && lhs.pose.y == rhs.pose.y &&
+         lhs.pose.yaw == rhs.pose.yaw && lhs.lane_id == rhs.lane_id &&
+         lhs.road_id == rhs.road_id &&
+         lhs.speed_limit_mps == rhs.speed_limit_mps &&
+         lhs.maneuver == rhs.maneuver && lhs.stop == rhs.stop;
+}
+
 struct SemanticRouteResult {
   bool valid{false};
   std::string failure_reason;

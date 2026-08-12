@@ -119,6 +119,12 @@ double polyline_length(const std::vector<MapPoint>& points);
 // the first non-empty ID; a bound session never switches implicitly.
 bool bind_or_accept_run_id(std::string& expected, const std::string& incoming);
 
+// P0.3: GlobalRoute.route_id 是 uint32,0 是保留值(让消费端识别"未初始化
+// revision")。每次语义路线变化都得拿到一个非零新 revision;心跳(同一条
+// 路线重复发送)允许复用上次 ID。溢出从 UINT32_MAX 回到 1,跳过 0。
+// last == 0 → 返回 1,避免下游把它当作"保留值"误丢弃。
+std::uint32_t next_route_revision(std::uint32_t last);
+
 // P0.B 失效恢复策略：纯函数，可独立 gtest。
 // - 首次规划失败（is_replan=false） ⇒ 清空请求（必须清除 goal 与路线）。
 // - 重规划失败 + 已有可用路线（previous_route_valid=true） ⇒ 保留旧路线，发布 DRIVING。

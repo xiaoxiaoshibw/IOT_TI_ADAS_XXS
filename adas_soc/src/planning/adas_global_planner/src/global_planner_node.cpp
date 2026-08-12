@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -22,7 +23,6 @@
 #include "adas_msgs/srv/set_navigation_goal.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
-#include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 namespace adas::planning {
@@ -256,13 +256,8 @@ class GlobalPlannerNode : public rclcpp::Node {
           cancel_responses_[request->request_id] = *response;
         });
 
-    pub_route_ = create_publisher<nav_msgs::msg::Path>(
-        "/adas/planning/global_route", rclcpp::QoS(1).reliable().transient_local());
-    // P0.C: 带 run_id 的 GlobalRoute 是当前会话权威路线（GUI / CARLA / Bridge
-    // 严格按 run_id 过滤）；route_adapter 节点从该话题消费并发布 Path 到下游
-    // 控制栈。如果 route_adapter 不在线，下游消费 /adas/planning/global_route
-    // 仍然能拿到 Path（planner 同时发布），但不带 run_id——显式违反 P0.3 时
-    // 启动日志里会发出警告。
+    // P0.C/P0.3: planner 唯一发布权威路线 GlobalRoute 到 /adas/navigation/global_route。
+    // /adas/planning/global_route 由 route_adapter_node 独家发布,planner 不再直发 Path。
     pub_global_route_ = create_publisher<adas_msgs::msg::GlobalRoute>(
         "/adas/navigation/global_route",
         rclcpp::QoS(1).reliable().transient_local());
@@ -373,17 +368,16 @@ class GlobalPlannerNode : public rclcpp::Node {
     active_route_id_.clear();
     remaining_distance_m_ = 0.0;
     if (replan_policy_) replan_policy_->reset();
-    nav_msgs::msg::Path empty;
-    empty.header.stamp = now();
-    empty.header.frame_id = "map";
-    pub_route_->publish(empty);
+    // P0.3: 清空是状态语义变化,必须给一个新 revision 让 adapter 看到一次。
+    // 不能发空 Path：adapter 才是 Path 唯一发布者,这里只走 GlobalRoute。
     publish_global_route(adas_msgs::msg::GlobalRoute::STATUS_INVALID,
-                         empty.header.stamp, {}, 0.0F);
+                         now(), {}, 0.0F);
   }
 
-  // P0.C: 把当前路线以带 run_id 的 GlobalRoute 形式发布给 GUI / CARLA。
-  // status=STATUS_INVALID 时清空 transient_local 旧路线；其余状态消费端
-  // 按 status 与 run_id 双重校验。
+  // P0.C/P0.3: 把当前路线以带 run_id 的 GlobalRoute 形式发布给 GUI / CARLA。
+  // status=STATUS_INVALID 时清空 transient_local 旧路线;每条发布都带非零
+  // route_id,语义变化(VALID/INVALID/FAILED/CANCELLED)都拿到新 revision;
+  // 心跳允许复用同 revision。
   void publish_global_route(std::uint8_t status, const rclcpp::Time& stamp,
                             const std::vector<SemanticRoutePoint>& points,
                             float length_m) {
@@ -396,8 +390,16 @@ class GlobalPlannerNode : public rclcpp::Node {
     route.map_id = map_id_;
     route.map_hash = map_hash_;
     route.goal_id = goal_id_;
-    // P0.C: GlobalRoute.route_id 是 uint32（与 nav_msgs/Path 不一致是历史
-    // 残留）；当前语义靠 run_id + map_hash 唯一标识，route_id 留 0 即可。
+    // 语义变化 → 新 revision;否则复用上次;首次发送以 1 起步。
+    const bool semantic_change =
+        !published_once_ ||
+        last_published_status_ != status ||
+        last_published_length_m_ != length_m ||
+        last_published_points_ != points;
+    if (semantic_change) {
+      last_published_revision_ = next_route_revision(last_published_revision_);
+    }
+    route.route_id = last_published_revision_;
     route.status = status;
     route.length = length_m;
     route.points.reserve(points.size());
@@ -409,6 +411,10 @@ class GlobalPlannerNode : public rclcpp::Node {
       route.points.push_back(rp);
     }
     pub_global_route_->publish(route);
+    published_once_ = true;
+    last_published_status_ = status;
+    last_published_length_m_ = length_m;
+    last_published_points_ = points;
   }
 
   // P0.B: 统一清空"本次请求"相关状态（goal/活动路线/到达点/AROP/ARIVED）。
@@ -527,24 +533,12 @@ class GlobalPlannerNode : public rclcpp::Node {
     arrival_point_valid_ = true;
     arrived_ = false;
 
-    nav_msgs::msg::Path path;
-    path.header.stamp = now();
-    path.header.frame_id = "map";
-    path.poses.reserve(semantic.points.size());
-    for (const auto& point : semantic.points) {
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header = path.header;
-      pose.pose.position.x = point.pose.x;
-      pose.pose.position.y = point.pose.y;
-      pose.pose.orientation.z = std::sin(point.pose.yaw * 0.5);
-      pose.pose.orientation.w = std::cos(point.pose.yaw * 0.5);
-      path.poses.push_back(std::move(pose));
-    }
-    active_route_id_ = route_id(map_hash_, path.header.stamp);
+    const rclcpp::Time stamp = now();
+    active_route_id_ = route_id(map_hash_, stamp);
     remaining_distance_m_ = semantic.length_m;
-    pub_route_->publish(path);
+    // P0.3: planner 唯一发布权威路线 GlobalRoute；Path 由 route_adapter 节点独家发布。
     publish_global_route(adas_msgs::msg::GlobalRoute::STATUS_VALID,
-                         path.header.stamp, semantic.points,
+                         stamp, semantic.points,
                          static_cast<float>(semantic.length_m));
     publish_status(adas_msgs::msg::NavigationStatus::DRIVING, "route ready");
   }
@@ -594,13 +588,19 @@ class GlobalPlannerNode : public rclcpp::Node {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
   rclcpp::Service<adas_msgs::srv::SetNavigationGoal>::SharedPtr srv_goal_;
   rclcpp::Service<adas_msgs::srv::CancelNavigation>::SharedPtr srv_cancel_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_;
   rclcpp::Publisher<adas_msgs::msg::GlobalRoute>::SharedPtr pub_global_route_;
   rclcpp::Publisher<adas_msgs::msg::NavigationStatus>::SharedPtr pub_status_;
   rclcpp::TimerBase::SharedPtr deviation_timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;
   adas_msgs::msg::NavigationStatus last_status_;
   bool last_status_valid_{false};
+  // P0.3: 记录上次发布的 GlobalRoute 语义快照,只对真语义变化(VALID→INVALID
+  // / 路径不同 / length 不同 / 状态不同)分配新 revision,心跳复用同一值。
+  std::uint32_t last_published_revision_{0U};
+  std::uint8_t last_published_status_{adas_msgs::msg::GlobalRoute::STATUS_INVALID};
+  float last_published_length_m_{0.0F};
+  std::vector<SemanticRoutePoint> last_published_points_{};
+  bool published_once_{false};
   std::unordered_map<std::string, adas_msgs::srv::SetNavigationGoal::Response>
       goal_responses_;
   std::unordered_map<std::string, adas_msgs::srv::CancelNavigation::Response>

@@ -124,6 +124,11 @@ class RosBridge : public QObject {
   void laneGraphChanged(const QVector<adas::gui::GuiLane>& lanes,
                         const QString& map_id);
   void mapMetadataChanged(const QString& map_id, const QString& map_hash);
+  // P0.3: 同一条 LaneGraph 消息中的 (lanes, map_id, map_hash) 一次性提交,
+  // 避免历史 setLanes/setMapMetadata 双发信号之间的顺序依赖。GUI 消费者
+  // 应当连接 laneGraphReady 而不是分开的两个信号。
+  void laneGraphReady(const QVector<adas::gui::GuiLane>& lanes,
+                      const QString& map_id, const QString& map_hash);
   void routeChanged(const QPolygonF& route);
   void navStatusChanged(const adas::gui::GuiNavStatus& status);
   void leadObjectChanged(const adas::gui::GuiLeadObject& lead);

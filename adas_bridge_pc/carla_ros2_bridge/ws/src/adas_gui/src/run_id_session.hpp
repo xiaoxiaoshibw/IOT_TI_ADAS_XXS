@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <QRegularExpression>
 #include <QString>
 #include <QUuid>
 
@@ -39,6 +40,21 @@ class RunIdSession {
     return current_.toStdString();
   }
 
+  // P0.C/P0.3: 严格校验 UUID v4 小写形式（与 SoC/bridge 端规则一致）。
+  // 任何分机 / 多进程协同都靠这一行避免两端各自生成 ID。
+  static bool is_canonical_uuid_v4(const QString& value) {
+    static const QRegularExpression regex(
+        QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+                       "[89ab][0-9a-f]{3}-[0-9a-f]{12}$"));
+    if (!regex.match(value).hasMatch()) return false;
+    const QUuid parsed = QUuid::fromString(value);
+    if (parsed.isNull()) return false;
+    // QUuid::fromString 接受大小写混合,这里强制小写。
+    return parsed.toString(QUuid::WithoutBraces) == value &&
+           parsed.version() == QUuid::Version::Random &&
+           parsed.variant() == QUuid::Variant::DCE;
+  }
+
  private:
   static QString generate_uuid_v4() {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -47,3 +63,11 @@ class RunIdSession {
 };
 
 }  // namespace adas_gui
+
+// P0.C: 同步在 adas::gui 命名空间下提供别名,保持与既有 code
+// （accepts_run_id / route_update_for / map_identity_changed）一致风格。
+namespace adas::gui {
+inline bool is_canonical_uuid_v4(const QString& value) {
+  return adas_gui::RunIdSession::is_canonical_uuid_v4(value);
+}
+}  // namespace adas::gui

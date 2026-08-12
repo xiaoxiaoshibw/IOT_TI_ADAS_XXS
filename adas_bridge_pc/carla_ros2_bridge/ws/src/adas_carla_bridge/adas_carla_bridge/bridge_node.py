@@ -30,6 +30,7 @@ import csv
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -48,6 +49,23 @@ def _import_carla():
         )
 
 
+_UUID_V4_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+
+
+def is_canonical_uuid_v4(value):
+    """P0.C: 严格校验 UUID v4（小写、version 4、variant 8/9/a/b）。"""
+    if not isinstance(value, str):
+        return False
+    if not _UUID_V4_RE.match(value):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, TypeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
+
+
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -60,7 +78,7 @@ from adas_msgs.msg import (ActuationCommand, AebStatus, BehaviorState,
                            MapLane, NavigationStatus, SafetyStatus,
                            SteeringReport, TrackedObject, TrackedObjectArray)
 from geometry_msgs.msg import Pose, TransformStamped
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 from adas_carla_bridge.carla_world import CarlaWorld
@@ -140,10 +158,25 @@ class CarlaBridgeNode(Node):
         self.args = args
         self._lock = threading.Lock()
         self._act = {'throttle': 0.0, 'brake': 0.0, 'steer': 0.0, 'rx_t': 0.0}
-        # P0.C: 本次桥实例持有的 run_id；缺省从 CLI 拿，否则自动生成 UUID v4。
-        # GUI 与本桥在 launch 时通过 --run-id 同步，链路消费端据此过滤。
-        self._current_run_id = (
-            str(getattr(args, 'run_id', '') or '').strip() or str(uuid.uuid4()))
+        # P0.C/P0.3: 本次桥实例持有的 run_id。GUI/Orchestrator 通过 --run-id
+        # 注入；只有显式 --auto-run-id（仅用于独立调试/测试）才允许自动
+        # 生成 UUID v4。其他场景缺省/非法值必须直接 fail-closed，避免两端
+        # 各自生成 ID 导致跨进程无法握手。
+        raw_run_id = str(getattr(args, 'run_id', '') or '').strip()
+        auto_run_id = bool(getattr(args, 'auto_run_id', False))
+        if raw_run_id:
+            if not is_canonical_uuid_v4(raw_run_id):
+                raise SystemExit(
+                    '--run-id 必须是规范 UUID v4（小写、version 4、variant 8/9/a/b）'
+                    ';若希望启动时自动生成，请显式传 --auto-run-id')
+            self._current_run_id = raw_run_id
+        elif auto_run_id:
+            self._current_run_id = str(uuid.uuid4())
+        else:
+            raise SystemExit(
+                '--run-id 是必填项（必须是规范 UUID v4）。'
+                '独立调试可额外传 --auto-run-id 自动生成，'
+                '但生产/GUI/Orchestrator 调用必须由上游注入同一个 UUID v4')
         self._stale_timeout_s = float(args.stale_timeout_s)
         if not math.isfinite(self._stale_timeout_s) or self._stale_timeout_s <= 0.0:
             raise SystemExit('--stale-timeout-s 必须是有限正数')
@@ -182,9 +215,10 @@ class CarlaBridgeNode(Node):
         visual_qos = QoSProfile(depth=1)
         visual_qos.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
         visual_qos.reliability = QoSReliabilityPolicy.RELIABLE
-        self.create_subscription(Path, TOPIC_ROUTE, self._legacy_path_route_cb, visual_qos)
-        # P0.C: 带 run_id 的 GlobalRoute 才是当前会话的权威路线。Path
-        # 订阅保留作为兜底；GlobalRoute 在时优先使用。
+        # P0.C/P0.3: 路线显示完全由带 run_id 的 GlobalRoute 驱动。
+        # /adas/planning/global_route 是 nav_msgs/Path,只供控制栈 (trajectory_planner)
+        # 使用,且由 route_adapter_node 唯一发布;bridge 不订阅以避免
+        # 旧会话或无 run_id 的 Path 绕回 CARLA overlay。
         self.create_subscription(GlobalRoute, TOPIC_NAV_ROUTE,
                                  self._nav_route_cb, visual_qos)
         self.create_subscription(NavigationStatus, TOPIC_NAV_STATUS,
@@ -278,27 +312,6 @@ class CarlaBridgeNode(Node):
             return False
         return msg_run_id == self._current_run_id
 
-    def _legacy_path_route_cb(self, msg):
-        # P0.C: 旧 Path 话题保留作为兜底，但不携带 run_id，仅在尚未收到
-        # 带 run_id 的 GlobalRoute 之前用于绘制路线；一旦 GlobalRoute 被采纳
-        # 后续会被覆盖。
-        points = [(float(p.pose.position.x), float(p.pose.position.y))
-                  for p in msg.poses
-                  if math.isfinite(float(p.pose.position.x)) and
-                  math.isfinite(float(p.pose.position.y))]
-        if len(points) > 300:
-            endpoint = points[-1]
-            stride = int(math.ceil(len(points) / 300.0))
-            points = points[::stride]
-            if points[-1] != endpoint:
-                points.append(endpoint)
-        with self._visual_lock:
-            # 仅在尚未确认有 run_id 路由时使用 Path；后续 GlobalRoute
-            # 到达会覆盖。空 points 表示 Path 已清空，GlobalRoute 自然胜出。
-            if not self._visual.get('_route_source_locked', False):
-                self._visual['route'] = points
-                self._visual['route_seen_t'] = time.monotonic()
-
     def _nav_route_cb(self, msg):
         # P0.C: 带 run_id 的 GlobalRoute 是当前会话路线；空 run_id 直接丢弃。
         if not self._accept_run_id(getattr(msg, 'run_id', '')):
@@ -308,7 +321,6 @@ class CarlaBridgeNode(Node):
             with self._visual_lock:
                 self._visual['route'] = []
                 self._visual['route_seen_t'] = 0.0
-                self._visual['_route_source_locked'] = False
             return
         points = [(float(p.x), float(p.y))
                   for p in msg.points
@@ -322,7 +334,6 @@ class CarlaBridgeNode(Node):
         with self._visual_lock:
             self._visual['route'] = points
             self._visual['route_seen_t'] = time.monotonic()
-            self._visual['_route_source_locked'] = True
 
     def _nav_status_cb(self, msg):
         # P0.C: 旧会话残留的 status 不应继续作为当前导航状态。
@@ -749,7 +760,12 @@ def build_arg_parser():
                               '可直接使用 Orin 网关发布的 MCU 回控'))
     parser.add_argument('--carla-host', default='127.0.0.1')
     parser.add_argument('--run-id', default='',
-                        help='P0.C 会话 run_id；空 = 桥实例启动时自动生成 UUID v4')
+                        help='P0.C 会话 run_id；必须是规范 UUID v4（小写）。'
+                             ' 缺省或非法值在不传 --auto-run-id 时会 fail-closed，'
+                             '确保 GUI/Orchestrator 必须注入同一个 UUID v4。')
+    parser.add_argument('--auto-run-id', action='store_true',
+                        help='仅用于独立调试/单元测试：缺省 --run-id 时自动生成 UUID v4。'
+                             '生产 / GUI / Orchestrator 调用必须依赖 --run-id 显式注入。')
     parser.add_argument('--carla-port', type=int, default=2000)
     parser.add_argument('--town', default='Town04')
     parser.add_argument('--fixed-dt', type=float, default=0.02,

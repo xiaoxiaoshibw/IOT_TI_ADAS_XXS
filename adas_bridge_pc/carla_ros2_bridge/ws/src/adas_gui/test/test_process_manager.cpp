@@ -14,6 +14,7 @@ TEST(ProcessManager, HilIsRejectedWithoutStartingHardware) {
 
   LaunchConfig config;
   config.backend = QStringLiteral("hil");
+  config.run_id = QStringLiteral("11111111-2222-4333-8444-555555555555");
   manager.startAll(config);
 
   EXPECT_EQ(reported, ProcState::Failed);
@@ -43,6 +44,7 @@ TEST(ProcessManager, MilRejectsWrongDdsDomainBeforeSpawning) {
                    [&reported](ProcState state, const QString&) { reported = state; });
   LaunchConfig config;
   config.backend = QStringLiteral("mil");
+  config.run_id = QStringLiteral("11111111-2222-4333-8444-555555555555");
   manager.startAll(config);
 
   EXPECT_EQ(reported, ProcState::Failed);
@@ -86,6 +88,7 @@ TEST(ProcessManager, ExistingMilRuntimeForcesObserverMode) {
     EXPECT_TRUE(manager.localThreeMachineObserver());
     LaunchConfig config;
     config.backend = QStringLiteral("mil");
+    config.run_id = QStringLiteral("11111111-2222-4333-8444-555555555555");
     manager.startAll(config);
     EXPECT_EQ(manager.bridgeState(), ProcState::Running);
     EXPECT_FALSE(manager.hilManagerActive());

@@ -109,6 +109,23 @@ source_workspace() {
   set -u
 }
 
+# P0.C: 整轮 SIL 共享一个 UUID v4,统一透传给 planner / route_adapter /
+# sim_vehicle。环境变量 SIL_RUN_ID 由调用方注入;空则自动生成。
+SIL_RUN_ID="${SIL_RUN_ID:-}"
+if [[ -z "${SIL_RUN_ID}" ]]; then
+  if command -v uuidgen >/dev/null 2>&1; then
+    SIL_RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  else
+    SIL_RUN_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+  fi
+fi
+# 严格校验:必须是规范 UUID v4 小写,否则 fail-closed。
+if [[ ! "${SIL_RUN_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+  echo "SIL_RUN_ID 必须是规范 UUID v4，收到: ${SIL_RUN_ID}" >&2
+  exit 2
+fi
+export SIL_RUN_ID
+
 ensure_vcan() {
   command -v ip >/dev/null 2>&1 || {
     echo "启用 --mcu 需要 iproute2（ip 命令）" >&2
@@ -151,6 +168,7 @@ fi
 
 source_workspace
 mkdir -p "${LOG_ROOT}"
+# 日志目录仅用于路径（不能用做协议 run_id）；协议 run_id 是 SIL_RUN_ID。
 RUN_ID="$(date +%Y%m%d_%H%M%S)_$$"
 LAUNCH_LOG="${LOG_ROOT}/${RUN_ID}_${SCENARIO}.log"
 LAUNCH_PID=""
@@ -173,9 +191,10 @@ trap 'exit 130' INT TERM
 trap 'status=$?; stop_launch; exit "${status}"' EXIT
 
 echo "=== start SIL ==="
-echo "scenario=${SCENARIO} launch=${LAUNCH_FILE} mcu=${MCU} ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+echo "scenario=${SCENARIO} launch=${LAUNCH_FILE} mcu=${MCU} ROS_DOMAIN_ID=${ROS_DOMAIN_ID} run_id=${SIL_RUN_ID}"
 echo "log=${LAUNCH_LOG}"
 launch_cmd=(ros2 launch adas_launch "${LAUNCH_FILE}")
+launch_cmd+=("run_id:=${SIL_RUN_ID}")
 if (( MCU )); then
   launch_cmd+=("scenario:=${SCENARIO_OVERLAY}")
 fi

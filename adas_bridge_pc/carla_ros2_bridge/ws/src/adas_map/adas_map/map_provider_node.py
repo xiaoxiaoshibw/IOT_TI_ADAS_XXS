@@ -3,6 +3,7 @@
 
 import importlib
 import math
+import re
 
 from adas_msgs.msg import LaneConnection, LaneGraph, MapLane
 from geometry_msgs.msg import Pose
@@ -56,6 +57,22 @@ class MapProviderNode(Node):
         self.declare_parameter('sample_distance_m', 2.0)
         self.declare_parameter('default_speed_limit_mps', 13.9)
         self.declare_parameter('retry_period_s', 2.0)
+        # P0.C: 把当前会话 run_id 写入 LaneGraph,让 planner/adapter 同步。
+        # 分机拓扑必须显式注入；非空且非规范 UUID v4 时直接 fail-closed。
+        self.declare_parameter('run_id', '')
+        self._run_id = self._normalize_run_id(
+            str(self.get_parameter('run_id').value or '').strip())
+
+    @staticmethod
+    def _normalize_run_id(value):
+        if not value:
+            return ''
+        if not re.match(
+                r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-'
+                r'[89ab][0-9a-f]{3}-[0-9a-f]{12}$', value):
+            raise ValueError(
+                'run_id 必须是规范 UUID v4（小写）;收到: ' + value)
+        return value
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -92,6 +109,9 @@ class MapProviderNode(Node):
         if graph['map_hash'] == self._published_hash:
             return
         message = graph_to_message(graph, self.get_clock().now().to_msg())
+        # P0.C: producer 端把会话 run_id 写入 LaneGraph,作为消费端
+        # （planner/adapter）的会话基准。
+        message.run_id = self._run_id
         self._publisher.publish(message)
         self._published_hash = graph['map_hash']
         connection_count = sum(len(lane.outgoing) for lane in message.lanes)

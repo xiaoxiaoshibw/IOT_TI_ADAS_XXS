@@ -63,6 +63,11 @@ class MapView : public QWidget {
   public slots:
    void setLanes(const QVector<adas::gui::GuiLane>& lanes, const QString& map_id);
    void setMapMetadata(const QString& map_id, const QString& map_hash);
+   // P0.3: 原子 LaneGraph 切换入口——同时写入 (lanes, map_id, map_hash);
+   // 内部用 map_identity_changed() 决定是否清空旧地图的可视状态,避免
+   // 依赖外部信号顺序,也不依赖 setLanes/setMapMetadata 先后顺序。
+   void setLanesAtomic(const QVector<adas::gui::GuiLane>& lanes,
+                       const QString& map_id, const QString& map_hash);
    // P1.F: 地图切换时清空路线、目标、相机，确保不会残留旧会话视觉。
    void clearForMapChange();
 

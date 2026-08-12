@@ -332,8 +332,14 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
 
   connect(bridge, &RosBridge::mapMetadataChanged, map_view_,
           &MapView::setMapMetadata);
-  connect(bridge, &RosBridge::mapMetadataChanged, this,
-          [this](const QString& map_id, const QString& map_hash) {
+  // P0.3: 同一条 LaneGraph 消息一次性提交 (lanes, map_id, map_hash);
+  // 由 MapView::setLanesAtomic 在 GUI 线程内统一做 identity 比较 + 旧
+  // 地图清空 + 新数据写入,不再依赖两个信号的先后顺序。
+  connect(bridge, &RosBridge::laneGraphReady, map_view_,
+          &MapView::setLanesAtomic);
+  connect(bridge, &RosBridge::laneGraphReady, this,
+          [this](const QVector<GuiLane>& lanes, const QString& map_id,
+                 const QString& map_hash) {
             const bool changed = map_identity_changed(
                 latest_map_id_, latest_map_hash_, map_id, map_hash);
             if (changed) {
@@ -354,12 +360,7 @@ MainWindow::MainWindow(RosBridge* bridge, QWidget* parent)
             }
             latest_map_id_ = map_id;
             latest_map_hash_ = map_hash;
-          });
-  connect(bridge, &RosBridge::laneGraphChanged, map_view_, &MapView::setLanes);
-  connect(bridge, &RosBridge::laneGraphChanged, this,
-          [this](const QVector<GuiLane>& lanes, const QString& map_id) {
             latest_lanes_ = lanes;
-            latest_map_id_ = map_id;
             if (bridge_running_) latest_map_generation_ = auto_navigation_generation_;
             scenario_run_panel_->onMapReady(!lanes.isEmpty());
             TelemetryFreshness::instance().markFresh(TelemetryFreshness::Map);

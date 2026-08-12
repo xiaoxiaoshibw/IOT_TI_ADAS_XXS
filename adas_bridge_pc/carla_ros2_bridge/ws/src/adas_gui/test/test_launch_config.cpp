@@ -49,14 +49,17 @@ TEST(LaunchConfig, BridgeArgumentsRos2Source) {
   LaunchConfig config;
   config.scenario = "aeb";
   config.town = "Town03";
+  // 显式注入规范 UUID v4；bridge_arguments 必须无条件把 run_id 透传。
+  config.run_id = QStringLiteral("11111111-2222-4333-8444-555555555555");
   const QStringList args = adas::gui::bridge_arguments(config);
   const QStringList expected{"run",        "adas_carla_bridge",
                              "bridge_node", "--scenario",
-                             "aeb",         "--town",
-                             "Town03",      "--carla-port",
-                             "2000",        "--duration",
-                             "0",           "--control-source",
-                             "ros2"};
+                             "aeb",         "--run-id",
+                             "11111111-2222-4333-8444-555555555555",
+                             "--town",      "Town03",
+                             "--carla-port", "2000",
+                             "--duration",   "0",
+                             "--control-source", "ros2"};
   EXPECT_EQ(args, expected);
 }
 

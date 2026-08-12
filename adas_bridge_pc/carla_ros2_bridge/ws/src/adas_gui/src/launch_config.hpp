@@ -296,10 +296,9 @@ inline QStringList bridge_arguments(const LaunchConfig& config) {
   } else {
     args << "--scenario" << config.scenario;
   }
-  // P0.C: 把 GUI 当前会话 run_id 透传给桥节点；为空时让桥自生成 UUID。
-  if (!config.run_id.isEmpty()) {
-    args << "--run-id" << config.run_id;
-  }
+  // P0.C: 把 GUI 当前会话 run_id 透传给桥节点。bridge 现在 fail-closed,
+  // 因此必须传入 RunIdSession::begin() 生成的规范 UUID v4。
+  args << "--run-id" << config.run_id;
   args << "--town" << config.town
        << "--carla-port" << QString::number(config.carla_port)
        // GUI“完整系统”由停止按钮管理生命周期，不能继承演示场景的
@@ -322,7 +321,7 @@ inline QStringList bridge_arguments(const LaunchConfig& config) {
 
 inline QStringList local_three_machine_arguments(const LaunchConfig& config) {
   QStringList args;
-  if (!config.run_id.isEmpty()) args << "--run-id" << config.run_id;
+  if (!config.run_id.isEmpty()) args << "--run-id" << config.run_id;  // P0.C: 已固化,见 bridge_arguments
   if (!config.scenario_file.isEmpty()) {
     args << "--scenario-file" << config.scenario_file
          << "--seed" << QString::number(config.seed);

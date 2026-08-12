@@ -247,7 +247,7 @@ def test_carla_visualization_draws_ros_route_with_y_axis_conversion():
     assert (start.x, start.y) == (10.0, -4.0)
     assert (end.x, end.y) == (20.0, -7.0)
     assert any(value == "NAV GOAL" for _, value in world.world.debug.strings)
-    assert any("NAV DRIVING" in value for _, value in world.world.debug.strings)
+    assert [value for _, value in world.world.debug.strings] == ["NAV GOAL"]
 
     # 5 Hz 限流：相邻同步 tick 不重复压入 CARLA debug RPC。
     world.draw_adas_visualization(state, frame, {"stale": False}, 1.1)

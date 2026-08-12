@@ -110,7 +110,8 @@ if(BUILD_TESTING)
     ament_add_gtest(test_scenario_workflow test/test_scenario_workflow.cpp)
     target_include_directories(test_scenario_workflow PRIVATE src)
     target_link_libraries(test_scenario_workflow Qt6::Core)
-    ament_add_gtest(test_session_contract test/test_session_contract.cpp)
+    ament_add_gtest(test_session_contract test/test_session_contract.cpp
+      src/run_id_session.cpp)
     target_include_directories(test_session_contract PRIVATE src)
     target_link_libraries(test_session_contract Qt6::Core)
     ament_add_gtest(test_run_id_session
