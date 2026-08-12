@@ -1,0 +1,13 @@
+[Unit]
+Description=Assign deterministic ADAS CAN interface names
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=adas-hil.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/adas/bin/name_can_interfaces.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -15,8 +15,8 @@ void Oled2_update(uint32_t now_ms, const ControlOutput_t *out,
                   bool can_healthy);
 bool Oled2_isPresent(void);
 
-/* 推送最近一次 ASR-PRO 语音命令到 OLED2 显示：3 秒内翻页覆盖显示
- * "ASR:STOP/STATUS/SPEED/FAULT"，过期后回到正常车辆数据翻页。 */
+/* 推送最近一次 ASR-PRO 语音命令到 OLED2 显示：3 秒内覆盖中文数据页，
+ * 过期后回到四行车辆关键数据。 */
 void Oled2_setAsrCommand(uint16_t cmd, uint32_t now_ms);
 
 #endif /* OLED2_H_ */

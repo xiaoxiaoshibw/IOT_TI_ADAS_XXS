@@ -44,11 +44,6 @@ static uint16_t s_rx_cmd;
 static uint16_t s_rx_arg;
 static bool s_pending;
 static bool s_present;
-/* 调试计数：ASR-PRO 模块没响应/响应错时帮助定位是 UART 没收到、还是帧格式错、
- * 还是命令码不在 MCU 表里。s_rx_state 暴露当前解析状态机位置。 */
-static uint16_t s_rx_byte_count;       /* UART 累计收到的字节数 */
-static uint16_t s_rx_frame_count;      /* 累计收到的合法帧（CMD 字节到位） */
-static uint16_t s_rx_hdr0_count;       /* 累计见到的 0x0C 帧头字节 */
 
 /* ------------------------------------------------------------------ */
 void AsrPro_init(void)
@@ -91,9 +86,6 @@ void AsrPro_init(void)
     s_rx_arg = 0U;
     s_pending = false;
     s_present = false;
-    s_rx_byte_count = 0U;
-    s_rx_frame_count = 0U;
-    s_rx_hdr0_count = 0U;
 }
 
 /* ------------------------------------------------------------------ */
@@ -106,18 +98,12 @@ void AsrPro_resetForTest(void)
     s_rx_arg = 0U;
     s_pending = false;
     s_present = false;
-    s_rx_byte_count = 0U;
-    s_rx_frame_count = 0U;
-    s_rx_hdr0_count = 0U;
 }
 /* 暴露给 host 测试。非 static 让 host 单元测试可以单步灌帧验证状态机。 */
 void asr_rx_feed_for_test(uint16_t b);
 /* ------------------------------------------------------------------ */
 static void asr_rx_feed(uint8_t b)
 {
-    s_rx_byte_count++;
-    if (b == ASR_HDR0) { s_rx_hdr0_count++; }
-
     switch (s_rx_state)
     {
     case ASR_WAIT_HDR0:
@@ -134,7 +120,6 @@ static void asr_rx_feed(uint8_t b)
         s_rx_cnt = 0U;
         s_pending = true;   /* 命令字节到达即视为一帧有效 */
         s_present = true;
-        s_rx_frame_count++;
         s_rx_state = ASR_WAIT_ARG;
         break;
 
@@ -200,12 +185,3 @@ bool AsrPro_isPresent(void)
 {
     return s_present;
 }
-
-/* 调试 accessor：暴露 ASR-PRO 解析器内部状态。OLED2 DBG 页用这几项定位
- * "完全没声音"（byte=0）/ "声音到了但帧头错"（byte>0 hdr0=0）/ "帧收到了
- * 但命令码不在 MCU 表里"（frame>0 last_cmd 不在 STOP/STATUS/SPEED/FLT） */
-uint16_t AsrPro_byteCount(void)    { return s_rx_byte_count; }
-uint16_t AsrPro_hdr0Count(void)    { return s_rx_hdr0_count; }
-uint16_t AsrPro_frameCount(void)   { return s_rx_frame_count; }
-uint16_t AsrPro_lastCmd(void)      { return s_rx_cmd; }
-uint16_t AsrPro_rxState(void)      { return (uint16_t)s_rx_state; }

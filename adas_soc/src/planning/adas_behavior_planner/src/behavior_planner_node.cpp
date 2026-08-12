@@ -223,7 +223,14 @@ class BehaviorPlannerNode : public rclcpp_lifecycle::LifecycleNode {
       }
     }
     if (odom_) input.ego_speed_mps = odom_->twist.twist.linear.x;
-    if (lane_) input.ego_lateral_m = lane_->lateral_offset;
+    if (lane_) {
+      input.ego_lateral_m = lane_->lateral_offset;
+      input.target_lane_available =
+          params_.target_lane < 0 ? lane_->left_lane_available
+                                  : (params_.target_lane > 0
+                                         ? lane_->right_lane_available
+                                         : true);
+    }
     input.now_s = now().seconds();
     if (odom_) {
       input.map_signs.reserve(map_signs_.size());

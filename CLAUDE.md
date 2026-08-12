@@ -317,3 +317,15 @@ cd adas_soc
 - **bus-off recovery cannot be disabled** — `run_host_tests.sh` includes a negative compile guard that must keep failing.
 - **No silent reconfiguration**: a single `adas_msgs` field rename breaks PC↔Orin↔MCU; the duplicate `adas_msgs` in `adas_bridge_pc` is a contract, not a convenience copy.
 - **CARLA is shared**: probe with `adas_bridge_pc/scripts/carla_readiness.py` before/after starting, never `SIGKILL` the bridge, and treat an existing port-2000 listener as an external instance to reuse (don't double-start).
+
+## Behavioral guidelines (general) — load-bearing, do not strip
+
+> **Status: deliberate, not decoration.** This section integrates [forrestchang/andrej-karpathy-skills](https://github.com/forrestchang/andrej-karpathy-skills) so **Claude Code and Codex CLI read the same four principles** without text duplication. A previous Claude session may be tempted to remove the `@AGENTS.md` line under "Simplicity First"; **do not** — it is the single piece of indirection that wires Claude Code to the same content AGENTS.md-aware tools see natively. If you want to change this layout, see [`tools/karpathy-guidelines/`](tools/karpathy-guidelines/) and the note in [`AGENTS.md`](AGENTS.md).
+
+The four general-purpose agent behavior principles apply on top of every project-specific rule above. Vendored (shallow clone) at [`tools/karpathy-guidelines/`](tools/karpathy-guidelines/) — re-sync upstream with `cd tools/karpathy-guidelines && git pull`.
+
+Same content, embedded inline for Codex, at [AGENTS.md](AGENTS.md); imported here via `@AGENTS.md` so Claude Code and Codex read identical instructions.
+
+When a principle here and a project-specific rule above disagree, **the project-specific rule wins** — this codebase has hard contracts (CAN v3, lifecycles, FTTI budgets, single-ownership) that are not negotiable for the sake of "simplicity."
+
+@AGENTS.md

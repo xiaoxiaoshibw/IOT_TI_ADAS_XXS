@@ -12,6 +12,13 @@
 
 namespace adas::planning {
 
+inline int guarded_target_lane(int requested, bool left_available,
+                               bool right_available) {
+  if (requested < 0 && !left_available) return 0;
+  if (requested > 0 && !right_available) return 0;
+  return requested;
+}
+
 struct PlannerParams {
   double horizon_s{8.0};           // 时间视界
   double min_length_m{30.0};       // 轨迹最短长度

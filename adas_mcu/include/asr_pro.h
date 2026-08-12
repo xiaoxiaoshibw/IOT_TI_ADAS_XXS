@@ -53,14 +53,6 @@ void AsrPro_sendByte(uint16_t data);
 /* 是否收到过合法帧（用于状态展示）。 */
 bool AsrPro_isPresent(void);
 
-/* 调试 accessor：累计字节/帧头/帧数、最近命令码、解析状态机编号。
- * OLED2 DBG 页用这些字段定位 ASR-PRO 无响应的具体原因。 */
-uint16_t AsrPro_byteCount(void);
-uint16_t AsrPro_hdr0Count(void);
-uint16_t AsrPro_frameCount(void);
-uint16_t AsrPro_lastCmd(void);
-uint16_t AsrPro_rxState(void);
-
 /* ---------- 仅 host 测试入口（tests/test_asr_parser_host.c） ---------- */
 void AsrPro_resetForTest(void);
 /* 直接灌一个字节到帧解析状态机。仅 host 测试使用；其它代码应通过

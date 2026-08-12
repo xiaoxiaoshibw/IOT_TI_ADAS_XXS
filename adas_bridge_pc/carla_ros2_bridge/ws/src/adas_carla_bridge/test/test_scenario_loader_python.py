@@ -113,6 +113,16 @@ def test_runtime_loader_legacy_fallback_preserves_ids(monkeypatch):
     assert scenario["_source_file"] == ""
 
 
+def test_pedestrian_aeb_scenario_starts_crossing_with_time_margin():
+    scenario = scenario_loader.load_scenario("aeb_pedestrian")
+    pedestrian = scenario["actors"][0]
+
+    # At the nominal 15 m/s ego speed, 40 m left the pedestrian just outside
+    # the collision envelope at the crossing point. 45 m gives prediction and
+    # three-frame AEB confirmation time without changing walker realism.
+    assert pedestrian["trigger_ego_gap_m"] == pytest.approx(45.0)
+
+
 def test_runtime_loader_rejects_unsorted_actor_ids(tmp_path):
     scenario = load_scenario("dense_overtake_v1")
     scenario["actors"][0], scenario["actors"][1] = (

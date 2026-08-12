@@ -78,6 +78,7 @@ struct BehaviorInput {
   double lead_speed_mps{0.0};
   double ego_speed_mps{0.0};
   double ego_lateral_m{0.0};   // 自车相对本车道中心线横向
+  bool target_lane_available{false};  // 目标邻道存在且当前允许变道
   double now_s{0.0};
   std::vector<MapSignLite> map_signs;
   bool mrm_stop{false};

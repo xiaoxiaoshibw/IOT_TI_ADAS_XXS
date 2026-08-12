@@ -273,7 +273,17 @@ class TrajectoryPlannerNode : public rclcpp_lifecycle::LifecycleNode {
     int target_lane = 0;
     if (behavior_ && fresh(behavior_rx_time_, behavior_received_)) {
       cruise_override = behavior_->target_speed_mps;
-      target_lane = behavior_->target_lane;
+      target_lane = guarded_target_lane(
+          behavior_->target_lane, lane_->left_lane_available,
+          lane_->right_lane_available);
+      if (target_lane != behavior_->target_lane) {
+        RCLCPP_ERROR_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "拒绝不可用邻道的变道请求: requested=%d left=%d right=%d",
+            static_cast<int>(behavior_->target_lane),
+            static_cast<int>(lane_->left_lane_available),
+            static_cast<int>(lane_->right_lane_available));
+      }
     }
     const auto trajectory = global_route_enabled_ && global_route_ &&
                                     global_route_->poses.size() >= 2U

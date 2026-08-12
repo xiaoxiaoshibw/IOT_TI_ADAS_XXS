@@ -15,3 +15,14 @@ TEST(RunIdSession, StartsEmptyAndOnlyBeginRotates) {
   adas_gui::RunIdSession::end();
   EXPECT_TRUE(adas_gui::RunIdSession::current().isEmpty());
 }
+
+TEST(RunIdSession, AdoptExternalCanonicalIdForObserverMode) {
+  adas_gui::RunIdSession::end();
+  const QString external = QStringLiteral(
+      "12345678-1234-4abc-8def-1234567890ab");
+  EXPECT_TRUE(adas_gui::RunIdSession::adopt(external));
+  EXPECT_EQ(adas_gui::RunIdSession::current(), external);
+  EXPECT_FALSE(adas_gui::RunIdSession::adopt(QStringLiteral("not-a-uuid")));
+  EXPECT_EQ(adas_gui::RunIdSession::current(), external);
+  adas_gui::RunIdSession::end();
+}

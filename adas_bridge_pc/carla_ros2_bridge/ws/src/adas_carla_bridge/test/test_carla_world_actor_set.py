@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ from adas_carla_bridge.carla_world import (
     CLASS_CAR,
     CarlaWorld,
     ScriptedActor,
+    _lane_change_available,
 )
 
 
@@ -72,6 +74,46 @@ def test_profile_boundaries_are_deterministic():
     assert scripted.target_speed(0.0) == 4.0
     assert scripted.target_speed(9.999) == 4.0
     assert scripted.target_speed(10.0) == 7.0
+
+
+def test_actor_state_uses_actual_velocity_heading_for_crossing_walker():
+    actor = FakeActor(x=30.0)
+    actor.transform.location.y = 4.0
+    actor.transform.rotation.yaw = 0.0
+    actor.get_velocity = lambda: SimpleNamespace(x=0.0, y=-1.5, z=0.0)
+    world = CarlaWorld.__new__(CarlaWorld)
+
+    state = world._actor_state(actor, 2, 3)
+
+    assert state["x"] == pytest.approx(30.0)
+    assert state["y"] == pytest.approx(-4.0)
+    assert state["v"] == pytest.approx(1.5)
+    assert state["yaw"] == pytest.approx(math.pi / 2.0)
+
+
+def test_leftmost_lane_reports_no_left_lane_change():
+    leftmost = SimpleNamespace(
+        lane_change='Left', lane_id=-2,
+        get_left_lane=lambda: None)
+    assert not _lane_change_available(leftmost, 'left')
+
+
+def test_left_lane_requires_permission_driving_and_same_direction():
+    adjacent = SimpleNamespace(lane_type='Driving', lane_id=-2)
+    current = SimpleNamespace(
+        lane_change='Both', lane_id=-1,
+        get_left_lane=lambda: adjacent,
+        get_right_lane=lambda: None)
+    assert _lane_change_available(current, 'left')
+
+    current.lane_change = 'Right'
+    assert not _lane_change_available(current, 'left')
+    current.lane_change = 'Both'
+    adjacent.lane_type = 'Shoulder'
+    assert not _lane_change_available(current, 'left')
+    adjacent.lane_type = 'Driving'
+    adjacent.lane_id = 1
+    assert not _lane_change_available(current, 'left')
 
 
 def test_station_walk_uses_local_heading_across_long_curve():
@@ -184,6 +226,37 @@ def test_destroy_spawned_ticks_same_world_and_confirms_delayed_removal():
     assert owned.destroyed
     assert world.world.tick_count == 1
     assert [actor.id for actor in world.world.get_actors()] == [99]
+
+
+def test_clear_overlays_uses_carla_0916_split_clear_api():
+    calls = []
+    debug = SimpleNamespace(
+        clear_debug_shape=lambda: calls.append("shape"),
+        clear_debug_string=lambda: calls.append("string"),
+    )
+    world = CarlaWorld.__new__(CarlaWorld)
+    world.world = SimpleNamespace(debug=debug)
+    world._last_visualization_t = 12.0
+
+    world.clear_overlays()
+
+    assert calls == ["shape", "string"]
+    assert world._last_visualization_t == float("-inf")
+
+
+def test_clear_overlays_falls_back_to_legacy_clear_and_tolerates_no_api():
+    calls = []
+    world = CarlaWorld.__new__(CarlaWorld)
+    world.world = SimpleNamespace(
+        debug=SimpleNamespace(clear=lambda: calls.append("legacy")))
+    world._last_visualization_t = 12.0
+    world.clear_overlays()
+    assert calls == ["legacy"]
+
+    world.world = SimpleNamespace(debug=SimpleNamespace())
+    world._last_visualization_t = 12.0
+    world.clear_overlays()
+    assert world._last_visualization_t == float("-inf")
 
 
 def test_object_states_are_sorted_by_stable_id():

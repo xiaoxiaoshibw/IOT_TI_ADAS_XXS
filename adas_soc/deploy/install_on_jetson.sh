@@ -30,7 +30,7 @@ PROTOCOL_VERSION="${ADAS_PROTOCOL_VERSION:-3}"
 systemctl disable --now adas-hil-keeper.timer >/dev/null 2>&1 || true
 
 echo "== assemble release ${RELEASE}"
-mkdir -p "${RELEASE}" "${ROOT}/releases" /etc/adas /var/log/adas
+mkdir -p "${RELEASE}" "${ROOT}/releases" "${ROOT}/bin" /etc/adas /var/log/adas
 # 工作区开发期使用 --symlink-install；发布目录必须解引用这些链接，
 # 否则完整性清单既无法覆盖源码外链接，也不能形成可独立回滚的发布物。
 rsync -aL --delete "${WORKSPACE}/install/" "${RELEASE}/install/"
@@ -75,6 +75,9 @@ if [ ! -f /etc/adas/adas-hil.env ]; then
 fi
 cp "${DEPLOY_DIR}/systemd/cyclonedds_orin.xml" /etc/adas/
 cp "${DEPLOY_DIR}/systemd/adas-can.service" /etc/systemd/system/
+cp "${DEPLOY_DIR}/systemd/adas-can-name.service" /etc/systemd/system/
+install -m 0755 "${DEPLOY_TOOLS}/name_can_interfaces.sh" \
+  "${ROOT}/bin/name_can_interfaces.sh"
 cp "${DEPLOY_DIR}/systemd/adas-hil.service" /etc/systemd/system/
 cp "${DEPLOY_DIR}/systemd/adas-hil-keeper.service" /etc/systemd/system/
 cp "${DEPLOY_DIR}/systemd/adas-hil-keeper.timer" /etc/systemd/system/
@@ -89,6 +92,7 @@ python3 "${RELEASE}/tools/deploy_release.py" --root "${ROOT}" activate \
   "${VERSION}" --protocol-version "${PROTOCOL_VERSION}"
 
 systemctl enable adas-hil.service
+systemctl enable adas-can-name.service
 systemctl enable --now adas-hil-keeper.timer
 # start 对已运行服务是 no-op，会留下指向旧 release 的进程；restart 确保
 # 激活完成后真实运行的进程与 /opt/adas/current 一致。keeper 此时已启用，

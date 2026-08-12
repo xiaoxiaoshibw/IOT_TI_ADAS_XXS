@@ -11,10 +11,21 @@ from std_msgs.msg import String
 
 from adas_carla_bridge.bridge_node import (
     CarlaBridgeNode,
+    _spin_executor,
     build_arg_parser,
     main,
     validate_actuation_values,
 )
+
+
+def test_executor_external_shutdown_is_a_clean_exit():
+    from rclpy.executors import ExternalShutdownException
+
+    class ShuttingDownExecutor:
+        def spin(self):
+            raise ExternalShutdownException()
+
+    _spin_executor(ShuttingDownExecutor())
 
 
 def test_scenario_cli_accepts_file_seed_and_expected_count():

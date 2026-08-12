@@ -82,5 +82,18 @@ class RunIdPropagationTest(unittest.TestCase):
             str(uuid.uuid4()).upper()))
 
 
+class CarlaInvokerContractTest(unittest.TestCase):
+    def test_parse_json_tail_ignores_diagnostics(self):
+        payload = orchestrator.parse_json_tail(
+            '[invoker] supervisor unavailable\n'
+            '{"action":"start","state":"started","pid":42}\n')
+        self.assertEqual(payload['state'], 'started')
+        self.assertEqual(payload['pid'], 42)
+
+    def test_parse_json_tail_rejects_missing_result(self):
+        with self.assertRaisesRegex(ValueError, 'did not emit'):
+            orchestrator.parse_json_tail('diagnostic only\n')
+
+
 if __name__ == '__main__':
     unittest.main()

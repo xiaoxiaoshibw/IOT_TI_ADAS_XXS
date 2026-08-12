@@ -456,6 +456,13 @@ TEST(TrajectoryPlannerCore, NoThreeMetersFloor) {
   EXPECT_GT(max_v, 5.0) << "硬 3 m/s 地板已被删除，最大速度应反映真实曲率 cap";
 }
 
+TEST(TrajectoryPlannerCore, LaneChangeGuardRejectsMissingLeftLane) {
+  EXPECT_EQ(ap::guarded_target_lane(-1, false, true), 0);
+  EXPECT_EQ(ap::guarded_target_lane(-1, true, false), -1);
+  EXPECT_EQ(ap::guarded_target_lane(1, true, false), 0);
+  EXPECT_EQ(ap::guarded_target_lane(0, false, false), 0);
+}
+
 TEST(TrajectoryPlannerCore, LateralAvoidanceDisabledPreservesReference) {
   ap::TrajectoryPlannerCore core(default_params());
   const auto route = straight_route(80);

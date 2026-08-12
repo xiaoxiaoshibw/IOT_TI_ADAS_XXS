@@ -6,3 +6,5 @@ float64 lateral_offset          # 自车相对车道中心线横向偏移 [m]
 float64 heading_error           # 自车航向 - 车道切向 [rad]
 float64 curvature               # 车道中心线曲率 [1/m]
 float64 lane_width              # 车道宽 [m]
+bool left_lane_available        # 左侧存在同向 Driving 车道且当前允许变道
+bool right_lane_available       # 右侧存在同向 Driving 车道且当前允许变道

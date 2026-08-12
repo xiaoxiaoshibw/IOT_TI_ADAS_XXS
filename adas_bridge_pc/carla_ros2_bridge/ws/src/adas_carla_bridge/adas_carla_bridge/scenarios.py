@@ -74,11 +74,11 @@ SCENARIOS = {
             # 对称穿越到对侧车道；JSON 直读时可显式覆写。
             # SIL overlay 同样按 -start_lateral_m 推导（scenario_overlay.py:153-154）。
             'end_lateral_m': 6.0,
-            'trigger_ego_gap_m': 40.0,
+            'trigger_ego_gap_m': 45.0,
             'speed_mps': 1.5,
         },
         'notes': [
-            '自车逼近 40m 时行人从右侧横穿到对侧车道',
+            '自车逼近 45m 时行人从右侧横穿到对侧车道',
             '观察点：object_tracker 上报 CLASS_PEDESTRIAN，AEB 紧急制动',
         ],
     },

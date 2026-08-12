@@ -67,7 +67,7 @@ def is_canonical_uuid_v4(value):
 
 
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
@@ -132,6 +132,14 @@ VALID_RECOVERY_FRAMES = 3
 # 下界为 2 s，足以区分短暂阻塞与真实断流）。
 def _default_freshness_timeout_s(stale_timeout_s: float) -> float:
     return max(1.0, 4.0 * float(stale_timeout_s))
+
+
+def _spin_executor(executor):
+    """Spin until normal ROS shutdown without leaking a thread traceback."""
+    try:
+        executor.spin()
+    except ExternalShutdownException:
+        pass
 
 
 def validate_actuation_values(throttle, brake, steer):
@@ -629,6 +637,8 @@ class CarlaBridgeNode(Node):
         lane.heading_error = float(ls['heading_error'])
         lane.curvature = float(ls['curvature'])
         lane.lane_width = float(ls['lane_width'])
+        lane.left_lane_available = bool(ls['left_lane_available'])
+        lane.right_lane_available = bool(ls['right_lane_available'])
         self.pub_lane.publish(lane)
 
     def _publish_objects(self):
@@ -814,6 +824,7 @@ def main(argv=None):
     world = None
     node = None
     executor = None
+    spin_thread = None
     exit_code = 0
     try:
         world = CarlaWorld(
@@ -834,7 +845,7 @@ def main(argv=None):
         executor = SingleThreadedExecutor()
         executor.add_node(node)
         spin_thread = threading.Thread(
-            target=executor.spin, name='ros-spin', daemon=True)
+            target=_spin_executor, args=(executor,), name='ros-spin', daemon=True)
         spin_thread.start()
         carla_loop(node, world, args, scenario)
     except KeyboardInterrupt:
@@ -847,6 +858,8 @@ def main(argv=None):
             world.close()
         if executor is not None:
             executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
         if node is not None:
             node.close()
             node.destroy_node()

@@ -19,12 +19,12 @@
       "initial_speed_mps": 1.5,
       "accel_limit_mps2": 3.0,
       "speed_profile": [[0.0, 1.5]],
-      "trigger_ego_gap_m": 40.0,
+      "trigger_ego_gap_m": 45.0,
       "crossing_speed_mps": 1.5
     }
   ],
   "notes": [
-    "自车逼近 40m 时行人从右侧横穿到对侧车道",
+    "自车逼近 45m 时行人从右侧横穿到对侧车道",
     "观察点：object_tracker 上报 CLASS_PEDESTRIAN，AEB 紧急制动"
   ]
 }

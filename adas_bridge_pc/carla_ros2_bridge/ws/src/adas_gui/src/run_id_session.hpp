@@ -26,6 +26,14 @@ class RunIdSession {
     return id;
   }
 
+  // 外部编排器启动 GUI 观察者时，采纳已由编排器生成的
+  // 会话 ID。非规范 UUID v4 必须拒绝，且不改写现有会话。
+  static bool adopt(const QString& id) {
+    if (!is_canonical_uuid_v4(id)) return false;
+    current_ = id;
+    return true;
+  }
+
   // 显式结束当前会话。后续 current() 返回空串，消费者视为会话结束。
   static void end() {
     current_.clear();

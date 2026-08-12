@@ -13,6 +13,7 @@
 #include "fa.hpp"
 #include "main_window.hpp"
 #include "ros_bridge.hpp"
+#include "run_id_session.hpp"
 #include "single_instance.hpp"
 #include "theme.hpp"
 
@@ -109,6 +110,7 @@ int main(int argc, char** argv) {
   // 主窗口栅格化成 PNG（offscreen 平台 + QWidget::grab）。正常启动走默认
   // 分支，不破坏 ros2 run adas_gui adas_gui 的入参透传。
   QString screenshot_path;
+  QString external_run_id;
   int screenshot_delay_ms = 1500;
   bool autostart = false;
   for (int i = 1; i < argc; ++i) {
@@ -127,7 +129,16 @@ int main(int argc, char** argv) {
       ++i;  // 已在 rclcpp::init 前消费；保留 argv 不影响 Qt/ROS 参数解析。
     } else if (arg == QStringLiteral("--autostart")) {
       autostart = true;
+    } else if (arg == QStringLiteral("--run-id") && i + 1 < argc) {
+      external_run_id = QString::fromLocal8Bit(argv[++i]);
     }
+  }
+
+  if (!external_run_id.isEmpty() &&
+      !adas_gui::RunIdSession::adopt(external_run_id)) {
+    std::cerr << "adas_gui: --run-id must be a canonical lowercase UUID v4"
+              << std::endl;
+    return 2;
   }
 
   rclcpp::init(argc, argv);

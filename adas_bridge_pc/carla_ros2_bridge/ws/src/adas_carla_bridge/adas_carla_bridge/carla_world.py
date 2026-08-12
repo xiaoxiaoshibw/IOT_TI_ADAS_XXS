@@ -113,6 +113,27 @@ def _lane_reference_valid(lateral_offset, heading_error):
         abs(lateral_offset) > LANE_INVALID_LATERAL_OFFSET_M)
 
 
+def _lane_change_available(waypoint, side):
+    """Whether CARLA exposes a legal, same-direction Driving neighbour."""
+    if waypoint is None or side not in ('left', 'right'):
+        return False
+    permission = str(getattr(waypoint, 'lane_change', 'NONE'))
+    allowed = ('Left', 'Both') if side == 'left' else ('Right', 'Both')
+    if permission not in allowed:
+        return False
+    try:
+        adjacent = (waypoint.get_left_lane() if side == 'left'
+                    else waypoint.get_right_lane())
+    except (AttributeError, RuntimeError):
+        return False
+    if adjacent is None or str(getattr(adjacent, 'lane_type', '')) != 'Driving':
+        return False
+    current_id = int(getattr(waypoint, 'lane_id', 0))
+    adjacent_id = int(getattr(adjacent, 'lane_id', 0))
+    return current_id != 0 and adjacent_id != 0 and (
+        (current_id > 0) == (adjacent_id > 0))
+
+
 @dataclass
 class ScriptedActor:
     """One actor owned by this CarlaWorld run and its deterministic state."""
@@ -573,14 +594,25 @@ class CarlaWorld:
 
     def _actor_state(self, actor, obj_id, cls):
         tf = actor.get_transform()
-        yaw_c = math.radians(float(tf.rotation.yaw))
+        velocity = actor.get_velocity()
+        speed = math.sqrt(
+            float(velocity.x) ** 2 + float(velocity.y) ** 2 +
+            float(velocity.z) ** 2)
+        # WalkerControl.direction does not reliably rotate the walker's
+        # transform.  Publish the actual velocity heading so AEB can predict
+        # a crossing pedestrian instead of treating it as road-aligned.
+        if (cls == CLASS_PEDESTRIAN and
+                math.hypot(float(velocity.x), float(velocity.y)) > 1e-3):
+            yaw_ros = math.atan2(-float(velocity.y), float(velocity.x))
+        else:
+            yaw_ros = -math.radians(float(tf.rotation.yaw))
         return {
             'id': obj_id,
             'cls': cls,
             'x': float(tf.location.x),
             'y': -float(tf.location.y),
-            'yaw': -yaw_c,
-            'v': _speed(actor),
+            'yaw': yaw_ros,
+            'v': speed,
             'dims': self._actor_dims(actor),
         }
 
@@ -632,6 +664,8 @@ class CarlaWorld:
                 'heading_error': heading_error,
                 'curvature': self._ref_curvature(ref_wp) if lane_valid else 0.0,
                 'lane_width': float(ref_wp.lane_width),
+                'left_lane_available': _lane_change_available(ref_wp, 'left'),
+                'right_lane_available': _lane_change_available(ref_wp, 'right'),
             },
             'objects': [],
         }
@@ -865,13 +899,24 @@ class CarlaWorld:
     def clear_overlays(self):
         """P0.D: 幂等清空所有由本桥绘制的 debug primitive。
 
-        CARLA 没有按"actor 全部销毁"的清屏 API，调用 world.debug.clear() 才
-        能一次性清掉所有持久调试元素。bridge 停止或 session 结束时必须调用，
-        避免旧会话的 goal/route 残留在 CARLA 视图中。"""
+        CARLA 0.9.16 将 shape/string 分别清理；旧版本可能只有
+        ``clear()``。所有 overlay 本身也使用短 lifetime，因此完全没有
+        清理 API 时可安全等待自然过期。"""
         try:
             if getattr(self, 'world', None) is not None:
-                self.world.debug.clear()
-        except RuntimeError:
+                debug = self.world.debug
+                clear_shape = getattr(debug, 'clear_debug_shape', None)
+                clear_string = getattr(debug, 'clear_debug_string', None)
+                if callable(clear_shape) or callable(clear_string):
+                    if callable(clear_shape):
+                        clear_shape()
+                    if callable(clear_string):
+                        clear_string()
+                else:
+                    clear_all = getattr(debug, 'clear', None)
+                    if callable(clear_all):
+                        clear_all()
+        except (AttributeError, RuntimeError):
             # 已销毁或无渲染时静默；幂等是本方法的硬性约束。
             pass
         finally:

@@ -85,6 +85,8 @@ class Checker(Node):
         self.times = defaultdict(list)
         self.last = {}
         self.odom_samples = []
+        self.lane_samples = []
+        self.behavior_samples = []
         self.object_frames = defaultdict(list)
         self.fault_acks = {}
         sensor = QoSProfile(depth=20)
@@ -118,15 +120,22 @@ class Checker(Node):
         self.cancel = self.create_client(CancelNavigation, '/adas/navigation/cancel_goal')
 
     def on_topic(self, name, msg):
-        self.times[name].append(time.monotonic())
+        stamp = time.monotonic()
+        self.times[name].append(stamp)
         self.last[name] = msg
         if name == '/adas/localization/kinematic_state':
             self.odom_samples.append((
-                time.monotonic(), float(msg.pose.pose.position.x),
+                stamp, float(msg.pose.pose.position.x),
                 float(msg.pose.pose.position.y), float(msg.twist.twist.linear.x)))
+        elif name == '/adas/perception/lane_state':
+            self.lane_samples.append((
+                stamp, float(msg.lateral_offset), bool(msg.left_lane_available),
+                bool(msg.right_lane_available)))
+        elif name == '/adas/planning/behavior':
+            self.behavior_samples.append((stamp, int(msg.target_lane)))
         elif name in ('/adas/perception/objects_raw', '/adas/perception/objects'):
             self.object_frames[name].append((
-                time.monotonic(), tuple(int(obj.id) for obj in msg.objects),
+                stamp, tuple(int(obj.id) for obj in msg.objects),
                 int(msg.primary_lead_id),
                 tuple((float(obj.pose.pose.position.x),
                        float(obj.pose.pose.position.y)) for obj in msg.objects)))
@@ -185,6 +194,8 @@ def main():
     parser.add_argument('--carla-host', default='127.0.0.1')
     parser.add_argument('--carla-port', type=int, default=2000)
     parser.add_argument('--scenario', default='baseline')
+    parser.add_argument('--run-id', required=True,
+                        help='canonical UUID v4 shared by GUI/bridge/planner')
     parser.add_argument('--scenario-file', default='')
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
@@ -262,8 +273,11 @@ def main():
             p95_gap = (sorted_gaps[min(len(sorted_gaps) - 1,
                                         int(len(sorted_gaps) * 0.95))]
                        if sorted_gaps else float('inf'))
-            continuous_objects = (len(raw_frames) >= 20 and average_hz >= 30.0 and
-                                  p95_gap <= 0.1 and max_gap <= 0.75)
+            # bridge_node publishes lane/object truth on its documented 50 ms
+            # slow timer (20 Hz). Judge sustained throughput separately from
+            # bounded scheduler jitter and real stalls.
+            continuous_objects = (len(raw_frames) >= 20 and average_hz >= 18.0 and
+                                  p95_gap <= 0.25 and max_gap <= 0.75)
             results.add('Scenario object continuity', continuous_objects,
                         'frames=%d average_hz=%.1f p95_gap_s=%.3f max_gap_s=%.3f' % (
                             len(raw_frames), average_hz, p95_gap, max_gap))
@@ -300,6 +314,31 @@ def main():
                          'unsupported declarations=%s' % declared_windows))
 
         if args.carla:
+            lane_samples = [sample for sample in node.lane_samples if sample[0] >= start]
+            behavior_samples = [sample for sample in node.behavior_samples
+                                if sample[0] >= start]
+            invalid_requests = 0
+            for behavior_stamp, target_lane in behavior_samples:
+                preceding = [sample for sample in lane_samples
+                             if 0.0 <= behavior_stamp - sample[0] <= 0.2]
+                if not preceding or target_lane == 0:
+                    continue
+                lane = preceding[-1]
+                invalid_requests += int(
+                    (target_lane < 0 and not lane[2]) or
+                    (target_lane > 0 and not lane[3]))
+            max_lateral = max((abs(sample[1]) for sample in lane_samples), default=math.inf)
+            lane_change_requested = any(target_lane != 0
+                                        for _, target_lane in behavior_samples)
+            boundary_ok = bool(lane_samples and behavior_samples and
+                               invalid_requests == 0)
+            results.add('Lane boundary guard', boundary_ok,
+                        ('invalid_requests=%d lane_change_requested=%s '
+                         'max_abs_lateral_m=%.3f samples=%d') % (
+                            invalid_requests, lane_change_requested,
+                            max_lateral, len(lane_samples)))
+
+        if args.carla:
             carla_ok = False
             carla_detail = ''
             try:
@@ -310,9 +349,11 @@ def main():
                 map_name = world.get_map().name
                 actors = world.get_actors()
                 heroes = [actor for actor in actors
-                          if actor.attributes.get('role_name') == 'hero']
+                          if actor.attributes.get('role_name') == 'hero' or
+                          actor.attributes.get('role_name', '').endswith(':ego')]
                 leads = [actor for actor in actors
-                         if actor.attributes.get('role_name') == 'lead']
+                         if actor.attributes.get('role_name') == 'lead' or
+                         ':actor:' in actor.attributes.get('role_name', '')]
                 needs_lead = args.scenario in ('acc', 'aeb', 'overtake')
                 actor_ok = len(heroes) == 1 and (not needs_lead or len(leads) >= 1)
 
@@ -368,18 +409,45 @@ def main():
             nav_ok = services
             detail = []
             if services:
+                goal_x, goal_y = 100.0, 0.0
+                if args.carla:
+                    try:
+                        import carla
+                        # Reuse the actor/world snapshot already proven healthy
+                        # by the dynamics check. A second Client.get_actors()
+                        # can observe a transient empty registry at a sync tick
+                        # boundary even though the run-scoped ego is alive.
+                        if len(heroes) != 1:
+                            raise RuntimeError('expected exactly one run-scoped ego')
+                        waypoint = world.get_map().get_waypoint(
+                            heroes[0].get_location(), project_to_road=True,
+                            lane_type=carla.LaneType.Driving)
+                        candidates = waypoint.next(120.0) if waypoint else []
+                        if not candidates:
+                            raise RuntimeError('no reachable waypoint 120m ahead')
+                        target = sorted(
+                            candidates,
+                            key=lambda item: (item.road_id, item.section_id,
+                                              item.lane_id))[0].transform.location
+                        goal_x, goal_y = float(target.x), -float(target.y)
+                    except Exception as error:
+                        nav_ok = False
+                        detail.append('goal_resolution=%r' % error)
                 request_id = str(uuid.uuid4())
                 req = SetNavigationGoal.Request()
                 req.request_id = request_id
+                req.run_id = args.run_id
                 req.goal.header.frame_id = 'map'
-                req.goal.pose.position.x = 100.0
+                req.goal.pose.position.x = goal_x
+                req.goal.pose.position.y = goal_y
                 req.goal.pose.orientation.w = 1.0
                 first = wait_future(node.goal.call_async(req), 5.0)
                 duplicate = wait_future(node.goal.call_async(req), 5.0)
                 second_req = SetNavigationGoal.Request()
                 second_req.request_id = str(uuid.uuid4())
+                second_req.run_id = args.run_id
                 second_req.goal = req.goal
-                second_req.goal.pose.position.x = 120.0
+                second_req.goal.pose.position.x = goal_x + 5.0
                 second = wait_future(node.goal.call_async(second_req), 5.0)
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
@@ -392,6 +460,7 @@ def main():
                 status = node.last.get('/adas/navigation/status')
                 cancel_req = CancelNavigation.Request()
                 cancel_req.request_id = str(uuid.uuid4())
+                cancel_req.run_id = args.run_id
                 cancel_req.goal_id = first.goal_id if first else ''
                 canceled = wait_future(node.cancel.call_async(cancel_req), 5.0)
                 deadline = time.monotonic() + 3.0

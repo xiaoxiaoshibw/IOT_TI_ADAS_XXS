@@ -126,7 +126,7 @@ BehaviorOutput BehaviorCore::update(const BehaviorInput& in) {
       }
       exit_count_ = 0;
       // 慢车持续 → 准备超车
-      if (params_.overtake_enabled && lead_slow) {
+      if (params_.overtake_enabled && in.target_lane_available && lead_slow) {
         if (++slow_count_ >= params_.overtake_wait_frames) {
           state_ = BehaviorKind::kOvertakeWait;
           clear_count_ = 0;
@@ -137,6 +137,13 @@ BehaviorOutput BehaviorCore::update(const BehaviorInput& in) {
       break;
 
     case BehaviorKind::kOvertakeWait:
+      // 地图/车道线明确表明目标邻道不存在或不允许变道：
+      // 立即放弃超车，不能只凭"邻道无目标"就把路肩当车道。
+      if (!in.target_lane_available) {
+        state_ = BehaviorKind::kFollowLead;
+        slow_count_ = clear_count_ = 0;
+        break;
+      }
       // 前车恢复速度/消失 → 放弃
       if (in.primary_lead_id < 0 || !lead_slow) {
         state_ = BehaviorKind::kFollowLead;
@@ -156,6 +163,12 @@ BehaviorOutput BehaviorCore::update(const BehaviorInput& in) {
       break;
 
     case BehaviorKind::kOvertakeActive: {
+      if (!in.target_lane_available &&
+          std::fabs(in.ego_lateral_m) < params_.abort_lat_limit_m) {
+        state_ = BehaviorKind::kFollowLead;
+        slow_count_ = 0;
+        break;
+      }
       // 中止条件：邻道出现危险目标且自车仍基本在本车道内 → 退回跟车
       if (!adjacent_lane_clear(in) &&
           std::fabs(in.ego_lateral_m) < params_.abort_lat_limit_m) {

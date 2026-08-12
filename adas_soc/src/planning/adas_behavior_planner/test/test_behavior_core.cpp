@@ -14,6 +14,7 @@ ap::BehaviorInput lead_at(double gap, double v_lead = 10.0) {
   in.lead_gap_m = gap;
   in.lead_speed_mps = v_lead;
   in.ego_speed_mps = 15.0;
+  in.target_lane_available = true;
   in.objects.push_back(ap::ObjectLite{1, gap, 0.0, v_lead});
   return in;
 }
@@ -132,6 +133,15 @@ TEST(BehaviorCore, PassedLeadTriggersReturnAndFinish) {
   // 回到本车道中心 → 完成
   in.ego_lateral_m = 0.3;
   EXPECT_EQ(core.update(in).state, ap::BehaviorKind::kLaneFollow);
+}
+
+TEST(BehaviorCore, MissingLeftLaneNeverStartsOvertake) {
+  ap::BehaviorCore core(fast_params());
+  auto slow = lead_at(25.0, 5.0);
+  slow.target_lane_available = false;
+  for (int i = 0; i < 20; ++i) core.update(slow);
+  EXPECT_EQ(core.state(), ap::BehaviorKind::kFollowLead);
+  EXPECT_EQ(core.update(slow).target_lane, 0);
 }
 
 ap::MapSignLite stop_sign(double distance_m) {

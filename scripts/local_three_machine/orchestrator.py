@@ -286,6 +286,18 @@ def find_carla_root(explicit):
     return None
 
 
+def parse_json_tail(output):
+    """Return the invoker's final JSON object, ignoring diagnostic lines."""
+    for line in reversed((output or '').splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError('CARLA invoker did not emit a JSON result')
+
+
 def wait_carla_ready(process, timeout=90.0):
     try:
         import carla
@@ -370,6 +382,9 @@ def main():
 
     overlay = ('' if args.scenario_file or args.scenario == 'baseline'
                else args.scenario + '_scenario.yaml')
+    carla_started_by_run = False
+    carla_root = None
+    invoker = None
     try:
         mcu = run.start('mcu', [
             sys.executable, str(ROOT / 'adas_mcu/tools/mcu_sil_runner.py'),
@@ -390,26 +405,32 @@ def main():
             carla_command = [
                 sys.executable, str(invoker), 'start',
                 '--scenario', args.scenario, '--town', 'Town04',
-                '--quality-level', 'Low', '--carla-root', str(carla_root),
-                '--timeout', '60',
+                '--quality-level', 'Low', '--timeout', '60',
             ]
             # A normal --gui run keeps the native CARLA window visible. CI and
             # no-GUI runs still execute full CARLA physics/rendering offscreen.
             if not args.gui:
                 carla_command.append('--legacy')  # invoker 直连模式,简化 dev box
-            # invoker 自己 daemonizes CARLA(start_new_session=True),orchestrator
-            # 进程退出后 CARLA 仍存活。记录 PID 到 .pid 文件便于 cleanup。
-            invoker_proc = run.start(
-                'carla', carla_command, cwd=ROOT,
-                remove_env=('LD_LIBRARY_PATH', 'PYTHONPATH', 'QT_PLUGIN_PATH',
-                            'QML2_IMPORT_PATH'))
-            # 等 invoker 完成 readiness 校验并返回 JSON 状态
+            # invoker 是一次性命令，CARLA 服务器会使用独立进程组继续
+            # 运行。因此不能把 invoker Popen 当成长驻的 managed role。
+            invoker_env = os.environ.copy()
+            invoker_env['CARLA_ROOT'] = str(carla_root)
+            for name in ('LD_LIBRARY_PATH', 'PYTHONPATH', 'QT_PLUGIN_PATH',
+                         'QML2_IMPORT_PATH'):
+                invoker_env.pop(name, None)
             try:
-                stdout, _ = invoker_proc.communicate(timeout=120)
-                payload = json.loads(stdout.strip().splitlines()[-1])
+                invoker_result = subprocess.run(
+                    carla_command, cwd=ROOT, env=invoker_env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=120)
+                (run.log_dir / 'carla.log').write_text(
+                    invoker_result.stdout, encoding='utf-8')
+                payload = parse_json_tail(invoker_result.stdout)
                 carla_ready = payload.get('state') in ('started', 'already_running')
+                carla_ready &= invoker_result.returncode == 0
+                carla_started_by_run = payload.get('state') == 'started'
                 carla_detail = json.dumps(payload, ensure_ascii=False)
-            except (subprocess.TimeoutExpired, json.JSONDecodeError, IndexError) as exc:
+            except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
                 carla_ready, carla_detail = False, f'invoker 启动失败: {exc}'
             run.add_check('CARLA server', carla_ready, carla_detail)
             if not carla_ready:
@@ -439,7 +460,8 @@ def main():
             pc = run.start('pc', pc_command)
             orin_command = [
                 'ros2', 'launch', 'adas_launch',
-                'local_three_machine_carla.launch.py']
+                'local_three_machine_carla.launch.py',
+                'scenario_id:=' + args.scenario_metadata['id']]
         else:
             pc_command = [
                 sys.executable,
@@ -467,7 +489,7 @@ def main():
             # Bypass start_gui.sh: that production-HIL entry intentionally binds
             # CycloneDDS to the physical Orin link. Local HIL keeps the inherited
             # RMW default and only uses the explicitly scoped domain 145.
-            gui_command = [str(gui_binary)]
+            gui_command = [str(gui_binary), '--run-id', args.run_id]
             gui_env = {
                 'ADAS_LOCAL_THREE_MACHINE': '1',
                 'XDG_CONFIG_HOME': str(run.log_dir / 'gui_config'),
@@ -498,7 +520,7 @@ def main():
             duplicate_gui_rejected = duplicate.returncode == 2
             (run.log_dir / 'gui_duplicate.log').write_text(
                 duplicate.stdout, encoding='utf-8')
-        managed_roles = ['mcu', 'pc', 'orin'] + (['carla'] if args.carla else [])
+        managed_roles = ['mcu', 'pc', 'orin']
         process_ok = run.wait_alive(managed_roles, timeout=2.0)
         run.add_check('PC process', run.alive('pc'), 'pid=%d' % pc.pid)
         run.add_check('MCU host runner', run.alive('mcu'), 'pid=%d' % mcu.pid)
@@ -529,7 +551,9 @@ def main():
             command = [
                 sys.executable, str(ROOT / 'scripts/local_three_machine/checker.py'),
                 '--interface', 'vcan0', '--report', str(run.report_path),
-                '--mcu-pid', str(mcu.pid), '--scenario', args.scenario]
+                '--mcu-pid', str(mcu.pid), '--scenario',
+                args.scenario_metadata['id'],
+                '--run-id', args.run_id]
             if args.scenario_file:
                 command += ['--scenario-file', args.scenario_file,
                             '--seed', str(args.scenario_metadata['seed'])]
@@ -591,6 +615,7 @@ def main():
                 pc_recovered = probe.returncode == 0 and pc_recovery.poll() is None
                 recovery_detail.append('pc_recovered=' + probe.stdout.strip())
                 recovery_ok = planner_down and planner_recovered and pc_down and pc_recovered
+                managed_roles = ['mcu', 'pc_recovery', 'orin_recovery']
                 run.add_check('Timeout recovery', recovery_ok, '; '.join(recovery_detail))
                 if not recovery_ok:
                     rc = 1
@@ -617,6 +642,15 @@ def main():
                 if not all(run.alive(role) for role in managed_roles):
                     rc = 1
                     break
+                if args.carla:
+                    try:
+                        import carla
+                        client = carla.Client('127.0.0.1', 2000)
+                        client.set_timeout(1.0)
+                        client.get_world()
+                    except (ImportError, RuntimeError):
+                        rc = 1
+                        break
                 time.sleep(0.2)
         elif not args.check or args.keep_running:
             print('MIL local simulated-hardware loop running; Ctrl-C to stop', flush=True)
@@ -634,6 +668,23 @@ def main():
         # transfers ownership. Ctrl-C, timeout, launch failure and normal exit
         # must all tear down exactly the process groups created by this run.
         run.cleanup()
+        if args.carla and carla_started_by_run and invoker is not None:
+            stop_env = os.environ.copy()
+            if carla_root is not None:
+                stop_env['CARLA_ROOT'] = str(carla_root)
+            try:
+                stopped = subprocess.run(
+                    [sys.executable, str(invoker), 'stop', '--legacy',
+                     '--shutdown-timeout', '10'],
+                    cwd=ROOT, env=stop_env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, timeout=20)
+                payload = parse_json_tail(stopped.stdout)
+                stop_ok = (stopped.returncode == 0 and
+                           payload.get('state') in ('stopped', 'already_stopped'))
+                run.add_check('CARLA cleanup', stop_ok,
+                              json.dumps(payload, ensure_ascii=False))
+            except (subprocess.TimeoutExpired, OSError, ValueError) as error:
+                run.add_check('CARLA cleanup', False, str(error))
 
 
 if __name__ == '__main__':

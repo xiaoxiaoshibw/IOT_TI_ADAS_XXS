@@ -257,6 +257,9 @@ class SimVehicleNode : public rclcpp::Node {
     lane.heading_error = ls.heading_error;
     lane.curvature = ls.curvature;
     lane.lane_width = ls.lane_width;
+    // SIL 轨道是无边界的抽象双向邻道；CARLA/实车由感知按地图给出。
+    lane.left_lane_available = true;
+    lane.right_lane_available = true;
     pub_lane_->publish(lane);
 
     adas_msgs::msg::SteeringReport steer;
